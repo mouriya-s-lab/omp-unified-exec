@@ -181,6 +181,14 @@ test("codemode fix registers once at session start, with only an environment opt
 	}
 });
 
+test("codemode fix stays off on a host without Pi's codemode factory", async () => {
+	const pi = fakePi();
+	registerCompactCodemode(pi.api, {}, null);
+	await pi.start();
+	assert.equal(pi.tools.length, 0);
+	assert.deepEqual(pi.notes, []);
+});
+
 test("codemode fix reports lost precedence instead of claiming to be active", async () => {
 	const pi = fakePi("builtin:codemode");
 	registerCompactCodemode(pi.api, {});
