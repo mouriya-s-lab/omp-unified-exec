@@ -1,12 +1,10 @@
 {
 	"name": "omp-unified-exec",
 	"version": "0.12.2",
-	"description": "Codex-style unified_exec for omp (oh-my-pi), forked from pi-unified-exec: long-lived shell sessions the LLM polls and drives with write_stdin (Ctrl-C, arrow keys, PTY, REPLs, ssh, dev servers). Full output logged to disk.",
+	"description": "Codex-style unified_exec for pi: long-lived shell sessions the LLM polls and drives with write_stdin (Ctrl-C, arrow keys, PTY, REPLs, ssh, dev servers). Full output logged to disk.",
 	"keywords": [
 		"pi-package",
 		"pi-extension",
-		"omp",
-		"oh-my-pi",
 		"codex",
 		"unified-exec",
 		"bash",
@@ -16,9 +14,9 @@
 	"author": "Ren Wang <iamwrm@gmail.com>",
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/iamwrm/pi-unified-exec.git"
+		"url": "git+https://github.com/mouriya-s-lab/omp-unified-exec.git"
 	},
-	"homepage": "https://github.com/iamwrm/pi-unified-exec#readme",
+	"homepage": "https://github.com/mouriya-s-lab/omp-unified-exec#readme",
 	"type": "module",
 	"scripts": {
 		"check": "tsc --noEmit",
