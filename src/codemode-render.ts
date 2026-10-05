@@ -1,6 +1,6 @@
 /** Display-only visual-row bound for Pi's native codemode result renderer. */
+import * as codingAgent from "@earendil-works/pi-coding-agent";
 import {
-	createCodemodeExtension,
 	keyHint,
 	type CodemodeToolDetails,
 	type ExtensionAPI,
@@ -12,6 +12,14 @@ import { truncateToWidth, type Component } from "@earendil-works/pi-tui";
 export const CODEMODE_PREVIEW_ROWS = 10;
 export const COMPACT_CODEMODE_ENV = "PI_UNIFIED_EXEC_COMPACT_CODEMODE";
 type CodemodeDefinition = ToolDefinition<any, CodemodeToolDetails | undefined>;
+
+/**
+ * Pi's codemode factory. Hosts without Pi's codemode (e.g. oh-my-pi) do not export it,
+ * and a named import would then fail to link and take the whole package down; it is
+ * read off the namespace instead, and the fix stays off when it is absent.
+ */
+export type CodemodeFactory = typeof codingAgent.createCodemodeExtension;
+const host: Partial<Pick<typeof codingAgent, "createCodemodeExtension">> = codingAgent;
 
 class CompactCodemodeResult implements Component {
 	constructor(
@@ -76,10 +84,15 @@ export function defaultToolsWantCodemode(defaultTools: readonly string[] | undef
  * first extension in load order, where configured packages precede built-ins.
  * The built-in therefore remains the fallback whenever this fix is off, fails
  * or loses precedence. Loaded before the first request, so the initial tool
- * set already contains the replacement.
+ * set already contains the replacement. A host without Pi's codemode factory
+ * (e.g. oh-my-pi) has nothing to wrap, so the fix does not register at all.
  */
-export function registerCompactCodemode(pi: ExtensionAPI, env: NodeJS.ProcessEnv = process.env): void {
-	if (env[COMPACT_CODEMODE_ENV] === "0") return;
+export function registerCompactCodemode(
+	pi: ExtensionAPI,
+	env: NodeJS.ProcessEnv = process.env,
+	createCodemodeExtension: CodemodeFactory | null = host.createCodemodeExtension ?? null,
+): void {
+	if (env[COMPACT_CODEMODE_ENV] === "0" || !createCodemodeExtension) return;
 	let registered = false;
 	let degraded = false;
 	// Use Pi's public factory, not a copy of its executor/loadout/store logic.
