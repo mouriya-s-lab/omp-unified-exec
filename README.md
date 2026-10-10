@@ -952,8 +952,9 @@ runtime-native backend: `Bun.Terminal` under Bun 1.4+, or
   `@homebridge/node-pty-prebuilt-multiarch` JS payload, but the native ConPTY
   binary is fetched at install time by `prebuild-install` from the package's
   GitHub releases (TLS, homebridge org); those bytes are not covered by an npm
-  digest. The dependency is pinned exactly; stricter Node deployments can
-  vendor the prebuild or build node-pty from source.
+  digest. The dependency takes compatible updates (`^0.14.1`) so newer Node
+  releases get their prebuilds; stricter Node deployments can vendor the
+  prebuild or build node-pty from source.
 - Ctrl-C injection (`write_stdin chars="\x03"`) works in PTY mode — ConPTY
   translates it into a real console interrupt. In pipe mode it's just a byte,
   as on every platform.

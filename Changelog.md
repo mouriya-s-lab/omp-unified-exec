@@ -4,6 +4,10 @@ All notable changes to this project. **Newest entries go on top.**
 
 ## Unreleased
 
+## 0.13.1 - 2026-10-10
+
+- `tty: true` works again under Node 25 and 26. The optional `@homebridge/node-pty-prebuilt-multiarch` was pinned to `0.13.1`, which declares `node <25`. On newer Node, npm silently skips it, so every Node-hosted tty call failed with `tty: true is unavailable`. It now takes `^0.14.1` (`node >=20 <27`). Bun hosts are unaffected.
+
 ## 0.13.0 - 2026-10-10
 
 - tty sessions now return what a terminal shows ([#13](https://github.com/mouriya-s-lab/omp-unified-exec/issues/13)). Previously PTY output was the raw stream with control sequences stripped, so carriage-return progress bars, cursor-up redraws, clear-screen redraws and full-screen programs piled every frame on top of the last. Each tty session now feeds its output, in order, into a per-session `@xterm/headless` terminal of its `cols`×`rows`. Each result returns the lines that scrolled off since the last call and were not already reported, then the full current screen and the cursor position (`terminal: normal|alternate screen CxR, cursor row R col C`, plus `history_lines`). An unchanged screen reports `screen_changed: false` with no output. The emulator answers terminal queries (cursor position, device attributes) on the child's input. Only plain text and the cursor are represented; styling and the exact raw stream stay in `log_path`. Pipe sessions are unchanged.

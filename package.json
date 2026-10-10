@@ -1,6 +1,6 @@
 {
 	"name": "omp-unified-exec",
-	"version": "0.13.0",
+	"version": "0.13.1",
 	"description": "Codex-style unified_exec for pi: long-lived shell sessions the LLM polls and drives with write_stdin (Ctrl-C, arrow keys, PTY, REPLs, ssh, dev servers). Full output logged to disk.",
 	"keywords": [
 		"pi-package",
@@ -46,7 +46,7 @@
 		"typebox": "*"
 	},
 	"optionalDependencies": {
-		"@homebridge/node-pty-prebuilt-multiarch": "0.13.1"
+		"@homebridge/node-pty-prebuilt-multiarch": "^0.14.1"
 	},
 	"devDependencies": {
 		"@earendil-works/pi-coding-agent": "1.0.0",
