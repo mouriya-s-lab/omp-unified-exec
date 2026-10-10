@@ -15,6 +15,7 @@ both register `exec_command` and the other unified-exec tools.
 |---|---|---|---|
 | Package name `omp-unified-exec` | `package.json` (`name`, `repository`, `homepage`) | omp names the plugin after the package | Fork-only |
 | Compact codemode fix reads `createCodemodeExtension` off the module namespace and stays off when the host lacks it | `src/codemode-render.ts`, `tests/codemode-render.test.ts` | Since 0.12.1 a named import of Pi's codemode factory fails to link on omp, which has no codemode; the whole package then fails plugin validation | Ready as branch `fix/codemode-host-guard` (upstream `main` + this change only). Upstream restricts PRs and issues to collaborators until 2027-01-22 (its `interaction-limit-reminder.yml`), so opening the PR was rejected; open it once the limit lifts |
+| PTY package loaded through its entry file `@homebridge/node-pty-prebuilt-multiarch/lib/index.js` | `src/pty.ts` | omp is a `bun build --compile` executable; since Bun 1.3.4 such executables do not read dependency `package.json` at runtime, so the bare name ignores `main` and fails to resolve, and `tty: true` is unavailable | Fork-only |
 
 Environment variables (`PI_UNIFIED_EXEC_*`), tool names and source layout are
 unchanged, so other omp plugins that import `src/*` keep working after the path
@@ -36,5 +37,5 @@ as a conflict. Every upstream release bumps `version`, so its sync arrives as a
 review PR. Resolve it by keeping `"name": "omp-unified-exec"` and taking upstream's
 `version`.
 
-Once upstream carries the codemode change, drop its row above; the rename is the
-only customization meant to stay.
+Once upstream carries the codemode change, drop its row above; the rename and the
+PTY entry-file load are the customizations meant to stay.

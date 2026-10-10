@@ -91,8 +91,15 @@ type PtyProcess = {
  * strictly by this name — no fallback to the old package: Node's require
  * walks ancestor node_modules, so a fallback name could load an unaudited
  * native module planted in an enclosing project.
+ *
+ * Required through its entry file rather than the bare name: omp is a
+ * `bun build --compile` executable, which since Bun 1.3.4 does not read
+ * dependency package.json at runtime, so the bare name ignores `main` and
+ * fails to resolve. The package declares no `exports`, so this subpath
+ * resolves identically under Node, plain Bun and compiled Bun.
  */
 const PTY_PACKAGE = "@homebridge/node-pty-prebuilt-multiarch";
+const PTY_ENTRY = `${PTY_PACKAGE}/lib/index.js`;
 
 let ptyModule: PtyModule | null | undefined;
 let ptyLoadError: string | undefined;
@@ -112,7 +119,7 @@ function loadPty(): void {
 	try {
 		// Use createRequire so CJS-only native modules work under ESM + jiti.
 		const req = createRequire(import.meta.url);
-		ptyModule = req(PTY_PACKAGE) as PtyModule;
+		ptyModule = req(PTY_ENTRY) as PtyModule;
 		ptyLoadError = undefined;
 	} catch (err: any) {
 		ptyModule = null;
