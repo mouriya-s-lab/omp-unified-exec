@@ -3,8 +3,10 @@
  * (Tern Surface Protocol) frontend.
  *
  * A pill in omp's dock counts the stored tty sessions, like omp's own
- * agents/jobs pills. Clicking it toggles a non-modal panel floating above the
- * pill: one collapsible card per tty session with its current screen in color.
+ * agents/jobs pills. Clicking it toggles a non-modal, full-width panel along
+ * the top of the pane, short enough to leave the pill and composer uncovered:
+ * one collapsible card per tty session with its current screen as a grid,
+ * colored when it fits the panel and sideways-scrollable when it does not.
  * The panel is read-only; input still goes through write_stdin.
  *
  * Authority: each session's TerminalScreen (src/terminal-screen.ts) and the
@@ -12,9 +14,8 @@
  * them, and subscriptions only ask omp to describe again.
  *
  * omp hoists an `overlay` node found in a component's description into the
- * surface `layer` and resolves `anchor.node` against the component's own
- * keypaths (omp `packages/tui/src/native/reconcile.ts`), so the panel needs no
- * omp overlay (those take focus and render modal).
+ * surface `layer` (omp `packages/tui/src/native/reconcile.ts`), so the panel
+ * needs no omp overlay (those take focus and render modal).
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
@@ -55,10 +56,18 @@ export interface HudNode {
 
 /** The action a pill click sends to the HUD component. */
 export const TOGGLE_ACTION = "unified-exec.terminals.toggle";
-/** Keypath of the pill inside the HUD description; the panel anchors to it. */
+/** Key of the pill inside the HUD description. */
 const PILL_KEY = "pill";
 const WIDGET_KEY = "unified-exec-terminals";
 const COMMAND_MAX = 120;
+/**
+ * Cells the full-width panel loses to its inset, card padding and the session
+ * card's indent; a screen at most `surface cols - this` wide draws unwrapped.
+ */
+export const PANEL_INSET_COLS = 10;
+/** Panel height as a fraction of the pane, leaving the pill and composer clear below it. */
+const PANEL_MAX_HEIGHT = 0.6;
+const SGR = /\x1b\[[0-9;]*m/g;
 
 // ---------------- view model ----------------
 
@@ -100,7 +109,20 @@ function exitNote(state: Extract<TerminalState, { kind: "exited" }>): string {
 	return state.exitCode === null ? "exited" : `exit ${state.exitCode}`;
 }
 
-function describeCard(entry: TerminalEntry): HudNode {
+/**
+ * A terminal screen is a fixed grid; Tern's `ansi` reflows at the block width,
+ * which breaks box lines and full-width backgrounds. So a screen that fits the
+ * panel draws as `ansi` (colors kept, never wider than the panel), and a wider
+ * one as an unwrapped `code` block of the same rows, which scrolls sideways.
+ */
+function describeScreen(screen: StyledScreen, panelCols: number): HudNode {
+	if (screen.view.cols <= panelCols) {
+		return { k: "ansi", key: "screen", p: { text: screen.text, cols: screen.view.cols } };
+	}
+	return { k: "code", key: "grid", p: { text: screen.text.replace(SGR, ""), lang: "text" } };
+}
+
+function describeCard(entry: TerminalEntry, panelCols: number): HudNode {
 	const { state } = entry;
 	const head = [
 		{ t: `#${entry.id} `, s: "muted" },
@@ -119,16 +141,17 @@ function describeCard(entry: TerminalEntry): HudNode {
 			...(status === "error" ? { tone: "error" } : {}),
 			collapsible: true,
 		},
-		c: [{ k: "ansi", key: "screen", p: { text: entry.screen.text, cols: entry.screen.view.cols } }],
+		c: [describeScreen(entry.screen, panelCols)],
 	};
 }
 
 /**
  * Pure: the HUD for the given tty sessions (ascending id). The pill always
- * shows; the panel only while `open`. Empty `entries` never reach here: the
- * widget is unmounted instead.
+ * shows; the panel only while `open`. `surfaceCols` is the width in cells of
+ * the surface the panel spans. Empty `entries` never reach here: the widget is
+ * unmounted instead.
  */
-export function describeTerminalHud(entries: readonly TerminalEntry[], open: boolean): HudNode {
+export function describeTerminalHud(entries: readonly TerminalEntry[], open: boolean, surfaceCols: number): HudNode {
 	const running = entries.filter((entry) => entry.state.kind === "running").length;
 	const pill: HudNode = {
 		k: "row",
@@ -150,11 +173,20 @@ export function describeTerminalHud(entries: readonly TerminalEntry[], open: boo
 			},
 		],
 	};
+	// Full width so typical screens fit unwrapped; bounded height so the pill
+	// (to close it) and the composer stay uncovered below.
 	const panel: HudNode = {
 		k: "overlay",
 		key: "panel",
-		p: { anchor: { node: PILL_KEY, side: "above" }, size: "lg", head: "Terminals" },
-		c: [{ k: "col", key: "cards", p: { gap: "sm" }, c: entries.map(describeCard) }],
+		p: { anchor: "top", size: "full", max: { h: PANEL_MAX_HEIGHT }, head: "Terminals" },
+		c: [
+			{
+				k: "col",
+				key: "cards",
+				p: { gap: "sm" },
+				c: entries.map((entry) => describeCard(entry, surfaceCols - PANEL_INSET_COLS)),
+			},
+		],
 	};
 	return {
 		k: "row",
@@ -182,7 +214,7 @@ function isToggle(event: unknown): boolean {
  */
 class TerminalHud implements Component {
 	private open = false;
-	private described: HudNode | undefined;
+	private described: { readonly cols: number; readonly node: HudNode } | undefined;
 	/** Per tty session: exit always (the pill's spinner), screen changes while the panel is open. */
 	private readonly watches = new Map<number, { readonly exit: () => void; screen: (() => void) | undefined }>();
 
@@ -235,15 +267,16 @@ class TerminalHud implements Component {
 		this.changed();
 	}
 
-	describe(): HudNode {
-		this.described ??= describeTerminalHud(
-			this.ttySessions().flatMap((session) => {
+	/** omp passes its describe context; only the surface width is read. */
+	describe(cx: { readonly cols: number }): HudNode {
+		if (this.described?.cols !== cx.cols) {
+			const entries = this.ttySessions().flatMap((session) => {
 				const screen = session.styledScreen();
 				return screen ? [terminalEntry(session, screen)] : [];
-			}),
-			this.open,
-		);
-		return this.described;
+			});
+			this.described = { cols: cx.cols, node: describeTerminalHud(entries, this.open, cx.cols) };
+		}
+		return this.described.node;
 	}
 
 	handleNativeEvent(event: unknown): void {
