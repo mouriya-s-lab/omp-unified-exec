@@ -27,6 +27,7 @@ import { constants as osConstants } from "node:os";
 import { type AgentToolResult, type AgentToolUpdateCallback, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type, type TUnsafe } from "typebox";
 
+import { withHostPresentation } from "../fork-features/omp-presentation.ts";
 import type { CollectResult } from "./collect.ts";
 import { registerCompactCodemode } from "./codemode-render.ts";
 import { CompletionCoordinator, type OnExitPolicy, sanitizeMeta } from "./completion.ts";
@@ -887,7 +888,7 @@ function startStreaming(
 	};
 }
 
-export default function (pi: ExtensionAPI) {
+function activate(pi: ExtensionAPI) {
 	const coordinator = new CompletionCoordinator({
 		send: (message) => {
 			// If pi is idle this starts a model turn; if a run is active it is
@@ -1398,3 +1399,6 @@ export default function (pi: ExtensionAPI) {
 	// builtin:codemode. Presentation only, for every nested tool.
 	registerCompactCodemode(pi);
 }
+
+// Fork: on oh-my-pi, tools present through omp's bash renderer (fork-features/README.md).
+export default withHostPresentation(activate);
