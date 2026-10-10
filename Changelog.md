@@ -4,6 +4,11 @@ All notable changes to this project. **Newest entries go on top.**
 
 ## Unreleased
 
+## 0.14.0 - 2026-10-11
+
+- Tern terminal HUD on omp ([#17](https://github.com/mouriya-s-lab/omp-unified-exec/issues/17)). While omp renders natively in Tern and a tty session exists, a pill above the composer counts tty sessions. Clicking it opens a non-modal panel floating above the pill with one collapsible card per session: `#id`, command, running/exit state and the current screen in color, updated as output arrives without any tool call. The panel is read-only; omp's ANSI TUI, Pi hosts and model-visible results (still plain text) are unchanged.
+- `TerminalScreen.styledScreen()` re-encodes the current screen as SGR from cell attributes (no child bytes pass through) and `onChange()` reports parsed output; `ExecSession` exposes both for tty sessions. `SessionStore.subscribe()` reports membership changes. On omp, `@oh-my-pi/pi-tui/native/state` is now required alongside the bash renderer.
+
 ## 0.13.1 - 2026-10-10
 
 - `tty: true` works again under Node 25 and 26. The optional `@homebridge/node-pty-prebuilt-multiarch` was pinned to `0.13.1`, which declares `node <25`. On newer Node, npm silently skips it, so every Node-hosted tty call failed with `tty: true is unavailable`. It now takes `^0.14.1` (`node >=20 <27`). Bun hosts are unaffected.

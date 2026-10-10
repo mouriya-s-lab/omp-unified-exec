@@ -20,7 +20,7 @@ import { type CollectResult, collectOutputUntilDeadline } from "./collect.ts";
 import { HeadTailBuffer } from "./head-tail-buffer.ts";
 import { Gate, Notify } from "./notify.ts";
 import { DEFAULT_PTY_COLS, DEFAULT_PTY_ROWS, type SpawnedChild, spawnChild } from "./pty.ts";
-import { TerminalScreen, type TerminalSnapshot } from "./terminal-screen.ts";
+import { type StyledScreen, TerminalScreen, type TerminalSnapshot } from "./terminal-screen.ts";
 
 /** Default per-session output retention. */
 export const DEFAULT_HEAD_TAIL_MAX_BYTES = 1024 * 1024; // 1 MiB
@@ -296,6 +296,16 @@ export class ExecSession {
 			offset += c.length;
 		}
 		return { kind: "stream", bytes: out };
+	}
+
+	/** The tty screen with styling for live display (undefined for pipe sessions); consumes nothing. */
+	styledScreen(): StyledScreen | undefined {
+		return this.screen?.styledScreen();
+	}
+
+	/** Call `listener` whenever new tty output has been parsed into the screen; returns the unsubscribe. */
+	onScreenChange(listener: () => void): () => void {
+		return this.screen?.onChange(listener) ?? (() => {});
 	}
 
 	/**

@@ -26,6 +26,7 @@ export class SessionStore {
 	readonly maxSessions: number;
 	readonly lruProtectedCount: number;
 	private readonly onEvict: SessionStoreOptions["onEvict"];
+	private readonly membershipListeners = new Set<() => void>();
 
 	constructor(opts: SessionStoreOptions) {
 		this.maxSessions = opts.maxSessions;
@@ -51,6 +52,21 @@ export class SessionStore {
 	}
 
 	/**
+	 * Call `listener` after each change to the set of stored sessions (insert,
+	 * remove, eviction, shutdown); returns the unsubscribe. A removed session's
+	 * terminal emulator is being released by then, so listeners re-read
+	 * `values()` instead of keeping removed sessions.
+	 */
+	subscribe(listener: () => void): () => void {
+		this.membershipListeners.add(listener);
+		return () => this.membershipListeners.delete(listener);
+	}
+
+	private notifyMembership(): void {
+		for (const listener of this.membershipListeners) listener();
+	}
+
+	/**
 	 * Insert a session. Returns the evicted session, if any. If inserting the
 	 * new session would exceed the cap, prune an LRU non-protected entry first.
 	 */
@@ -60,6 +76,7 @@ export class SessionStore {
 			pruned = this.pruneLru() ?? undefined;
 		}
 		this.sessions.set(session.id, session);
+		this.notifyMembership();
 		return { pruned, count: this.sessions.size };
 	}
 
@@ -69,6 +86,7 @@ export class SessionStore {
 		if (!entry) return undefined;
 		this.sessions.delete(id);
 		void entry.release();
+		this.notifyMembership();
 		return entry;
 	}
 
@@ -85,6 +103,7 @@ export class SessionStore {
 			void s.release();
 			this.onEvict?.(s, "shutdown");
 		}
+		if (drained.length > 0) this.notifyMembership();
 		return drained;
 	}
 

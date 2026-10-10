@@ -27,7 +27,7 @@ import { constants as osConstants } from "node:os";
 import { type AgentToolResult, type AgentToolUpdateCallback, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type, type TUnsafe } from "typebox";
 
-import { withHostPresentation } from "../fork-features/omp-presentation.ts";
+import { type ActivatedExtension, withHostPresentation } from "../fork-features/omp-presentation.ts";
 import { type CollectResult, NO_OUTPUT } from "./collect.ts";
 import { registerCompactCodemode } from "./codemode-render.ts";
 import { CompletionCoordinator, type OnExitPolicy, sanitizeMeta } from "./completion.ts";
@@ -888,7 +888,7 @@ function startStreaming(
 	};
 }
 
-function activate(pi: ExtensionAPI) {
+function activate(pi: ExtensionAPI): ActivatedExtension {
 	const coordinator = new CompletionCoordinator({
 		send: (message) => {
 			// If pi is idle this starts a model turn; if a run is active it is
@@ -1403,7 +1403,9 @@ function activate(pi: ExtensionAPI) {
 	// Shadows native codemode at session start without replacing
 	// builtin:codemode. Presentation only, for every nested tool.
 	registerCompactCodemode(pi);
+	return { store: ctx.store };
 }
 
-// Fork: on oh-my-pi, tools present through omp's bash renderer (fork-features/README.md).
+// Fork: on oh-my-pi, tools present through omp's bash renderer and tty sessions
+// get a Tern HUD (fork-features/README.md).
 export default withHostPresentation(activate);
