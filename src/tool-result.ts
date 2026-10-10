@@ -7,8 +7,10 @@ import {
 	type TruncationResult,
 } from "@earendil-works/pi-coding-agent";
 
+import type { CollectResult } from "./collect.ts";
 import type { OnExitPolicy } from "./completion.ts";
 import { sanitizeOutputText } from "./output-safety.ts";
+import type { TerminalObservation, TerminalScreenKind, TerminalView } from "./terminal-screen.ts";
 
 const textDecoder = new TextDecoder("utf-8", { fatal: false });
 
@@ -41,6 +43,28 @@ export interface OutputResultDetails {
 	output_bytes_total?: number;
 	/** Optional explanation of an unusual session state (e.g. shell exited but pipe held open). */
 	note?: string;
+	/** Tty sessions: how `output` relates to the session's terminal screen. */
+	terminal?: TerminalDetails;
+}
+
+/**
+ * Tty output is rendered terminal state, not raw stream bytes: `output` holds
+ * `history_lines` lines that scrolled off above the screen since the previous
+ * call, then the full current screen (trailing blank rows removed). When
+ * `screen_changed` is false the screen is exactly as last reported and
+ * `output` is empty.
+ */
+export interface TerminalDetails {
+	screen: TerminalScreenKind;
+	cols: number;
+	rows: number;
+	/** 1-based cursor position within the screen. */
+	cursor_row: number;
+	cursor_col: number;
+	screen_changed: boolean;
+	history_lines?: number;
+	/** History reached the emulator's capacity, so older scrolled-off lines may only be in the log. */
+	history_may_be_truncated?: true;
 }
 
 export interface ProcessResultDetails extends OutputResultDetails {
@@ -71,10 +95,9 @@ export interface KillResultDetails extends OutputResultDetails {
 
 interface OutputEnvelopeInput {
 	wallTimeSec: number;
-	collected: Uint8Array;
+	/** Pipe bytes drained this call, or the tty session's terminal observation. */
+	collected: CollectResult;
 	logPath?: string;
-	/** Middle bytes dropped by the retention cap during this call's drain. */
-	omittedBytes?: number;
 	/** Cumulative bytes the session has produced since spawn. */
 	totalBytes?: number;
 }
@@ -111,13 +134,9 @@ function generateChunkId(): string {
 	return randomBytes(3).toString("hex");
 }
 
-function approxTokenCount(bytes: Uint8Array): number {
+function approxTokenCount(byteLength: number): number {
 	// Mirror codex's rough `approx_token_count` behaviour: 4 bytes ≈ 1 token.
-	return Math.ceil(bytes.length / 4);
-}
-
-function decode(bytes: Uint8Array): string {
-	return textDecoder.decode(bytes);
+	return Math.ceil(byteLength / 4);
 }
 
 export function safeMeta(value: string, max = 4096): string {
@@ -143,22 +162,71 @@ type OutputEnvelope = Pick<
 	| "truncation"
 	| "omitted_bytes"
 	| "output_bytes_total"
+	| "terminal"
 >;
 
 function createOutputEnvelope(input: OutputEnvelopeInput): OutputEnvelope {
-	const safeText = sanitizeOutputText(decode(input.collected));
-	const truncation = truncateTail(safeText, { maxBytes: DEFAULT_MAX_BYTES, maxLines: DEFAULT_MAX_LINES });
+	const collected = input.collected;
+	let text: string;
+	let byteLength: number;
+	switch (collected.kind) {
+		case "stream":
+			text = sanitizeOutputText(textDecoder.decode(collected.bytes));
+			byteLength = collected.bytes.length;
+			break;
+		case "screen": {
+			const observation = collected.observation;
+			text = observation.kind === "rendered" ? sanitizeOutputText(observation.text) : "";
+			byteLength = Buffer.byteLength(text, "utf8");
+			break;
+		}
+	}
+	const truncation = truncateTail(text, { maxBytes: DEFAULT_MAX_BYTES, maxLines: DEFAULT_MAX_LINES });
 	const envelope: OutputEnvelope = {
 		chunk_id: generateChunkId(),
 		wall_time_seconds: input.wallTimeSec,
 		output: truncation.content,
-		original_token_count: approxTokenCount(input.collected),
+		original_token_count: approxTokenCount(byteLength),
 	};
 	if (input.logPath) envelope.log_path = input.logPath;
-	if (input.omittedBytes) envelope.omitted_bytes = input.omittedBytes;
+	if (collected.kind === "stream" && collected.omittedBytes) envelope.omitted_bytes = collected.omittedBytes;
+	if (collected.kind === "screen") envelope.terminal = terminalDetails(collected.observation);
 	if (input.totalBytes !== undefined) envelope.output_bytes_total = input.totalBytes;
 	if (truncation.truncated) envelope.truncation = truncation;
 	return envelope;
+}
+
+/** Terminal metadata for a full rendered screen (also used by live streaming snapshots). */
+export function terminalViewDetails(view: TerminalView, screenChanged: boolean): TerminalDetails {
+	return {
+		screen: view.screen,
+		cols: view.cols,
+		rows: view.rows,
+		cursor_row: view.cursor.row,
+		cursor_col: view.cursor.col,
+		screen_changed: screenChanged,
+	};
+}
+
+function terminalDetails(observation: TerminalObservation): TerminalDetails {
+	const details = terminalViewDetails(observation.view, observation.kind === "rendered");
+	if (observation.kind === "rendered") {
+		if (observation.historyLines > 0) details.history_lines = observation.historyLines;
+		if (observation.historyMayBeTruncated) details.history_may_be_truncated = true;
+	}
+	return details;
+}
+
+/** Header lines describing tty output, shared by process and kill results. */
+function terminalLines(terminal: TerminalDetails | undefined): string[] {
+	if (!terminal) return [];
+	const lines = [
+		`terminal: ${terminal.screen} screen ${terminal.cols}x${terminal.rows}, cursor row ${terminal.cursor_row} col ${terminal.cursor_col}`,
+	];
+	if (!terminal.screen_changed) lines.push("screen_changed: false");
+	if (terminal.history_lines) lines.push(`history_lines: ${terminal.history_lines}`);
+	if (terminal.history_may_be_truncated) lines.push("history_may_be_truncated: true");
+	return lines;
 }
 
 export function finalizeProcessResult(input: FinalizeProcessInput): ProcessResultDetails {
@@ -256,6 +324,7 @@ export function renderProcessResultText(shape: ProcessResultDetails): string {
 	if (shape.output_bytes_total !== undefined) lines.push(`output_bytes_total: ${shape.output_bytes_total}`);
 	if (shape.omitted_bytes) lines.push(`omitted_bytes: ${shape.omitted_bytes}`);
 	if (shape.tty !== undefined) lines.push(`tty: ${shape.tty}`);
+	lines.push(...terminalLines(shape.terminal));
 	return appendOutputSection(lines, shape);
 }
 
@@ -278,5 +347,6 @@ export function renderKillResultText(shape: KillResultDetails): string {
 	if (shape.output_bytes_total !== undefined) lines.push(`output_bytes_total: ${shape.output_bytes_total}`);
 	if (shape.omitted_bytes) lines.push(`omitted_bytes: ${shape.omitted_bytes}`);
 	if (shape.tty !== undefined) lines.push(`tty: ${shape.tty}`);
+	lines.push(...terminalLines(shape.terminal));
 	return appendOutputSection(lines, shape);
 }

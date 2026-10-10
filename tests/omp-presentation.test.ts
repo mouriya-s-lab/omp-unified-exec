@@ -46,7 +46,7 @@ const exitedDetails: ProcessResultDetails = {
 const processInput: FinalizeProcessInput = {
 	operation: "exec_command",
 	wallTimeSec: 0.25,
-	collected: encoder.encode("last output\n"),
+	collected: { kind: "stream", bytes: encoder.encode("last output\n"), omittedBytes: 0 },
 	sessionId: undefined,
 	exitCode: 0,
 	signal: null,
@@ -57,7 +57,7 @@ const processInput: FinalizeProcessInput = {
 
 const killInput: FinalizeKillInput = {
 	wallTimeSec: 0.003,
-	collected: encoder.encode("last output\n"),
+	collected: { kind: "stream", bytes: encoder.encode("last output\n"), omittedBytes: 0 },
 	totalBytes: 12,
 	sessionId: 1,
 	pid: 45828,
@@ -155,7 +155,10 @@ describe("omp shell result presentation", () => {
 	});
 
 	it("appends the exact recovery marker after a blank line and keeps it last", () => {
-		const details = finalizeProcessResult({ ...processInput, collected: encoder.encode(noisyOutput) });
+		const details = finalizeProcessResult({
+			...processInput,
+			collected: { kind: "stream", bytes: encoder.encode(noisyOutput), omittedBytes: 0 },
+		});
 		const marker = truncationMarker(details.truncation, details.log_path);
 		assert.equal(details.truncation?.truncated, true);
 		assert.equal(marker, `[Showing lines 1001-3000 of 3000. Full output: ${details.log_path}]`);
@@ -275,7 +278,7 @@ describe("omp shell result presentation", () => {
 
 	for (const scenario of ["signal", "failure", "escalated kill", "failed kill"] as const) {
 		it(`keeps recovery marker last when truncated output also has a ${scenario} notice`, () => {
-			const collected = encoder.encode(noisyOutput);
+			const collected = { kind: "stream" as const, bytes: encoder.encode(noisyOutput), omittedBytes: 0 };
 			const details = scenario === "signal" || scenario === "failure"
 				? finalizeProcessResult({
 					...processInput,

@@ -12,6 +12,10 @@ import { constants as osConstants } from "node:os";
 
 import { IS_WINDOWS, resolveBinary } from "./shell.ts";
 
+/** PTY geometry used when the caller does not choose one. */
+export const DEFAULT_PTY_COLS = 120;
+export const DEFAULT_PTY_ROWS = 30;
+
 export interface SpawnOptions {
 	command: string[];
 	cwd: string;
@@ -364,8 +368,8 @@ function spawnBunPty(runtime: BunRuntime, opts: SpawnOptions): SpawnedChild {
 		windowsVerbatimArguments: opts.windowsVerbatimArguments,
 		terminal: {
 			name: "xterm-256color",
-			cols: opts.cols ?? 120,
-			rows: opts.rows ?? 30,
+			cols: opts.cols ?? DEFAULT_PTY_COLS,
+			rows: opts.rows ?? DEFAULT_PTY_ROWS,
 			data(activeTerminal, chunk) {
 				terminal = activeTerminal;
 				emitData(chunk);
@@ -465,8 +469,8 @@ function spawnNodePty(mod: PtyModule, opts: SpawnOptions): SpawnedChild {
 	const child = mod.spawn(file, ptyArgs, {
 		cwd: opts.cwd,
 		env: opts.env,
-		cols: opts.cols ?? 120,
-		rows: opts.rows ?? 30,
+		cols: opts.cols ?? DEFAULT_PTY_COLS,
+		rows: opts.rows ?? DEFAULT_PTY_ROWS,
 		name: "xterm-256color",
 	});
 

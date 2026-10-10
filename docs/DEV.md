@@ -70,7 +70,8 @@ sibling view, indexed by concern:
 | Relative and absolute empty polls, event-driven and monotonic | `src/long-wait.ts` + `src/time.ts`, `runAttachedWait` in `src/index.ts` |
 | Human duration / remaining labels | `src/format-time.ts` (re-exported remaining helper from `time.ts`) |
 | `on_exit: "wake"` completion scheduling (exactly-once) | `src/completion.ts` (`setOnExit`, tombstones, flush) |
-| In-memory drain buffer | `src/head-tail-buffer.ts` |
+| In-memory drain buffer (pipe sessions) | `src/head-tail-buffer.ts` |
+| Rendered tty screen: emulator, history + screen observations, snapshots | `src/terminal-screen.ts` (owned by `ExecSession`) |
 | On-disk raw log file mirroring | `src/session.ts` (`logStream`) |
 | Terminal-inert result/partial text | `src/output-safety.ts` |
 | Bounded process/kill details + LLM-visible text | `src/tool-result.ts` (`truncateTail` from Pi) |
@@ -224,8 +225,10 @@ stating whether they mirror codex or diverge. When you touch one:
 Never put an unbounded value in `content` or details and expect
 `renderResult` to hide it: Pi falls back to raw content if a renderer throws.
 Pass child text through `sanitizeOutputText()` before model/session/TUI use;
-only the on-disk log owns the exact raw stream. Keep renderer-side sanitization
-as defense for legacy results and fallback content.
+tty bytes go through the session's `TerminalScreen` first, and only its
+rendered text is sanitized and used. Only the on-disk log owns the exact raw
+stream. Keep renderer-side sanitization as defense for legacy results and
+fallback content.
 
 ### Tune TUI rendering
 

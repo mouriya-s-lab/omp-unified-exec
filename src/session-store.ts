@@ -63,11 +63,12 @@ export class SessionStore {
 		return { pruned, count: this.sessions.size };
 	}
 
-	/** Remove a session (e.g., when it exits). */
+	/** Remove a session (e.g., when it exits) and release its terminal emulator. */
 	remove(id: number): ExecSession | undefined {
 		const entry = this.sessions.get(id);
 		if (!entry) return undefined;
 		this.sessions.delete(id);
+		void entry.release();
 		return entry;
 	}
 
@@ -81,6 +82,7 @@ export class SessionStore {
 			} catch {
 				// ignore
 			}
+			void s.release();
 			this.onEvict?.(s, "shutdown");
 		}
 		return drained;
@@ -113,6 +115,7 @@ export class SessionStore {
 		} catch {
 			// ignore
 		}
+		void victim.release();
 		this.onEvict?.(victim, "lru");
 		return victim;
 	}

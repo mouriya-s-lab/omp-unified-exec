@@ -28,7 +28,7 @@ import { type AgentToolResult, type AgentToolUpdateCallback, type ExtensionAPI, 
 import { Type, type TUnsafe } from "typebox";
 
 import { withHostPresentation } from "../fork-features/omp-presentation.ts";
-import type { CollectResult } from "./collect.ts";
+import { type CollectResult, NO_OUTPUT } from "./collect.ts";
 import { registerCompactCodemode } from "./codemode-render.ts";
 import { CompletionCoordinator, type OnExitPolicy, sanitizeMeta } from "./completion.ts";
 import { formatElapsed } from "./format-time.ts";
@@ -68,6 +68,7 @@ import {
 	finalizeProcessResult,
 	renderKillResultText,
 	renderProcessResultText,
+	terminalViewDetails,
 	type FinalizeProcessInput,
 	type ProcessResultDetails,
 } from "./tool-result.ts";
@@ -295,7 +296,7 @@ async function runExecCommand(
 	if (session.failureMessage) {
 		return finalizeResponse({
 			wallTimeSec: 0,
-			collected: new Uint8Array(0),
+			collected: NO_OUTPUT,
 			sessionId: undefined,
 			exitCode: -1,
 			signal: null,
@@ -332,8 +333,7 @@ async function runExecCommand(
 			const wallSec = (Date.now() - start) / 1000;
 			return finalizeResponse({
 				wallTimeSec: wallSec,
-				collected: collected.bytes,
-				omittedBytes: collected.omittedBytes,
+				collected,
 				totalBytes: session.totalBytesSeen,
 				sessionId: undefined,
 				exitCode: session.exitCode,
@@ -391,8 +391,7 @@ async function runExecCommand(
 			if (wantsWake) ctx.coordinator.register(session);
 			return finalizeResponse({
 				wallTimeSec: wallSec,
-				collected: collected.bytes,
-				omittedBytes: collected.omittedBytes,
+				collected,
 				totalBytes: session.totalBytesSeen,
 				sessionId: session.id,
 				exitCode: undefined,
@@ -416,8 +415,7 @@ async function runExecCommand(
 		removeSession(ctx, session.id);
 		return finalizeResponse({
 			wallTimeSec: wallSec,
-			collected: collected.bytes,
-			omittedBytes: collected.omittedBytes,
+			collected,
 			totalBytes: session.totalBytesSeen,
 			sessionId: undefined,
 			exitCode: session.exitCode,
@@ -435,6 +433,8 @@ async function runExecCommand(
 		});
 	} finally {
 		ctx.pendingSessions.delete(session);
+		// Short-lived commands never enter the store; release their terminal here.
+		if (ctx.store.get(session.id) !== session) void session.release();
 	}
 }
 
@@ -503,8 +503,7 @@ async function runWriteStdin(
 				const wallSec = (Date.now() - start) / 1000;
 				return finalizeResponse({
 					wallTimeSec: wallSec,
-					collected: collected.bytes,
-					omittedBytes: collected.omittedBytes,
+					collected,
 					totalBytes: session.totalBytesSeen,
 					sessionId: undefined,
 					exitCode: session.exitCode,
@@ -539,8 +538,7 @@ async function runWriteStdin(
 			ctx.coordinator.markPendingTerminal(session.id, toolCallId);
 			return finalizeResponse({
 				wallTimeSec: wallSec,
-				collected: collected.bytes,
-				omittedBytes: collected.omittedBytes,
+				collected,
 				totalBytes: session.totalBytesSeen,
 				sessionId: undefined,
 				exitCode: session.exitCode,
@@ -560,8 +558,7 @@ async function runWriteStdin(
 		ctx.coordinator.releaseObservation(session.id, toolCallId);
 		return finalizeResponse({
 			wallTimeSec: wallSec,
-			collected: collected.bytes,
-			omittedBytes: collected.omittedBytes,
+			collected,
 			totalBytes: session.totalBytesSeen,
 			sessionId: session.id,
 			exitCode: undefined,
@@ -638,7 +635,7 @@ async function runAttachedWait(
 		// Exit wins close races. A cancelled live wait never drains output.
 		if (session.hasExited) outcome = "exit";
 		const collected = outcome === "cancelled"
-			? { bytes: new Uint8Array(0), omittedBytes: 0 }
+			? NO_OUTPUT
 			: await session.collect({
 				deadlineMs: Date.now() + (outcome === "exit" ? 1000 : 0),
 				externalAbort: outcome === "exit" ? undefined : signal,
@@ -662,8 +659,7 @@ async function runAttachedWait(
 		const shape = finalizeProcessResult({
 			operation: "write_stdin",
 			wallTimeSec: elapsedMs / 1000,
-			collected: collected.bytes,
-			omittedBytes: collected.omittedBytes,
+			collected,
 			totalBytes: session.totalBytesSeen,
 			sessionId: outcome === "exit" ? undefined : session.id,
 			exitCode: outcome === "exit" ? session.exitCode : undefined,
@@ -838,9 +834,12 @@ function buildStreamUpdate(
 	session: ExecSession,
 	extra?: Partial<ProcessResultDetails>,
 ): AgentToolResult<ProcessUpdateDetails> {
-	const tailText = sanitizeOutputText(decode(session.snapshotStreamTail()));
+	const live = session.liveOutput();
+	const text = live.kind === "screen"
+		? sanitizeOutputText(live.snapshot.text)
+		: sanitizeOutputText(decode(live.bytes));
 	return {
-		content: [{ type: "text", text: tailText }],
+		content: [{ type: "text", text }],
 		details: {
 			session_id: session.id,
 			pid: session.pid,
@@ -852,7 +851,8 @@ function buildStreamUpdate(
 			log_path: session.logPath,
 			// Populate `output` so renderResult has a single source regardless
 			// of streaming vs final state.
-			output: tailText,
+			output: text,
+			...(live.kind === "screen" ? { terminal: terminalViewDetails(live.snapshot.view, true) } : {}),
 			...extra,
 		},
 	};
@@ -1071,6 +1071,7 @@ function activate(pi: ExtensionAPI) {
 			"For a long non-interactive command, start with a short yield to obtain a session_id, then use an empty write_stdin poll with a finite yield_time_ms suited to its expected duration. There is no built-in empty-poll maximum; an operator may configure one. Keep waits short for interactive or indefinite processes. Pi manages cache warming independently.",
 			'on_exit defaults to "none". Prefer polling or human follow-up. Use on_exit: "wake" ONLY when the human explicitly wants auto-resume on unobserved completion — not for indefinite processes (dev servers, watchers). If you armed wake by mistake or the job is wrong/abandoned, call set_on_exit(session_id, on_exit: "none") promptly (does not kill the process). kill_session still kills and suppresses wake. Combining wake with an observing write_stdin is safe: direct completion consumes the wake.',
 			"In codemode scripts, exec_command and write_stdin resolve to objects: print r.output with text(r.output) and check r.exit_code / r.session_id, instead of printing the whole result object.",
+			"tty: true output is the rendered terminal, as a human would see it, not the raw stream: each result shows any history_lines that scrolled off above the screen since the last call, then the full current screen, plus the cursor position. screen_changed: false means the screen is exactly as last reported. Full-screen programs (alternate screen) are shown as the whole screen. Styling (colours, reverse video) is not shown; the raw byte stream is in log_path.",
 		],
 		outputSchema: processScriptResultSchema,
 		parameters: Type.Object({
@@ -1082,7 +1083,12 @@ function activate(pi: ExtensionAPI) {
 						"Shell binary. Defaults to bash (on Windows: bash if on PATH, else powershell). cmd and powershell/pwsh get shell-appropriate flags.",
 				}),
 			),
-			tty: Type.Optional(Type.Boolean({ description: "Allocate a PTY. Default false (plain pipes)." })),
+			tty: Type.Optional(
+				Type.Boolean({
+					description:
+						"Allocate a PTY. Default false (plain pipes). With a PTY, output is the rendered terminal screen (plus lines that scrolled off since the last call) rather than the raw stream.",
+				}),
+			),
 			cols: Type.Optional(
 				Type.Number({
 					description: `PTY width in columns (tty: true only; ignored for pipes). Default 120, clamped to [${MIN_PTY_COLS}, ${MAX_PTY_COLS}].`,
@@ -1291,8 +1297,7 @@ function activate(pi: ExtensionAPI) {
 					.join("; ");
 			const details = finalizeKillResult({
 				wallTimeSec: (Date.now() - startedAt) / 1000,
-				collected: collected.bytes,
-				omittedBytes: collected.omittedBytes,
+				collected,
 				totalBytes: session.totalBytesSeen,
 				sessionId: sid,
 				pid: session.pid,

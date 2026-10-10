@@ -27,19 +27,40 @@ function compact<T extends Record<string, unknown>>(value: T): T {
 	return value;
 }
 
+const terminalSchema = Type.Object(
+	{
+		screen: Type.Union([Type.Literal("normal"), Type.Literal("alternate")]),
+		cols: Type.Number(),
+		rows: Type.Number(),
+		cursor_row: Type.Number({ description: "1-based cursor row within the screen." }),
+		cursor_col: Type.Number({ description: "1-based cursor column." }),
+		screen_changed: Type.Boolean({ description: "False when the screen is exactly as last reported (output is empty)." }),
+		history_lines: Type.Optional(
+			Type.Number({ description: "Leading output lines that scrolled off above the screen since the last call." }),
+		),
+		history_may_be_truncated: Type.Optional(Type.Literal(true)),
+	},
+	{ description: "tty sessions only: output is the rendered terminal (history lines, then the full current screen)." },
+);
+
 const outputFields = {
 	output: Type.String({
 		description:
-			"Bounded, terminal-safe tail of the child output with real newlines. Print it with text(r.output) rather than printing the whole result object.",
+			"Bounded, terminal-safe tail of the child output with real newlines (tty sessions: the rendered screen). Print it with text(r.output) rather than printing the whole result object.",
 	}),
-	truncated: Type.Boolean({ description: "True when earlier output was dropped; the full stream is in log_path." }),
+	truncated: Type.Boolean({ description: "True when earlier output was (or may have been) dropped; the full stream is in log_path." }),
 	omitted_bytes: Type.Optional(Type.Number({ description: "Middle bytes dropped by the in-memory retention cap." })),
 	exit_code: Type.Optional(Type.Number({ description: "Exit code once the process has exited." })),
 	signal: Type.Optional(Type.String({ description: "Signal that terminated the process, if any." })),
 	failure_message: Type.Optional(Type.String()),
 	log_path: Type.Optional(Type.String({ description: "File containing the complete output stream." })),
 	wall_time_seconds: Type.Number(),
+	terminal: Type.Optional(terminalSchema),
 };
+
+function wasTruncated(shape: ProcessResultDetails | KillResultDetails): boolean {
+	return shape.truncation?.truncated === true || shape.terminal?.history_may_be_truncated === true;
+}
 
 export const processScriptResultSchema = Type.Object({
 	status: Type.Union([Type.Literal("running"), Type.Literal("exited")]),
@@ -61,13 +82,14 @@ export function processScriptResult(shape: ProcessResultDetails): ProcessScriptR
 		running: shape.running,
 		session_id: shape.session_id,
 		output: shape.output,
-		truncated: shape.truncation?.truncated === true,
+		truncated: wasTruncated(shape),
 		omitted_bytes: shape.omitted_bytes || undefined,
 		exit_code: shape.exit_code,
 		signal: optionalMeta(shape.signal),
 		failure_message: optionalMeta(shape.failure_message),
 		log_path: optionalMeta(shape.log_path),
 		wall_time_seconds: shape.wall_time_seconds,
+		terminal: shape.terminal,
 		note: optionalMeta(shape.note),
 		wait_status: shape.wait_status,
 		on_exit: shape.on_exit,
@@ -95,13 +117,14 @@ export function killScriptResult(shape: KillResultDetails): KillScriptResult {
 		escalated: shape.escalated,
 		session_id: shape.session_id,
 		output: shape.output,
-		truncated: shape.truncation?.truncated === true,
+		truncated: wasTruncated(shape),
 		omitted_bytes: shape.omitted_bytes || undefined,
 		exit_code: shape.exit_code,
 		signal: optionalMeta(shape.signal),
 		failure_message: optionalMeta(shape.failure_message),
 		log_path: optionalMeta(shape.log_path),
 		wall_time_seconds: shape.wall_time_seconds,
+		terminal: shape.terminal,
 	});
 }
 

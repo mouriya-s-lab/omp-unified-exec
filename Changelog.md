@@ -4,6 +4,12 @@ All notable changes to this project. **Newest entries go on top.**
 
 ## Unreleased
 
+## 0.13.0 - 2026-10-10
+
+- tty sessions now return what a terminal shows ([#13](https://github.com/mouriya-s-lab/omp-unified-exec/issues/13)). Previously PTY output was the raw stream with control sequences stripped, so carriage-return progress bars, cursor-up redraws, clear-screen redraws and full-screen programs piled every frame on top of the last. Each tty session now feeds its output, in order, into a per-session `@xterm/headless` terminal of its `cols`×`rows`. Each result returns the lines that scrolled off since the last call and were not already reported, then the full current screen and the cursor position (`terminal: normal|alternate screen CxR, cursor row R col C`, plus `history_lines`). An unchanged screen reports `screen_changed: false` with no output. The emulator answers terminal queries (cursor position, device attributes) on the child's input. Only plain text and the cursor are represented; styling and the exact raw stream stay in `log_path`. Pipe sessions are unchanged.
+- `details.terminal` and codemode `structuredContent.terminal` carry the screen, size, cursor, `screen_changed`, `history_lines` and `history_may_be_truncated`. tty history between calls is bounded by `TERMINAL_HISTORY_CELLS` (240000 cells / `cols` rows). Reaching it sets `history_may_be_truncated`, and script `truncated` becomes true.
+- tty observations are serialized per session. A cancelled empty poll does not consume anything. Streaming updates show the current screen without consuming it. Emulators are released when a session leaves the store, is evicted, shut down, or never registered.
+
 ## 0.12.4 - 2026-10-10
 
 - Fix unified-exec tool rows on oh-my-pi (omp) ([#11](https://github.com/mouriya-s-lab/omp-unified-exec/issues/11)). omp passes extension renderers different arguments than Pi, so the Pi renderers threw on every repaint (`Tool renderer failed … state.startedAt`). omp then showed its generic card, with an argument dump and the whole model envelope (`chunk_id`, `original_token_count`, …). Tern's native views got no `describeCall`/`describeResult` at all.

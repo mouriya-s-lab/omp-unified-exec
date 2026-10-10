@@ -51,9 +51,14 @@ pi-flavor additions (`set_on_exit`, `kill_session`, `list_sessions`).
   result—including `kill_session`—is tail-capped at 50 KiB / 2000 lines before
   it reaches model context or persisted details. All five tools have explicit
   TUI renderers; child output defaults to a five-visual-line tail and expands
-  with Pi's configured `app.tools.expand` binding. Model/result/TUI text strips
+  with Pi's configured `app.tools.expand` binding. Pipe output strips
   terminal-control sequences; the complete raw stream remains available at
   `log_path`.
+- **PTY output is what a terminal shows.** `tty: true` sessions render their
+  output through a headless terminal emulator, so progress bars, redraws and
+  full-screen programs come back as the current screen (plus lines that
+  scrolled off since the last call and the cursor position) instead of every
+  redraw appended to the last.
 - **Default-on compact codemode previews.** A display-only wrapper bounds
   collapsed codemode results to ten visual rows, including object/settled
   output from any nested tool. Native execution and expansion are unchanged,
@@ -117,7 +122,7 @@ Runs a command in a persistent session.
 | `cmd` | string | — | Shell command. Required. |
 | `workdir` | string | turn cwd | Working directory. |
 | `shell` | string | `bash` | Shell binary. On Windows: `bash` if on PATH, else `powershell`. `cmd` / `powershell` / `pwsh` get shell-appropriate flags. |
-| `tty` | boolean | `false` | Allocate a PTY (native `Bun.Terminal` under Bun; node-pty under Node). |
+| `tty` | boolean | `false` | Allocate a PTY (native `Bun.Terminal` under Bun; node-pty under Node). Output is then the rendered terminal screen; see [PTY sessions](#pty-sessions-tty-true). |
 | `cols` | number | `120` | PTY width in columns (`tty: true` only; ignored for pipes). Clamped to [20, 500]. |
 | `rows` | number | `30` | PTY height in rows (`tty: true` only; ignored for pipes). Clamped to [5, 300]. |
 | `yield_time_ms` | number | `10_000` | How long this call stays attached waiting for output (an attachment window, not the command's lifetime), clamped to [250, 30_000]. |
@@ -158,6 +163,43 @@ When output exceeds the caps (50 KiB / 2000 lines), a footer is appended:
 [Showing lines 3900-4120 of 4500 (50.0KB limit). Full output: /tmp/pi-unified-exec-1-5cc5e104.log]
 ```
 
+#### PTY sessions (`tty: true`)
+
+A tty session feeds every byte its child writes, in order, into a headless
+terminal emulator ([`@xterm/headless`](https://www.npmjs.com/package/@xterm/headless))
+of the session's `cols`×`rows`, and each result reports what that terminal
+shows rather than the raw stream:
+
+```
+[still running]
+session_id: 3
+…
+tty: true
+terminal: normal screen 120x30, cursor row 4 col 5
+history_lines: 2                   (optional: the first 2 output lines scrolled off above the screen since the last call)
+---
+<history lines not yet reported>
+<the full current screen, trailing blank rows removed>
+```
+
+- **History plus screen.** Lines that scrolled off the top since the previous
+  call and were not already reported come first, then the whole current screen.
+  Carriage-return progress bars, cursor-up redraws and clear-screen redraws
+  therefore show their final state, not every frame.
+- **Unchanged screen.** When neither the screen, the cursor nor the history
+  changed, the result has `screen_changed: false` and `(no output)`.
+- **Full-screen programs** (alternate screen, e.g. `top`, editors) are reported
+  as `terminal: alternate screen …` with the whole screen; leaving it restores
+  the normal screen.
+- **Plain text and cursor only.** Colours and reverse video are not
+  represented. The raw byte stream, styling included, stays in `log_path`.
+- **Terminal queries are answered.** Cursor-position and device-attribute
+  queries get the emulator's reply on the child's input, as a real terminal
+  would send, so programs that wait for them keep running.
+- History between calls is bounded by a cell budget (`TERMINAL_HISTORY_CELLS`
+  divided by `cols` rows). Reaching it adds `history_may_be_truncated: true`;
+  the older lines are only in the log.
+
 ### `write_stdin`
 
 Drives or polls an existing session.
@@ -193,8 +235,9 @@ Drives or polls an existing session.
 dev servers, file watchers, debuggers, or any indefinite/interactive
 session — it is only for finite commands that exit on their own.
 
-Both empty-poll forms use the same event-driven wait. The bounded head/tail
-buffer retains output, the rolling TUI tail produces output-driven updates,
+Both empty-poll forms use the same event-driven wait. Pipe sessions retain
+output in the bounded head/tail buffer and a rolling TUI tail; tty sessions
+keep it in their terminal screen. Either way, updates are output-driven,
 and the log receives the raw stream. Short relative polls update at most
 four times per second; longer and absolute waits at most once per 30 seconds,
 plus initial/final updates. Quiet waits have no periodic output heartbeat.
@@ -338,8 +381,9 @@ names are rejected with an error instead of silently no-opping.
 
 The result uses the same bounded output envelope as `exec_command` and
 `write_stdin`: `details.output` contains at most 50 KiB / 2000 lines of
-terminal-inert plain text, `truncation` and `omitted_bytes` explain any loss,
-and `log_path` points to the complete raw session stream. Explicit `operation`,
+terminal-inert plain text (for tty sessions, the rendered screen),
+`truncation` and `omitted_bytes` explain any loss, and `log_path` points to
+the complete raw session stream. Explicit `operation`,
 `status`, `running`, `killed`,
 `escalated`, requested/actual signal, and process metadata distinguish session
 identity from liveness. A failed kill remains registered and reports
@@ -391,10 +435,11 @@ text(r.output); // readable multiline output rather than the whole JSON object
 
 `exec_command` and `write_stdin` resolve to `{ status, running, output,
 truncated, session_id?, exit_code?, signal?, failure_message?, log_path?,
-wall_time_seconds, note?, wait_status?, on_exit?, tool_time_utc? }`;
+wall_time_seconds, terminal?, note?, wait_status?, on_exit?, tool_time_utc? }`;
 `kill_session`, `set_on_exit`, and `list_sessions` have matching typed shapes
-(`src/script-result.ts`). `output` is the same bounded, terminal-inert tail as
-`details.output`. Print `r.output` rather than the whole object: `text(r)`
+(`src/script-result.ts`). `output` is the same bounded, terminal-inert text as
+`details.output`, and `terminal` carries the screen/cursor/history metadata of
+tty sessions. Print `r.output` rather than the whole object: `text(r)`
 serializes newlines as `\n` and turns the output into one long line.
 
 Model-visible `content` and persisted `details` are unchanged.
@@ -458,6 +503,9 @@ $ for i in {1..12}; do echo round $i; sleep 0.5; done (yield 2.5s · cwd: ~/proj
 
   elapsed 1.3s · session_id=2 · log: /tmp/pi-unified-exec-2-86b3f006.log
 ```
+
+For a tty session the live area shows the session's current terminal screen
+rather than a rolling tail of raw output.
 
 **After yield, session still alive:**
 ```
@@ -529,7 +577,8 @@ MIN_EMPTY_YIELD_TIME_MS      = 5_000
 DEFAULT_EXEC_YIELD_MS        = 10_000
 DEFAULT_WRITE_STDIN_YIELD_MS = 250
 EARLY_EXIT_GRACE_PERIOD_MS   = 150
-HEAD_TAIL_MAX_BYTES          = 1 MiB   (in-memory drain buffer)
+HEAD_TAIL_MAX_BYTES          = 1 MiB   (in-memory drain buffer, pipe sessions)
+TERMINAL_HISTORY_CELLS       = 240_000 (tty history between calls: cells / cols rows, at least one screen)
 MAX_SESSIONS                 = 64
 WARNING_SESSIONS             = 60
 LRU_PROTECTED_COUNT          = 8
@@ -584,9 +633,13 @@ PREVIEW_LINES                = 5       (visual TUI lines before app.tools.expand
 - **LRU eviction**: at `MAX_SESSIONS`, the oldest non-protected session is
   evicted. The 8 most-recently-used are never pruned. Exited sessions are
   preferred as victims.
-- **Head+tail output buffer**: per session, up to 1 MiB retained, split 50/50
-  between the beginning and end of the output stream. A separate 32 KiB
+- **Head+tail output buffer** (pipe sessions): up to 1 MiB retained, split
+  50/50 between the beginning and end of the output stream. A separate 32 KiB
   rolling tail window feeds streaming `onUpdate` events during waits.
+- **Terminal screen** (tty sessions): one emulator per session; result-producing
+  calls take turns reading it, and a cancelled empty poll reads nothing, so the
+  next call still reports everything since the last delivered result.
+  Streaming updates show the screen without consuming it.
 
 ## Architecture
 
@@ -605,6 +658,7 @@ src/
 ├── pty.ts                # Bun.Terminal + Node node-pty backends, pipes, Windows tree-kill
 ├── shell.ts              # shell selection & argv construction (Windows-aware)
 ├── output-safety.ts      # terminal-control stripping (raw bytes stay in logs)
+├── terminal-screen.ts    # tty sessions: headless terminal, history + screen observations
 ├── tool-result.ts        # bounded process/kill envelopes + model-visible text
 ├── render.ts             # explicit renderCall / renderResult for all five tools
 ├── codemode-render.ts    # default-on native codemode visual-row preview wrapper
@@ -690,12 +744,15 @@ process exits — unless you `set_on_exit … none` first.
 > exec_command(cmd="python3 -q", tty=true, yield_time_ms=1500)
 [still running]
 session_id: 1
+terminal: normal screen 120x30, cursor row 1 col 5
 ---
 >>>
 
 > write_stdin(session_id=1, chars="print(7*6)\r", yield_time_ms=1000)     # \r = Enter (portable; \n fails on Windows)
 [still running]
+terminal: normal screen 120x30, cursor row 3 col 5
 ---
+>>> print(7*6)
 42
 >>>
 
@@ -710,13 +767,16 @@ exit_code: 0
 > exec_command(cmd="sudo -k && sudo whoami", tty=true, yield_time_ms=1500)
 [still running]
 session_id: 1
+terminal: normal screen 120x30, cursor row 1 col 25
 ---
 [sudo] password for wr:
 
 > write_stdin(session_id=1, chars="<password>\r", yield_time_ms=2000)
 [exited]
 exit_code: 0
+terminal: normal screen 120x30, cursor row 3 col 1
 ---
+[sudo] password for wr:
 root
 ```
 
@@ -754,7 +814,8 @@ full e2e pipes (45+ scenarios incl. log-file retention, byte/line truncation,
 a delayed 4000-line kill drain, renderer registration, spawn-failure
 diagnostics, EPIPE safety, exited-session reporting, shutdown SIGKILL
 escalation, onUpdate streaming, and the `/unified-exec-sessions` command), pure
-output-envelope, terminal-control, cache-refresh, and collapse/expand/re-collapse
+output-envelope, terminal-control, rendered tty screen (redraws, scrolling
+history alignment, alternate screen, cursor, queries), cache-refresh, and collapse/expand/re-collapse
 renderer coverage, Node PTY mode (simple command, Python REPL drive, Ctrl-C
 injection, cmd.exe verbatim payload), a dependency-free Bun PTY runtime fixture
 (input/output, geometry, quoted/non-ASCII argv, shell command, normal exit, and
@@ -807,6 +868,7 @@ log file.
 | LLM-visible truncation recovery | none | `read(log_path)` for the full stream |
 | Per-call `max_output_tokens` knob | yes (default 10 000) | removed; fixed 50 KiB/2000 lines |
 | Truncation marker in body | `…N tokens truncated…` | `[Showing lines X-Y of T. Full output: …]` |
+| PTY output | raw stream (`TERM=dumb` to discourage redraws) | rendered terminal screen + unseen history + cursor |
 
 The `log_path` field is exposed in every `exec_command` and `write_stdin`
 response (as a header line and in tool-call details), plus in `list_sessions`
@@ -913,6 +975,7 @@ runtime-native backend: `Bun.Terminal` under Bun 1.4+, or
 | `truncateTail` from `@earendil-works/pi-coding-agent` | (no equivalent in codex) — pi bash's tail truncator |
 | `src/unescape.ts` | (no equivalent in codex) — C-style escape decoder for `chars` |
 | `src/render.ts` | (no equivalent in codex) — pi TUI renderCall / renderResult |
+| `src/terminal-screen.ts` | (no equivalent in codex) — headless terminal for tty output |
 | `src/index.ts` exec_command handler | `codex-rs/core/src/tools/handlers/unified_exec.rs` |
 
 ---

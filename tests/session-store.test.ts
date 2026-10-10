@@ -3,7 +3,7 @@
  *
  * We use synthetic ExecSession-like stubs so we don't have to spawn real
  * processes in unit tests. The store only relies on `id`, `lastUsed`,
- * `hasExited`, and `terminate()`.
+ * `hasExited`, `terminate()`, and `release()`.
  */
 
 import { strict as assert } from "node:assert";
@@ -35,6 +35,9 @@ class StubSession {
 	}
 	terminate(signal: NodeJS.Signals = "SIGTERM") {
 		this.terminatedWith = signal;
+	}
+	release(): Promise<void> {
+		return Promise.resolve();
 	}
 }
 
