@@ -51,6 +51,12 @@ The initiative establishes a durable output contract across these layers:
    saw the terminal's actual state. tty sessions now feed their output into a
    per-session headless terminal emulator, and each result reports the unseen
    history plus the current screen and cursor.
+8. **Tern terminal HUD (fork):** a tool result shows a tty screen only as it
+   was when that call returned. On omp rendering natively in Tern, a dock pill
+   counts the stored tty sessions; clicking it opens a non-modal panel floating
+   above the pill, with one collapsible card per session showing its current
+   screen in color and following new output without any tool call
+   ([#17](https://github.com/mouriya-s-lab/omp-unified-exec/issues/17)).
 
 ## Requirements
 
@@ -66,11 +72,14 @@ The initiative establishes a durable output contract across these layers:
   text is stripped directly; tty bytes are first interpreted by the session's
   terminal emulator and only its rendered plain text (sanitized again) leaves
   it. Keep exact raw bytes only in the session log and sanitize again while
-  rendering legacy/fallback details.
+  rendering legacy/fallback details. The one styled projection, the Tern HUD
+  screen, is re-encoded from the emulator's cell attributes as SGR only; no
+  child byte reaches it.
 - tty observations are consuming and serialized per session; a cancelled empty
-  poll does not observe. Streaming snapshots never consume. The emulator is
-  read only after every written chunk is parsed, and released after the session
-  leaves ownership and its pending writes are parsed.
+  poll does not observe. Streaming snapshots and HUD screens never consume. The
+  emulator is read only after every written chunk is parsed (HUD screens may lag
+  unparsed output), and released after the session leaves ownership and its
+  pending writes are parsed; the HUD reads only sessions still in the store.
 - Represent operation and state explicitly (`operation`, `status`, `running`),
   rather than inferring liveness from the presence of `session_id`.
 - Preserve failed-kill ownership: an unconfirmed kill remains registered and is
@@ -80,6 +89,9 @@ The initiative establishes a durable output contract across these layers:
   never register Pi-signature renderers: exec/write/kill provide omp render and
   describe hooks delegating to omp's bash renderer; set_on_exit and
   list_sessions use omp's bounded default card.
+- On omp, mount the terminal HUD only while omp renders natively and the store
+  holds a tty session, so the ANSI TUI gains no row. The HUD is read-only, never
+  takes focus or keys, and keeps no copy of session or screen state.
 - Count collapsed child output in visual lines after terminal wrapping.
 - Keep truncation and log-recovery warnings visible while collapsed.
 - Do not synchronously load an arbitrary log file when expanded. Expanded mode
@@ -116,21 +128,29 @@ The initiative establishes a durable output contract across these layers:
 | Append the truncation marker to the omp display text | The marker and `log_path` live outside `details.output`; appending `truncationMarker()` keeps recovery visible as the last collapsed line without claiming the log is an omp artifact. |
 | Mark omp Tern failures with view tone, not result `isError` | Tern derives card status from the host result's `isError`, which stays false for a nonzero exit because that is an ordinary completion for the model. The describe view sets `tone: "error"` for failed exits, signals, start failures and failed or unknown kills; the exit chip comes from omp's bash head. |
 | Render tty output through `@xterm/headless` | Proven identical under Node, Bun and a `bun build --compile` binary, with no DOM, assets or native code. Rejected: Codex's `TERM=dumb`/`NO_COLOR`/`PAGER=cat` mitigation (openai/codex `core/src/unified_exec/process_manager.rs:94-104`), which cannot stop programs that force redraws ([openai/codex#32325](https://github.com/openai/codex/issues/32325)). |
-| tty result = unseen history + full current screen + cursor | A self-contained screen matches what a human sees and does not ask the model to splice earlier results. Rejected: a first-changed-row delta, which leaves full-screen redraws without context. Lines scrolled off since the last observation that equal the previous screen's rows at the same position were already reported and are skipped; an unchanged screen reports `screen_changed: false`. Only plain text and the cursor are represented (owner's choice); styling stays in the log. |
+| tty result = unseen history + full current screen + cursor | A self-contained screen matches what a human sees and does not ask the model to splice earlier results. Rejected: a first-changed-row delta, which leaves full-screen redraws without context. Lines scrolled off since the last observation that equal the previous screen's rows at the same position were already reported and are skipped; an unchanged screen reports `screen_changed: false`. Results represent only plain text and the cursor (owner's choice); styling stays in the log and, on Tern, in the HUD. |
 | Align history by erasing the emulator's scrollback (ED3) after each observation | The next observation's history then starts at the previous screen's top row, so positional comparison is exact. Rejected: counting scroll events into absolute line numbers, which leaving the alternate screen, DECSTBM regions, ED3 and RIS all break. |
 | Bound tty history by cells, not lines | History rows = 240000 cells / `cols`, at least one screen; reaching the cap reports `history_may_be_truncated` because the emulator exposes no exact eviction count. |
+| Tern HUD inside the omp extension, not a Tern Luau plugin | The sessions and their emulators live in this process; a dock widget reads them directly. A Luau plugin block would need the screen pushed to it across processes (a second copy of state) and shows as a pane, not a floating panel (owner's choice, [#17](https://github.com/mouriya-s-lab/omp-unified-exec/issues/17)). |
+| Panel = an `overlay` node in the widget's own description | omp's reconciler hoists `overlay` nodes from component descriptions into the surface `layer` and resolves `anchor.node` against the component's keypaths (omp `packages/tui/src/native/reconcile.ts`), so the panel floats above the pill without focus. Rejected: `ctx.ui.custom({ overlay: true })`, because omp's `showOverlay` always takes focus and renders it modal. |
+| Toggle by a pill action, fold per card in Tern | The pill click is an `action` routed to the widget's `handleNativeEvent`; card folds are Tern-local, keyed by session id, so they survive redraws without round trips. |
+| HUD colors from cell attributes | `TerminalScreen.styledScreen()` writes SGR for palette/256/RGB colors and bold, dim, italic, underline, blink, inverse, invisible, strikethrough and overline. Child OSC, cursor and mode sequences cannot pass, because nothing is copied from the byte stream. |
+| Mount only while native and a tty session exists | omp's `isNativeRendering`/`onNativeRenderingChange` (`@oh-my-pi/pi-tui/native/state`) gate the widget, so the ANSI TUI never gets the widget container's spacer row. Store membership and native changes re-evaluate the gate; a missing module fails omp plugin loading before anything registers, like the bash renderer. |
+| Watch screens only while the panel is open | Exits always re-describe (the pill's spinner); parsed-output notifications are subscribed per session only while open, and each re-description reads the current screens, so a closed panel costs nothing per chunk. |
 
 ## Implementation map
 
 | Area | Location |
 |---|---|
 | Terminal-control scanner | `src/output-safety.ts` |
-| tty terminal emulator, observations, snapshots | `src/terminal-screen.ts`, owned by `ExecSession` (`src/session.ts`); released by `src/session-store.ts`; tests `tests/terminal-screen.test.ts` |
+| tty terminal emulator, observations, snapshots, styled screens, parse notifications | `src/terminal-screen.ts`, owned by `ExecSession` (`src/session.ts`); released by `src/session-store.ts`; tests `tests/terminal-screen.test.ts` |
+| Session membership notifications | `SessionStore.subscribe` in `src/session-store.ts` |
 | Shared output envelope, truncation, process/kill text | `src/tool-result.ts` |
 | Codemode script schemas and projections | `src/script-result.ts`, `tests/script-result.test.ts` |
 | Kill collection, partial sanitization, and tool registration | `src/index.ts` (`TerminateOutcome`, `buildStreamUpdate`, `kill_session`) |
 | Explicit Pi renderers and shared five-line preview | `src/render.ts` |
 | omp host selection, bash-renderer delegation, result/args display adapters | `fork-features/omp-presentation.ts`, `fork-features/omp-tools.d.ts`; wired by `withHostPresentation` in `src/index.ts`; tests `tests/omp-presentation.test.ts` |
+| Tern terminal HUD: pill, floating panel, mount gate | `fork-features/tern-terminal-hud.ts`, mounted by `withHostPresentation` with the store `activate` returns; tests `tests/tern-terminal-hud.test.ts` |
 | Native codemode factory/renderer wrapper | `src/codemode-render.ts`; registration from `src/index.ts` |
 | Codemode width/cache/schema and real-CLI parity | `tests/codemode-render.test.ts`, `tests/codemode-cli.test.ts` |
 | Real codemode TUI A/B/C, opt-out, no-warning, legacy exclusion and recovery | `tests/tui-codemode.test.mjs`, `tests/fixtures/codemode-*` |
@@ -263,6 +283,7 @@ app.tools.expand again: five-line tail restored
 - Humans reviewing streaming and settled tool rows in Pi's TUI, and in omp's
   ANSI TUI and Tern frontend; exact PTY logs must be opened through a
   non-executing reader/escape visualizer, not `cat`.
+- Humans glancing at live tty screens in the Tern terminal HUD on omp.
 - Persisted Pi session entries containing tool result details.
 - Pi codemode scripts calling these tools through `ctx.executeTool()`.
 - Private path-based adoption in `piagent-config`, whose lifecycle owner links
@@ -304,8 +325,11 @@ existing backlogs; they do not weaken this output contract.
 ## Non-goals
 
 - No async full-log viewer in a tool row.
-- No preservation of child ANSI styling in model/result/TUI text; the raw log
-  is the recovery surface.
+- No child ANSI styling in model/result text or in Pi/omp tool rows; the raw
+  log is the recovery surface. The Tern HUD shows colors re-encoded from the
+  emulator, never the child's bytes.
+- No input from the Tern HUD; `write_stdin` stays the only way to drive a
+  session.
 - No new model tool or output-size parameter.
 - No change to process signaling, wake suppression, or kill escalation.
 - No archive cap or deletion policy in 0.9.0.

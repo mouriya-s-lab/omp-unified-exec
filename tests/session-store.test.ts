@@ -154,6 +154,59 @@ describe("SessionStore", () => {
 		assert.deepEqual(reasons, ["shutdown", "shutdown"]);
 	});
 
+	it("notifies once for inserted and stored sessions, ignores unknown removals, and unsubscribes", () => {
+		const store = new SessionStore({ maxSessions: 10, lruProtectedCount: 2 });
+		const snapshots: number[][] = [];
+		const unsubscribe = store.subscribe(() => {
+			snapshots.push(store.values().map((session) => session.id));
+		});
+
+		const session = stub(1, 1000);
+		store.insert(session);
+		assert.deepEqual(snapshots, [[1]]);
+
+		assert.equal(store.remove(999), undefined);
+		assert.deepEqual(snapshots, [[1]], "unknown removals must not notify");
+
+		assert.equal(store.remove(session.id), session);
+		assert.deepEqual(snapshots, [[1], []]);
+
+		unsubscribe();
+		store.insert(stub(2, 2000));
+		assert.deepEqual(snapshots, [[1], []], "unsubscribed listeners must not be called");
+	});
+
+	it("notifies once when an insert prunes at the cap and sees the post-prune values", () => {
+		const store = new SessionStore({ maxSessions: 1, lruProtectedCount: 0 });
+		store.insert(stub(1, 1000));
+
+		const snapshots: number[][] = [];
+		store.subscribe(() => {
+			snapshots.push(store.values().map((session) => session.id));
+		});
+
+		const { pruned } = store.insert(stub(2, 2000));
+		assert.equal(pruned?.id, 1);
+		assert.deepEqual(snapshots, [[2]], "prune plus insert must emit one post-mutation notification");
+	});
+
+	it("notifies once after terminateAll with sessions, but not when already empty", () => {
+		const store = new SessionStore({ maxSessions: 10, lruProtectedCount: 2 });
+		store.insert(stub(1, 1000));
+		store.insert(stub(2, 2000));
+
+		const snapshots: number[][] = [];
+		store.subscribe(() => {
+			snapshots.push(store.values().map((session) => session.id));
+		});
+
+		assert.equal(store.terminateAll().length, 2);
+		assert.deepEqual(snapshots, [[]]);
+
+		assert.deepEqual(store.terminateAll(), []);
+		assert.deepEqual(snapshots, [[]], "an empty terminateAll must not notify");
+	});
+
 	it("allocateId is monotonic (ids are never reused)", () => {
 		const store = new SessionStore({ maxSessions: 5, lruProtectedCount: 1 });
 		const id = store.allocateId();

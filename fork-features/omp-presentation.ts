@@ -10,12 +10,15 @@
  * On omp, exec_command / write_stdin / kill_session delegate to omp's own bash
  * renderer through display-only adapters; every other tool drops its Pi
  * renderers and gets omp's default card. Model-visible results are untouched.
+ * omp hosts also get the Tern terminal HUD (tern-terminal-hud.ts).
  */
 import type { ExtensionAPI, ToolDefinition, TruncationResult } from "@earendil-works/pi-coding-agent";
 
 import { sanitizeOutputText } from "../src/output-safety.ts";
 import { base64ByteLength, stringifyChars } from "../src/render.ts";
+import type { SessionStore } from "../src/session-store.ts";
 import { truncationMarker } from "../src/tool-result.ts";
+import { loadNativeRenderingState, mountTerminalHud } from "./tern-terminal-hud.ts";
 
 // ---------------- omp bash renderer contract ----------------
 
@@ -361,13 +364,28 @@ async function presentOnOmp(pi: ExtensionAPI): Promise<ExtensionAPI> {
 	return Object.create(pi, { registerTool: { value: registerTool } }) as ExtensionAPI;
 }
 
+/** What the extension hands back to host-specific features after activating. */
+export interface ActivatedExtension {
+	readonly store: SessionStore;
+}
+
 /**
  * Wraps the extension factory per host. Pi hosts activate synchronously with
  * `pi` unchanged. omp is identified by its injected `arktype` builder and
- * activates through {@link presentOnOmp}.
+ * activates through {@link presentOnOmp}, then mounts the Tern terminal HUD on
+ * the activated session store.
  */
 export function withHostPresentation(
-	activate: (pi: ExtensionAPI) => void,
+	activate: (pi: ExtensionAPI) => ActivatedExtension,
 ): (host: ExtensionAPI) => void | Promise<void> {
-	return (host) => ("arktype" in host ? presentOnOmp(host).then(activate) : activate(host));
+	return (host) => {
+		if (!("arktype" in host)) {
+			activate(host);
+			return;
+		}
+		// Both omp modules load before activating, so a reshaped omp fails plugin loading with nothing registered.
+		return Promise.all([presentOnOmp(host), loadNativeRenderingState()]).then(([pi, native]) =>
+			mountTerminalHud(pi, activate(pi).store, native),
+		);
+	};
 }

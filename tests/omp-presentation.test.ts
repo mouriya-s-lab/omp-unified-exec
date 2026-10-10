@@ -8,10 +8,12 @@ import {
 	killShellArgs,
 	parseResultView,
 	toShellResult,
+	type ActivatedExtension,
 	withHostPresentation,
 	writeStdinShellArgs,
 } from "../fork-features/omp-presentation.ts";
 import { renderExecCommandCall, renderProcessResult } from "../src/render.ts";
+import { SessionStore } from "../src/session-store.ts";
 import {
 	finalizeKillResult,
 	finalizeProcessResult,
@@ -346,11 +348,12 @@ describe("host presentation activation", () => {
 		const api = { registerTool: (tool: typeof definition) => registered.push(tool) } as unknown as ExtensionAPI;
 		let activations = 0;
 		let returned = false;
-		const activate = withHostPresentation((host) => {
+		const activate = withHostPresentation((host): ActivatedExtension => {
 			assert.equal(returned, false);
 			assert.equal(host, api);
 			activations++;
 			host.registerTool(definition);
+			return { store: new SessionStore({ maxSessions: 10, lruProtectedCount: 2 }) };
 		});
 		const result = activate(api);
 		returned = true;
@@ -369,9 +372,10 @@ describe("host presentation activation", () => {
 			registerTool: (tool: typeof definition) => registered.push(tool),
 		} as unknown as ExtensionAPI;
 		let activations = 0;
-		const activate = withHostPresentation((host) => {
+		const activate = withHostPresentation((host): ActivatedExtension => {
 			activations++;
 			host.registerTool(definition);
+			return { store: new SessionStore({ maxSessions: 10, lruProtectedCount: 2 }) };
 		});
 		const result = activate(api);
 		assert.ok(result instanceof Promise);

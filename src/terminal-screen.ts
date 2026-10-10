@@ -19,11 +19,16 @@
  *     up positionally with it.
  *   - alternate screen: the full screen.
  *   - nothing changed (rows, cursor, screen): `unchanged`.
- * Snapshots (partial TUI updates) never consume anything.
+ * Snapshots (partial TUI updates) and styled screens (live display) never
+ * consume anything.
+ *
+ * Styled screens are rebuilt from cell attributes, never from child bytes:
+ * the only control sequences they carry are the SGR codes written here.
  */
 
 // @xterm/headless ships CommonJS; Node's ESM loader exposes it only as the default export.
 import xtermHeadless from "@xterm/headless";
+import type { IBufferCell } from "@xterm/headless";
 
 const { Terminal } = xtermHeadless;
 type Terminal = InstanceType<typeof Terminal>;
@@ -59,6 +64,13 @@ export type TerminalObservation =
 
 export interface TerminalSnapshot {
 	readonly view: TerminalView;
+	readonly text: string;
+}
+
+/** The current screen with SGR styling, one line per terminal row. */
+export interface StyledScreen {
+	readonly view: TerminalView;
+	/** Rows joined by `\n`; trailing blank rows dropped. Only SGR (`ESC [ … m`) sequences appear. */
 	readonly text: string;
 }
 
@@ -106,6 +118,42 @@ function toLines(rows: readonly Row[], splitRow = 0): { lines: string[]; started
 	return { lines: trimmed, startedBefore: Math.min(startedBefore, trimmed.length) };
 }
 
+function paletteColor(color: number, base: number, brightBase: number, extended: number): string {
+	if (color < 8) return String(base + color);
+	if (color < 16) return String(brightBase + color - 8);
+	return `${extended};5;${color}`;
+}
+
+function rgbColor(color: number, extended: number): string {
+	return `${extended};2;${(color >> 16) & 0xff};${(color >> 8) & 0xff};${color & 0xff}`;
+}
+
+/** SGR parameters for a cell's attributes; empty for the default attribute. */
+function cellSgr(cell: IBufferCell): string {
+	if (cell.isAttributeDefault()) return "";
+	const params: string[] = [];
+	if (cell.isBold()) params.push("1");
+	if (cell.isDim()) params.push("2");
+	if (cell.isItalic()) params.push("3");
+	if (cell.isUnderline()) params.push("4");
+	if (cell.isBlink()) params.push("5");
+	if (cell.isInverse()) params.push("7");
+	if (cell.isInvisible()) params.push("8");
+	if (cell.isStrikethrough()) params.push("9");
+	if (cell.isOverline()) params.push("53");
+	if (cell.isFgPalette()) params.push(paletteColor(cell.getFgColor(), 30, 90, 38));
+	else if (cell.isFgRGB()) params.push(rgbColor(cell.getFgColor(), 38));
+	if (cell.isBgPalette()) params.push(paletteColor(cell.getBgColor(), 40, 100, 48));
+	else if (cell.isBgRGB()) params.push(rgbColor(cell.getBgColor(), 48));
+	return params.join(";");
+}
+
+/** A cell that draws nothing: blank glyph on the default background, not inverted. */
+function isBlankCell(cell: IBufferCell): boolean {
+	const chars = cell.getChars();
+	return (chars === "" || chars === " ") && cell.isBgDefault() && !cell.isInverse();
+}
+
 export class TerminalScreen {
 	readonly cols: number;
 	readonly rows: number;
@@ -121,6 +169,8 @@ export class TerminalScreen {
 	private lastAlt: ObservedScreen | undefined;
 	private lastScreen: TerminalScreenKind | undefined;
 	private disposed = false;
+	/** Notified after each child write is parsed into the screen. */
+	private readonly changeListeners = new Set<() => void>();
 
 	/**
 	 * @param reply receives the terminal's own responses to queries (cursor
@@ -141,10 +191,16 @@ export class TerminalScreen {
 	/** Feed child output, in arrival order. */
 	write(chunk: Uint8Array): void {
 		if (this.disposed) return;
-		this.enqueue(chunk);
+		this.enqueue(chunk, true);
 	}
 
-	private enqueue(data: Uint8Array | string): void {
+	/** Call `listener` each time a child write finishes parsing from now on (even one queued earlier); returns the unsubscribe. */
+	onChange(listener: () => void): () => void {
+		this.changeListeners.add(listener);
+		return () => this.changeListeners.delete(listener);
+	}
+
+	private enqueue(data: Uint8Array | string, childOutput: boolean): void {
 		this.pendingWrites++;
 		this.term.write(data, () => {
 			this.pendingWrites--;
@@ -153,6 +209,7 @@ export class TerminalScreen {
 				this.flushWaiters = [];
 				for (const resolve of waiters) resolve();
 			}
+			if (childOutput) for (const listener of this.changeListeners) listener();
 		});
 	}
 
@@ -189,6 +246,41 @@ export class TerminalScreen {
 		const buffer = this.term.buffer.active;
 		const rows = this.readRows(buffer.type, buffer.baseY, buffer.baseY + this.rows);
 		return { view: this.view(), text: toLines(rows).lines.join("\n") };
+	}
+
+	/**
+	 * The current screen with each row's colors and attributes as SGR, without
+	 * consuming anything. May lag unparsed output. Must not be called after release.
+	 */
+	styledScreen(): StyledScreen {
+		const buffer = this.term.buffer.active;
+		const cell = buffer.getNullCell();
+		const lines: string[] = [];
+		for (let y = buffer.baseY; y < buffer.baseY + this.rows; y++) {
+			const line = buffer.getLine(y);
+			if (!line) {
+				lines.push("");
+				continue;
+			}
+			let end = 0;
+			for (let x = 0; x < this.cols; x++) {
+				if (line.getCell(x, cell) && !isBlankCell(cell)) end = x + 1;
+			}
+			let out = "";
+			let current = "";
+			for (let x = 0; x < end; x++) {
+				if (!line.getCell(x, cell) || cell.getWidth() === 0) continue;
+				const sgr = cellSgr(cell);
+				if (sgr !== current) {
+					out += sgr === "" ? "\x1b[0m" : `\x1b[0;${sgr}m`;
+					current = sgr;
+				}
+				out += cell.getChars() || " ";
+			}
+			lines.push(current === "" ? out : `${out}\x1b[0m`);
+		}
+		while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+		return { view: this.view(), text: lines.join("\n") };
 	}
 
 	/** Consuming observation; serialized so concurrent callers never share or skip a boundary. */
@@ -262,7 +354,7 @@ export class TerminalScreen {
 		const historyMayBeTruncated = baseY >= this.scrollback;
 
 		// Drop the history we just read so the next observation aligns with this screen.
-		this.enqueue(ERASE_SCROLLBACK);
+		this.enqueue(ERASE_SCROLLBACK, false);
 		await this.flushed();
 
 		if (
@@ -289,6 +381,7 @@ export class TerminalScreen {
 	async release(): Promise<void> {
 		if (this.disposed) return;
 		this.disposed = true;
+		this.changeListeners.clear();
 		await this.flushed();
 		this.term.dispose();
 	}
