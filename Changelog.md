@@ -4,6 +4,8 @@ All notable changes to this project. **Newest entries go on top.**
 
 ## Unreleased
 
+- Load `@homebridge/node-pty-prebuilt-multiarch` through its published `lib/index.js` entry so omp's compiled Bun runtime can resolve the provider without reading dependency `package.json`; preserve the existing @homebridge-only security boundary.
+
 - Pin Pi-family development dependencies and locks to 1.0.0, retaining >=0.99.1 peers. Production code and package version are unchanged.
 - Assert Pi's native codemode documentation reference instead of the retired inline model declaration. Add wrapped/native generated-image and model-usage parity plus unknown-member fail-fast tests with no live models.
 - macOS strict types, `EXPECT_PTY=1 npm test` with 348 passes and three Windows-only skips, and all 21 isolated real-tmux cases pass. No npm publication or installed-package replacement.
