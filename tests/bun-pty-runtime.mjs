@@ -122,8 +122,52 @@ async function runKillCase() {
 	assert.ok(result.signal !== null || result.exitCode !== 0, JSON.stringify(result));
 }
 
+async function runProcessGroupKillCase() {
+	if (IS_WINDOWS) return;
+	const child = spawnChild({
+		command: ["/bin/sh", "-c", "trap '' HUP; sleep 60 & pid=$!; echo GROUP_READY=$pid; wait"],
+		cwd: process.cwd(),
+		env: process.env,
+		tty: true,
+		cols: 80,
+		rows: 24,
+	});
+	let killed = false;
+	let descendantPid;
+	const result = await collect(child, "process-group-kill", (output, activeChild) => {
+		const match = /GROUP_READY=(\d+)\r?\n/.exec(output);
+		if (killed || !match) return;
+		killed = true;
+		descendantPid = Number(match[1]);
+		activeChild.kill("SIGTERM");
+	});
+	assert.equal(result.processExited, true);
+	assert.equal(result.failureMessage, undefined, result.output);
+	assert.ok(descendantPid, result.output);
+
+	const deadline = Date.now() + 3000;
+	let descendantAlive = true;
+	while (descendantAlive && Date.now() < deadline) {
+		try {
+			process.kill(descendantPid, 0);
+			await Bun.sleep(25);
+		} catch {
+			descendantAlive = false;
+		}
+	}
+	if (descendantAlive) {
+		try {
+			process.kill(descendantPid, "SIGKILL");
+		} catch {
+			descendantAlive = false;
+		}
+	}
+	assert.equal(descendantAlive, false, `descendant ${descendantPid} survived PTY process-group kill`);
+}
+
 await runInteractiveCase();
 await runShellCase();
 await runRapidExitCase();
 await runKillCase();
+await runProcessGroupKillCase();
 console.log(`Bun PTY runtime passed on ${process.platform}-${process.arch}`);

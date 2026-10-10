@@ -244,6 +244,18 @@ function killWindowsTree(pid: number): void {
 	}
 }
 
+function killPosixProcessGroup(pid: number, signal: NodeJS.Signals): void {
+	try {
+		process.kill(-pid, signal);
+	} catch {
+		try {
+			process.kill(pid, signal);
+		} catch {
+			// already gone
+		}
+	}
+}
+
 /**
  * Windows: node-pty's conpty connection holds a worker thread and named-pipe
  * sockets that keep the Node event loop alive even after the child exits.
@@ -429,11 +441,7 @@ function spawnBunPty(runtime: BunRuntime, opts: SpawnOptions): SpawnedChild {
 				killWindowsTree(child.pid);
 				return;
 			}
-			try {
-				child.kill(signal);
-			} catch {
-				// already gone
-			}
+			killPosixProcessGroup(child.pid, signal);
 		},
 	};
 }
@@ -643,15 +651,7 @@ function spawnPipes(opts: SpawnOptions): SpawnedChild {
 				killWindowsTree(child.pid);
 				return;
 			}
-			try {
-				process.kill(-child.pid, signal);
-			} catch {
-				try {
-					process.kill(child.pid, signal);
-				} catch {
-					// already gone
-				}
-			}
+			killPosixProcessGroup(child.pid, signal);
 		},
 	};
 }
