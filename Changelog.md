@@ -4,6 +4,8 @@ All notable changes to this project. **Newest entries go on top.**
 
 ## Unreleased
 
+## 0.12.4 - 2026-10-10
+
 - Fix unified-exec tool rows on oh-my-pi (omp) ([#11](https://github.com/mouriya-s-lab/omp-unified-exec/issues/11)). omp passes extension renderers different arguments than Pi, so the Pi renderers threw on every repaint (`Tool renderer failed … state.startedAt`). omp then showed its generic card, with an argument dump and the whole model envelope (`chunk_id`, `original_token_count`, …). Tern's native views got no `describeCall`/`describeResult` at all.
 - On omp, `exec_command` now renders like omp's built-in bash tool, using omp's own bash renderer (`@oh-my-pi/pi-tui/tools`): `$ cmd` with output, the exit code and error tone on failure, `Backgrounded: session N` for yielded sessions, and the truncation marker with the full log path as the last line. `[failure: …]` and `[signal: …]` lines appear when present. `write_stdin` and `kill_session` show their action as a bash comment (`# poll session N`, `# stdin → session N: "…"`, `# kill session N (SIGTERM)`) above the same output view. `set_on_exit` and `list_sessions` use omp's default card. Model-visible content, details and script results are unchanged.
 - omp is detected by its injected `ExtensionAPI.arktype`. If omp's bash renderer is missing or changed shape, plugin loading fails instead of re-registering renderers omp cannot call. Pi hosts activate synchronously with unchanged renderers.
