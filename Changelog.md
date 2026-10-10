@@ -4,6 +4,8 @@ All notable changes to this project. **Newest entries go on top.**
 
 ## Unreleased
 
+## 0.14.0 - 2026-10-11
+
 - Tern terminal HUD on omp ([#17](https://github.com/mouriya-s-lab/omp-unified-exec/issues/17)). While omp renders natively in Tern and a tty session exists, a pill above the composer counts tty sessions. Clicking it opens a non-modal panel floating above the pill with one collapsible card per session: `#id`, command, running/exit state and the current screen in color, updated as output arrives without any tool call. The panel is read-only; omp's ANSI TUI, Pi hosts and model-visible results (still plain text) are unchanged.
 - `TerminalScreen.styledScreen()` re-encodes the current screen as SGR from cell attributes (no child bytes pass through) and `onChange()` reports parsed output; `ExecSession` exposes both for tty sessions. `SessionStore.subscribe()` reports membership changes. On omp, `@oh-my-pi/pi-tui/native/state` is now required alongside the bash renderer.
 
