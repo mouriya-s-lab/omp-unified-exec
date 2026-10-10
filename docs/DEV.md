@@ -10,8 +10,9 @@ and tool reference, see [../README.md](../README.md).
   [tsx](https://github.com/privatenumber/tsx)).
 - **Linux, macOS, or Windows.** On Windows, Git Bash is strongly
   recommended (it's the default shell when on PATH; otherwise commands
-  fall back to `powershell`). PTY mode uses ConPTY via the
-  `@homebridge/node-pty-prebuilt-multiarch` win32 prebuilds.
+  fall back to `powershell`). Node PTY tests use the optional
+  `@homebridge/node-pty-prebuilt-multiarch` ConPTY backend; Bun 1.4+ uses
+  its native `Bun.Terminal` backend.
 - **pi** installed and runnable (`pi --version`). End users install with
   `pi install npm:pi-unified-exec`; for development you want a local clone
   of this repo (see below).
@@ -39,10 +40,10 @@ or install directly from the local path (writes into pi's settings):
 pi install -l ./path/to/pi-unified-exec
 ```
 
-`npm install` fetches `@homebridge/node-pty-prebuilt-multiarch` prebuilds. If your
-platform has no prebuild the optional dep fails silently — pipe mode
-(`tty: false`) still works; only `tty: true` will error with a clear
-message at call time.
+`npm install` fetches `@homebridge/node-pty-prebuilt-multiarch` for the Node
+runtime tests. Bun 1.4+ does not load that optional package; its PTY path uses
+`Bun.Terminal`. If the Node package has no usable prebuild, pipe mode still
+works and only Node-hosted `tty: true` reports the load error.
 
 Verify the install:
 
@@ -74,7 +75,7 @@ sibling view, indexed by concern:
 | Terminal-inert result/partial text | `src/output-safety.ts` |
 | Bounded process/kill details + LLM-visible text | `src/tool-result.ts` (`truncateTail` from Pi) |
 | C-style escape decoding for `chars` | `src/unescape.ts` |
-| PTY vs pipe spawning, Windows tree-kill | `src/pty.ts` |
+| PTY backends (Bun.Terminal / Node node-pty), pipes, Windows tree-kill | `src/pty.ts` |
 | Shell selection & argv construction | `src/shell.ts` |
 | Explicit call/result renderers for all five tools | `src/render.ts` |
 | Default-on native codemode preview wrapper | `src/codemode-render.ts` |
@@ -138,8 +139,13 @@ npx tsx --test tests/head-tail-buffer.test.ts \
 npx tsx --test tests/e2e.test.ts
 npx tsx --test tests/chars-encoding.test.ts
 
-# PTY-backed (requires @homebridge/node-pty-prebuilt-multiarch to have loaded)
+# Node PTY backend (requires @homebridge/node-pty-prebuilt-multiarch)
 npx tsx --test tests/e2e-pty.test.ts
+
+# Bun PTY backend, directly and from a compiled executable
+bun tests/bun-pty-runtime.mjs
+bun build --compile tests/bun-pty-runtime.mjs --outfile /tmp/bun-pty-runtime
+/tmp/bun-pty-runtime
 
 # Empty-poll duration policy, shared waits and wake delivery
 npx tsx --test tests/time.test.ts tests/long-wait.test.ts tests/wake-e2e.test.ts

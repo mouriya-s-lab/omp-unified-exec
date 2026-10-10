@@ -90,11 +90,13 @@ pi install npm:pi-unified-exec            # global (~/.pi/agent/settings.json)
 pi install -l npm:pi-unified-exec         # project-local (.pi/settings.json)
 ```
 
-`pi install` runs `npm install` under the hood, which fetches
-`@homebridge/node-pty-prebuilt-multiarch` (prebuilt binaries for
-linux/macOS/Windows — no compilation). If the install fails on your
-platform, pipe mode (`tty: false`) still works, but PTY mode (`tty: true`)
-will error with a clear message.
+Under Node, `pi install` fetches the optional
+`@homebridge/node-pty-prebuilt-multiarch` package and its prebuilt binaries for
+Linux, macOS, and Windows. Under Bun 1.4 or newer—including a
+`bun build --compile` host—PTY mode uses Bun's native `Bun.Terminal` instead
+and does not load that package. If the active runtime provides neither
+backend, pipe mode (`tty: false`) still works and `tty: true` reports the
+missing capability.
 
 To try without installing:
 
@@ -115,7 +117,7 @@ Runs a command in a persistent session.
 | `cmd` | string | — | Shell command. Required. |
 | `workdir` | string | turn cwd | Working directory. |
 | `shell` | string | `bash` | Shell binary. On Windows: `bash` if on PATH, else `powershell`. `cmd` / `powershell` / `pwsh` get shell-appropriate flags. |
-| `tty` | boolean | `false` | Allocate a PTY (requires node-pty). |
+| `tty` | boolean | `false` | Allocate a PTY (native `Bun.Terminal` under Bun; node-pty under Node). |
 | `cols` | number | `120` | PTY width in columns (`tty: true` only; ignored for pipes). Clamped to [20, 500]. |
 | `rows` | number | `30` | PTY height in rows (`tty: true` only; ignored for pipes). Clamped to [5, 300]. |
 | `yield_time_ms` | number | `10_000` | How long this call stays attached waiting for output (an attachment window, not the command's lifetime), clamped to [250, 30_000]. |
@@ -600,7 +602,7 @@ src/
 ├── format-time.ts        # shared elapsed / remaining human labels
 ├── completion.ts         # CompletionCoordinator: on_exit "wake" scheduling (exactly-once)
 ├── notify.ts             # Notify / Gate / sleep primitives
-├── pty.ts                # node-pty loader + pipes fallback + Windows tree-kill
+├── pty.ts                # Bun.Terminal + Node node-pty backends, pipes, Windows tree-kill
 ├── shell.ts              # shell selection & argv construction (Windows-aware)
 ├── output-safety.ts      # terminal-control stripping (raw bytes stay in logs)
 ├── tool-result.ts        # bounded process/kill envelopes + model-visible text
@@ -753,12 +755,14 @@ a delayed 4000-line kill drain, renderer registration, spawn-failure
 diagnostics, EPIPE safety, exited-session reporting, shutdown SIGKILL
 escalation, onUpdate streaming, and the `/unified-exec-sessions` command), pure
 output-envelope, terminal-control, cache-refresh, and collapse/expand/re-collapse
-renderer coverage, PTY mode (3 scenarios: simple command, Python REPL drive, Ctrl-C
-injection, cmd.exe verbatim payload), shell selection (per-shell argv
-construction, PATH lookup with synthetic PATH fixtures, Windows
-bash→powershell fallback both branches, WSL-stub exclusion, binary
-resolution caching), PTY loader guard (EXPECT_PTY assertion so a prebuild
-load failure is a red build, ConPTY disposal mock), and cmd.exe quoting
+renderer coverage, Node PTY mode (simple command, Python REPL drive, Ctrl-C
+injection, cmd.exe verbatim payload), a dependency-free Bun PTY runtime fixture
+(input/output, geometry, quoted/non-ASCII argv, shell command, normal exit, and
+kill), shell selection (per-shell argv construction, PATH lookup with synthetic
+PATH fixtures, Windows bash→powershell fallback both branches, WSL-stub
+exclusion, binary resolution caching), Node PTY loader guard (`EXPECT_PTY`
+assertion so a prebuild load failure is a red build, ConPTY disposal mock), and
+cmd.exe quoting
 e2e (operators, embedded quotes, %VAR%, parentheses, pipes), and codemode
 script results (`outputSchema`/`structuredContent` for all five tools), native
 codemode renderer cache/width/expansion, and offline actual-CLI parity for
@@ -766,7 +770,8 @@ settings, default activation with and without the legacy exclusion, explicit opt
 Real-tmux acceptance also exercises object/settled/multiline script output at
 40/80/100 columns, regular/fullscreen, three themes and spill-path recovery.
 
-CI runs the suite on ubuntu, macos, and windows runners.
+CI runs the Node suite on Node 22/24 and the Bun PTY fixture both from source
+and as a compiled executable on Ubuntu, macOS, and Windows runners.
 
 ## Improvements over codex
 
@@ -841,10 +846,10 @@ completion and never revisit the log, it'll linger until your next reboot.
 
 ## Windows
 
-Supported — both pipes and PTY mode:
+Supported — both pipes and PTY mode. `tty: true` uses ConPTY through the
+runtime-native backend: `Bun.Terminal` under Bun 1.4+, or
+`@homebridge/node-pty-prebuilt-multiarch` under Node.
 
-- **PTY (`tty: true`) uses ConPTY** via `@homebridge/node-pty-prebuilt-multiarch`
-  (win32 prebuilds — no compilation).
 - **Default shell**: `bash`, located with an extended probe (first hit
   wins, cached):
   1. `PI_UNIFIED_EXEC_BASH` env var (explicit override)
@@ -880,12 +885,13 @@ Supported — both pipes and PTY mode:
   (access denied, protected process), `kill_session` says so and the session
   stays registered for retry — it is never silently dropped while the
   process lives.
-- **Supply-chain note (PTY prebuilds).** npm's lockfile integrity covers the
-  `@homebridge/node-pty-prebuilt-multiarch` JS payload, but the native
-  ConPTY binary is fetched at install time by `prebuild-install` from the
-  package's GitHub releases (TLS, homebridge org) — those bytes are not
-  covered by an npm digest. The dependency is pinned exactly; if your threat
-  model requires more, vendor the prebuild or build node-pty from source.
+- **Supply-chain note (Node PTY prebuilds).** This does not apply to Bun's
+  built-in terminal backend. Under Node, npm's lockfile integrity covers the
+  `@homebridge/node-pty-prebuilt-multiarch` JS payload, but the native ConPTY
+  binary is fetched at install time by `prebuild-install` from the package's
+  GitHub releases (TLS, homebridge org); those bytes are not covered by an npm
+  digest. The dependency is pinned exactly; stricter Node deployments can
+  vendor the prebuild or build node-pty from source.
 - Ctrl-C injection (`write_stdin chars="\x03"`) works in PTY mode — ConPTY
   translates it into a real console interrupt. In pipe mode it's just a byte,
   as on every platform.

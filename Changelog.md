@@ -4,7 +4,8 @@ All notable changes to this project. **Newest entries go on top.**
 
 ## Unreleased
 
-- Load `@homebridge/node-pty-prebuilt-multiarch` through its published `lib/index.js` entry so omp's compiled Bun runtime can resolve the provider without reading dependency `package.json`; preserve the existing @homebridge-only security boundary.
+- Use Bun 1.4's native `Bun.Terminal` backend whenever the host is Bun, including compiled executables; keep `@homebridge/node-pty-prebuilt-multiarch` as the lazy Node-only fallback. Process exit and terminal-stream closure are tracked independently, with the terminal's EOF callback authoritative for completion so every byte Bun delivers before closure reaches the session. Data and exit callbacks that fire before `Bun.spawn()` returns are replayed after the caller subscribes.
+- Add a dependency-free Bun runtime fixture covering PTY input/output, initial geometry, argument quoting, shell execution, rapid and normal exit, and kill. CI runs it from source and from `bun build --compile` executables on macOS, Linux, and Windows; the existing Node 22/24 matrix continues to exercise the native package backend.
 
 - Pin Pi-family development dependencies and locks to 1.0.0, retaining >=0.99.1 peers. Production code and package version are unchanged.
 - Assert Pi's native codemode documentation reference instead of the retired inline model declaration. Add wrapped/native generated-image and model-usage parity plus unknown-member fail-fast tests with no live models.
