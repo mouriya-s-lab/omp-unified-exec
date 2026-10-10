@@ -4,6 +4,8 @@ All notable changes to this project. **Newest entries go on top.**
 
 ## Unreleased
 
+## 0.12.3 - 2026-10-10
+
 - Use Bun 1.4's native `Bun.Terminal` backend whenever the host is Bun, including compiled executables; keep `@homebridge/node-pty-prebuilt-multiarch` as the lazy Node-only fallback. Process exit and terminal-stream closure are tracked independently, with the terminal's EOF callback authoritative for completion so every byte Bun delivers before closure reaches the session. Data and exit callbacks that fire before `Bun.spawn()` returns are replayed after the caller subscribes.
 - Add a dependency-free Bun runtime fixture covering PTY input/output, initial geometry, argument quoting, shell execution, rapid and normal exit, kill, and POSIX process-group termination. Bun PTY termination now signals the whole POSIX process group instead of only the direct shell, matching the existing `SpawnedChild.kill()` contract. CI runs the fixture from source and from `bun build --compile` executables on macOS, Linux, and Windows; the existing Node 22/24 matrix continues to exercise the native package backend.
 
