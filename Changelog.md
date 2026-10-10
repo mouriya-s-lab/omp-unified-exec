@@ -4,6 +4,12 @@ All notable changes to this project. **Newest entries go on top.**
 
 ## Unreleased
 
+## 0.14.3 - 2026-10-11
+
+- Tern terminal HUD no longer disturbs omp's dock ([#21](https://github.com/mouriya-s-lab/omp-unified-exec/issues/21)). Its pill was a dock row above the composer: it pushed omp's working timer and todo HUD up by 36px and overlapped the context meter. The widget now sits below the editor and describes only an overlay chip at the pane's top-left, so the activity line, todo HUD, meter and composer keep their native positions (measured against a widget-free baseline with a running turn and todos).
+- Clicking the chip opens the Terminals sheet, built like omp's Background jobs sheet ([#23](https://github.com/mouriya-s-lab/omp-unified-exec/issues/23)): a centred sheet with the session list, the selected session's status and current screen, and Close (Esc). Click or ↑/↓ selects a session; its screen starts at the newest row instead of inheriting the previous session's scroll. The sheet is `lg` while every screen fits 88 columns, else full-width, and never scrolls itself: a fitting screen scrolls inside itself, a wider one shows its newest rows in a sideways-scrolling grid. Esc closes the sheet without stopping the running turn. The tab strip and the hand-sized panel are gone.
+- Tests cover the overlay-only chip, the sheet's list, per-session detail keys, size choice, line budgets, wide-screen cropping and the chip opening a custom overlay.
+
 ## 0.14.2 - 2026-10-11
 
 - Tern terminal HUD: the terminal scrolls, not the panel ([#21](https://github.com/mouriya-s-lab/omp-unified-exec/issues/21)). Every session card showed its full screen, so a 30–40 row screen overflowed the panel's 60% height and the whole panel scrolled while the screen itself could not. The panel now shows one session at a time, picked from a tab strip, and a screen that fits the panel width is bounded to the panel's line budget (from omp's terminal rows): it scrolls inside itself and follows the newest row, and the panel never scrolls. A screen wider than the panel still scrolls sideways; Tern's plain-text grid has no vertical scroll of its own, so such a screen taller than the budget scrolls with the panel.
