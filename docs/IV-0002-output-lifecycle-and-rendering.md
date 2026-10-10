@@ -39,6 +39,12 @@ The initiative establishes a durable output contract across these layers:
    including call summaries,
    spacers, clipping hint and native full-output-path footer; leave expanded
    output and all model/script data native.
+6. **oh-my-pi presentation (fork):** omp calls extension renderers with its own
+   signatures and its Tern frontend reads `describeCall`/`describeResult`, so
+   the Pi renderers threw there and omp showed the raw model envelope. On omp,
+   `exec_command`, `write_stdin` and `kill_session` present through omp's own
+   bash renderer from the same bounded `details`; the other tools use omp's
+   default card.
 
 ## Requirements
 
@@ -57,9 +63,12 @@ The initiative establishes a durable output contract across these layers:
   rather than inferring liveness from the presence of `session_id`.
 - Preserve failed-kill ownership: an unconfirmed kill remains registered and is
   reported as running.
-- Give all five tools explicit call and result renderers.
+- On Pi, give all five tools explicit call and result renderers and use
+  `keyHint("app.tools.expand", ...)`, not a hard-coded Ctrl+O label. On omp,
+  never register Pi-signature renderers: exec/write/kill provide omp render and
+  describe hooks delegating to omp's bash renderer; set_on_exit and
+  list_sessions use omp's bounded default card.
 - Count collapsed child output in visual lines after terminal wrapping.
-- Use `keyHint("app.tools.expand", ...)`, not a hard-coded Ctrl+O label.
 - Keep truncation and log-recovery warnings visible while collapsed.
 - Do not synchronously load an arbitrary log file when expanded. Expanded mode
   shows the complete bounded result; `log_path` owns complete-stream recovery.
@@ -90,6 +99,10 @@ The initiative establishes a durable output contract across these layers:
 | Wrap the public factory via a receiver-bound API proxy | Keep native execution/schema/loadout/persistence and method receivers intact; intercept only tool registration and result rendering. |
 | Keep native ordering and clip the rendered head at ten rows | Bound the whole result text component. Call summaries can consume the budget; reserve recovery/hint footer space. Script-call and separate image components are outside this cap. |
 | Use a non-numeric clipping hint | Native rendering has already hidden output, so its rendered row count is not the full-output hidden-row count. |
+| Present on omp through omp's exported bash renderer | omp's `toolRenderers.bash` (`@oh-my-pi/pi-tui/tools`) already owns collapse, expansion, exit/background status and both ANSI and Tern views; reimplementing them on omp's native view primitives would couple deeper. Only a pure display adapter is plugin code. omp is identified by its injected `ExtensionAPI.arktype`; on omp a missing or reshaped bash renderer fails plugin loading instead of silently re-registering Pi renderers. Pi activation stays synchronous and unchanged. |
+| Show write/kill actions as bash comments | `# poll session N`, `# stdin → session N: "…"`, `# kill session N (SIGTERM)` name the action without presenting input bytes as an executable command; base64 input shows only its byte count. |
+| Append the truncation marker to the omp display text | The marker and `log_path` live outside `details.output`; appending `truncationMarker()` keeps recovery visible as the last collapsed line without claiming the log is an omp artifact. |
+| Mark omp Tern failures with view tone, not result `isError` | Tern derives card status from the host result's `isError`, which stays false for a nonzero exit because that is an ordinary completion for the model. The describe view sets `tone: "error"` for failed exits, signals, start failures and failed or unknown kills; the exit chip comes from omp's bash head. |
 
 ## Implementation map
 
@@ -99,7 +112,8 @@ The initiative establishes a durable output contract across these layers:
 | Shared output envelope, truncation, process/kill text | `src/tool-result.ts` |
 | Codemode script schemas and projections | `src/script-result.ts`, `tests/script-result.test.ts` |
 | Kill collection, partial sanitization, and tool registration | `src/index.ts` (`TerminateOutcome`, `buildStreamUpdate`, `kill_session`) |
-| Explicit renderers and shared five-line preview | `src/render.ts` |
+| Explicit Pi renderers and shared five-line preview | `src/render.ts` |
+| omp host selection, bash-renderer delegation, result/args display adapters | `fork-features/omp-presentation.ts`, `fork-features/omp-tools.d.ts`; wired by `withHostPresentation` in `src/index.ts`; tests `tests/omp-presentation.test.ts` |
 | Native codemode factory/renderer wrapper | `src/codemode-render.ts`; registration from `src/index.ts` |
 | Codemode width/cache/schema and real-CLI parity | `tests/codemode-render.test.ts`, `tests/codemode-cli.test.ts` |
 | Real codemode TUI A/B/C, opt-out, no-warning, legacy exclusion and recovery | `tests/tui-codemode.test.mjs`, `tests/fixtures/codemode-*` |
@@ -131,6 +145,25 @@ whose GitHub issues are intentionally disabled:
   quota/failure concerns tracked below.
 
 ## Evidence and reproduction
+
+omp 18.8.7 presentation qualification, 2026-10-10, macOS arm64
+([#11](https://github.com/mouriya-s-lab/omp-unified-exec/issues/11)). The
+installed omp binary loaded the checkout with `-e src/index.ts --keep-builtin-bash`
+and an offline scripted provider extension that emits tool calls only. Seventeen
+calls covered failed and successful exits, 14-line collapse with Ctrl+O, a
+yielded session followed by a poll, `seq 1 100000` truncation, a missing
+workdir, `kill -TERM $$`, a tty `cat` driven by text and base64 stdin,
+`set_on_exit`, `list_sessions` (non-empty and empty), a successful kill, and an
+unknown kill. In the ANSI TUI (tmux), the exec, write and kill cards match the
+built-in bash card: `$ cmd`, Output, `Exit: N` and error border for failures,
+`Backgrounded: session N`, and the truncation marker with the full log path
+while collapsed. In TSP frames from a real PTY handshake, the tool nodes carry
+the bash head (command target, `lang: bash`, exit chip), and failures have
+`tone: "error"`. Neither frontend showed envelope fields, and the logs had zero
+`Tool renderer failed` / `Tool describe failed` entries. The same day,
+`npm test` passed 371 tests with three Windows-only skips, and
+`npm run test:tui` passed 21. TSP evidence is wire-level; no Tern GUI
+screenshot was taken.
 
 Pi 1.0.0 qualification, 2026-10-02, macOS arm64/Node 24.21.0:
 exact development pins/locks updated, production renderer/executor unchanged.
@@ -210,8 +243,9 @@ app.tools.expand again: five-line tail restored
 
 - Pi model turns using `exec_command`, `write_stdin`, `kill_session`, or
   `list_sessions`.
-- Humans reviewing streaming and settled tool rows in Pi's TUI; exact PTY logs
-  must be opened through a non-executing reader/escape visualizer, not `cat`.
+- Humans reviewing streaming and settled tool rows in Pi's TUI, and in omp's
+  ANSI TUI and Tern frontend; exact PTY logs must be opened through a
+  non-executing reader/escape visualizer, not `cat`.
 - Persisted Pi session entries containing tool result details.
 - Pi codemode scripts calling these tools through `ctx.executeTool()`.
 - Private path-based adoption in `piagent-config`, whose lifecycle owner links

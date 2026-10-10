@@ -219,13 +219,13 @@ export function renderListSessionsCall(
 	return text;
 }
 
-function base64ByteLength(b64: string): number {
+export function base64ByteLength(b64: string): number {
 	const compact = b64.replace(/\s+/g, "");
 	const padding = compact.endsWith("==") ? 2 : compact.endsWith("=") ? 1 : 0;
 	return Math.max(0, Math.floor((compact.length * 3) / 4) - padding);
 }
 
-function stringifyChars(chars: string): string {
+export function stringifyChars(chars: string): string {
 	const escaped = chars
 		.replace(/\x03/g, "^C")
 		.replace(/\x04/g, "^D")
