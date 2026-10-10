@@ -4,6 +4,10 @@ All notable changes to this project. **Newest entries go on top.**
 
 ## Unreleased
 
+## 0.14.1 - 2026-10-11
+
+- Fix the Tern terminal HUD scrambling wide screens ([#19](https://github.com/mouriya-s-lab/omp-unified-exec/issues/19)). The panel's 720px card held about 95 columns, and Tern's `ansi` node reflows at its width, so a 120–140 column screen broke its box lines and turned full-width background rows into stripes. The panel now spans the pane width (top 60%, so the pill and composer stay usable). A screen that fits draws as a colored grid that never wraps; a wider one draws as an unwrapped plain-text grid that scrolls sideways, so nothing is cut off. The panel follows window width changes.
+
 ## 0.14.0 - 2026-10-11
 
 - Tern terminal HUD on omp ([#17](https://github.com/mouriya-s-lab/omp-unified-exec/issues/17)). While omp renders natively in Tern and a tty session exists, a pill above the composer counts tty sessions. Clicking it opens a non-modal panel floating above the pill with one collapsible card per session: `#id`, command, running/exit state and the current screen in color, updated as output arrives without any tool call. The panel is read-only; omp's ANSI TUI, Pi hosts and model-visible results (still plain text) are unchanged.

@@ -53,10 +53,11 @@ The initiative establishes a durable output contract across these layers:
    history plus the current screen and cursor.
 8. **Tern terminal HUD (fork):** a tool result shows a tty screen only as it
    was when that call returned. On omp rendering natively in Tern, a dock pill
-   counts the stored tty sessions; clicking it opens a non-modal panel floating
-   above the pill, with one collapsible card per session showing its current
-   screen in color and following new output without any tool call
-   ([#17](https://github.com/mouriya-s-lab/omp-unified-exec/issues/17)).
+   counts the stored tty sessions; clicking it opens a non-modal, full-width
+   panel along the top of the pane, with one collapsible card per session
+   showing its current screen as a grid and following new output without any
+   tool call ([#17](https://github.com/mouriya-s-lab/omp-unified-exec/issues/17),
+   [#19](https://github.com/mouriya-s-lab/omp-unified-exec/issues/19)).
 
 ## Requirements
 
@@ -132,7 +133,9 @@ The initiative establishes a durable output contract across these layers:
 | Align history by erasing the emulator's scrollback (ED3) after each observation | The next observation's history then starts at the previous screen's top row, so positional comparison is exact. Rejected: counting scroll events into absolute line numbers, which leaving the alternate screen, DECSTBM regions, ED3 and RIS all break. |
 | Bound tty history by cells, not lines | History rows = 240000 cells / `cols`, at least one screen; reaching the cap reports `history_may_be_truncated` because the emulator exposes no exact eviction count. |
 | Tern HUD inside the omp extension, not a Tern Luau plugin | The sessions and their emulators live in this process; a dock widget reads them directly. A Luau plugin block would need the screen pushed to it across processes (a second copy of state) and shows as a pane, not a floating panel (owner's choice, [#17](https://github.com/mouriya-s-lab/omp-unified-exec/issues/17)). |
-| Panel = an `overlay` node in the widget's own description | omp's reconciler hoists `overlay` nodes from component descriptions into the surface `layer` and resolves `anchor.node` against the component's keypaths (omp `packages/tui/src/native/reconcile.ts`), so the panel floats above the pill without focus. Rejected: `ctx.ui.custom({ overlay: true })`, because omp's `showOverlay` always takes focus and renders it modal. |
+| Panel = an `overlay` node in the widget's own description | omp's reconciler hoists `overlay` nodes from component descriptions into the surface `layer` (omp `packages/tui/src/native/reconcile.ts`), so the panel shows without focus. Rejected: `ctx.ui.custom({ overlay: true })`, because omp's `showOverlay` always takes focus and renders it modal. |
+| Full-width panel, height bounded to 60% | A screen is a fixed grid (default 120 columns); the `lg` card (720px) held about 95 columns at a 1280px window, so wide screens could not show unwrapped ([#19](https://github.com/mouriya-s-lab/omp-unified-exec/issues/19)). `size: "full"` spans the pane; the common `max.h` keeps the pill (to close it) and the composer uncovered below. |
+| Fitting screen → `ansi`; wider screen → unwrapped `code` | Tern's `ansi` reflows at the block width, which broke box lines and turned full-width background rows into stripes. A screen at most `surface cols − PANEL_INSET_COLS` wide (omp's `DescribeContext.cols`) draws as `ansi` with colors and never wraps; a wider one draws as a `code` block of the same rows without SGR, which scrolls sideways. Rejected: `rows`, which clips the right edge with no scrolling; `code` always, which drops colors that fit; a smaller font, because an extension cannot send stylesheets. The description is re-made when the surface width changes. |
 | Toggle by a pill action, fold per card in Tern | The pill click is an `action` routed to the widget's `handleNativeEvent`; card folds are Tern-local, keyed by session id, so they survive redraws without round trips. |
 | HUD colors from cell attributes | `TerminalScreen.styledScreen()` writes SGR for palette/256/RGB colors and bold, dim, italic, underline, blink, inverse, invisible, strikethrough and overline. Child OSC, cursor and mode sequences cannot pass, because nothing is copied from the byte stream. |
 | Mount only while native and a tty session exists | omp's `isNativeRendering`/`onNativeRenderingChange` (`@oh-my-pi/pi-tui/native/state`) gate the widget, so the ANSI TUI never gets the widget container's spacer row. Store membership and native changes re-evaluate the gate; a missing module fails omp plugin loading before anything registers, like the bash renderer. |
@@ -150,7 +153,7 @@ The initiative establishes a durable output contract across these layers:
 | Kill collection, partial sanitization, and tool registration | `src/index.ts` (`TerminateOutcome`, `buildStreamUpdate`, `kill_session`) |
 | Explicit Pi renderers and shared five-line preview | `src/render.ts` |
 | omp host selection, bash-renderer delegation, result/args display adapters | `fork-features/omp-presentation.ts`, `fork-features/omp-tools.d.ts`; wired by `withHostPresentation` in `src/index.ts`; tests `tests/omp-presentation.test.ts` |
-| Tern terminal HUD: pill, floating panel, mount gate | `fork-features/tern-terminal-hud.ts`, mounted by `withHostPresentation` with the store `activate` returns; tests `tests/tern-terminal-hud.test.ts` |
+| Tern terminal HUD: pill, full-width panel, fit-or-scroll grids, mount gate | `fork-features/tern-terminal-hud.ts`, mounted by `withHostPresentation` with the store `activate` returns; tests `tests/tern-terminal-hud.test.ts` |
 | Native codemode factory/renderer wrapper | `src/codemode-render.ts`; registration from `src/index.ts` |
 | Codemode width/cache/schema and real-CLI parity | `tests/codemode-render.test.ts`, `tests/codemode-cli.test.ts` |
 | Real codemode TUI A/B/C, opt-out, no-warning, legacy exclusion and recovery | `tests/tui-codemode.test.mjs`, `tests/fixtures/codemode-*` |
