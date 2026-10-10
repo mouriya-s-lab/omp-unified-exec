@@ -45,6 +45,12 @@ The initiative establishes a durable output contract across these layers:
    `exec_command`, `write_stdin` and `kill_session` present through omp's own
    bash renderer from the same bounded `details`; the other tools use omp's
    default card.
+7. **Rendered tty output:** PTY children draw with cursor movement, erases,
+   carriage returns and the alternate screen. Stripping those controls left
+   every redraw appended to the previous one, so neither the model nor a human
+   saw the terminal's actual state. tty sessions now feed their output into a
+   per-session headless terminal emulator, and each result reports the unseen
+   history plus the current screen and cursor.
 
 ## Requirements
 
@@ -56,9 +62,15 @@ The initiative establishes a durable output contract across these layers:
 - Keep the full retained stream out of result details; `details.output` is the
   canonical bounded body for exec, write, and kill.
 - Strip ANSI/VT sequences and unsafe C0/C1 controls before child text reaches
-  model content, persisted details, partial updates, or custom renderers. Keep
-  exact raw bytes only in the session log and sanitize again while rendering
-  legacy/fallback details.
+  model content, persisted details, partial updates, or custom renderers. Pipe
+  text is stripped directly; tty bytes are first interpreted by the session's
+  terminal emulator and only its rendered plain text (sanitized again) leaves
+  it. Keep exact raw bytes only in the session log and sanitize again while
+  rendering legacy/fallback details.
+- tty observations are consuming and serialized per session; a cancelled empty
+  poll does not observe. Streaming snapshots never consume. The emulator is
+  read only after every written chunk is parsed, and released after the session
+  leaves ownership and its pending writes are parsed.
 - Represent operation and state explicitly (`operation`, `status`, `running`),
   rather than inferring liveness from the presence of `session_id`.
 - Preserve failed-kill ownership: an unconfirmed kill remains registered and is
@@ -103,12 +115,17 @@ The initiative establishes a durable output contract across these layers:
 | Show write/kill actions as bash comments | `# poll session N`, `# stdin → session N: "…"`, `# kill session N (SIGTERM)` name the action without presenting input bytes as an executable command; base64 input shows only its byte count. |
 | Append the truncation marker to the omp display text | The marker and `log_path` live outside `details.output`; appending `truncationMarker()` keeps recovery visible as the last collapsed line without claiming the log is an omp artifact. |
 | Mark omp Tern failures with view tone, not result `isError` | Tern derives card status from the host result's `isError`, which stays false for a nonzero exit because that is an ordinary completion for the model. The describe view sets `tone: "error"` for failed exits, signals, start failures and failed or unknown kills; the exit chip comes from omp's bash head. |
+| Render tty output through `@xterm/headless` | Proven identical under Node, Bun and a `bun build --compile` binary, with no DOM, assets or native code. Rejected: Codex's `TERM=dumb`/`NO_COLOR`/`PAGER=cat` mitigation (openai/codex `core/src/unified_exec/process_manager.rs:94-104`), which cannot stop programs that force redraws ([openai/codex#32325](https://github.com/openai/codex/issues/32325)). |
+| tty result = unseen history + full current screen + cursor | A self-contained screen matches what a human sees and does not ask the model to splice earlier results. Rejected: a first-changed-row delta, which leaves full-screen redraws without context. Lines scrolled off since the last observation that equal the previous screen's rows at the same position were already reported and are skipped; an unchanged screen reports `screen_changed: false`. Only plain text and the cursor are represented (owner's choice); styling stays in the log. |
+| Align history by erasing the emulator's scrollback (ED3) after each observation | The next observation's history then starts at the previous screen's top row, so positional comparison is exact. Rejected: counting scroll events into absolute line numbers, which leaving the alternate screen, DECSTBM regions, ED3 and RIS all break. |
+| Bound tty history by cells, not lines | History rows = 240000 cells / `cols`, at least one screen; reaching the cap reports `history_may_be_truncated` because the emulator exposes no exact eviction count. |
 
 ## Implementation map
 
 | Area | Location |
 |---|---|
 | Terminal-control scanner | `src/output-safety.ts` |
+| tty terminal emulator, observations, snapshots | `src/terminal-screen.ts`, owned by `ExecSession` (`src/session.ts`); released by `src/session-store.ts`; tests `tests/terminal-screen.test.ts` |
 | Shared output envelope, truncation, process/kill text | `src/tool-result.ts` |
 | Codemode script schemas and projections | `src/script-result.ts`, `tests/script-result.test.ts` |
 | Kill collection, partial sanitization, and tool registration | `src/index.ts` (`TerminateOutcome`, `buildStreamUpdate`, `kill_session`) |

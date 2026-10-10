@@ -54,7 +54,7 @@ describe("unified-exec renderers", () => {
 		const output = Array.from({ length: 20 }, (_, index) => `line-${index + 1}`).join("\n");
 		const details = finalizeKillResult({
 			wallTimeSec: 0.1,
-			collected: encoder.encode(output),
+			collected: { kind: "stream", bytes: encoder.encode(output), omittedBytes: 0 },
 			totalBytes: Buffer.byteLength(output),
 			sessionId: 73,
 			pid: 777,
@@ -140,7 +140,11 @@ describe("unified-exec renderers", () => {
 		const firstDetails = finalizeProcessResult({
 			operation: "write_stdin",
 			wallTimeSec: 0.1,
-			collected: encoder.encode(Array.from({ length: 8 }, (_, index) => `old-${index + 1}`).join("\n")),
+			collected: {
+				kind: "stream",
+				bytes: encoder.encode(Array.from({ length: 8 }, (_, index) => `old-${index + 1}`).join("\n")),
+				omittedBytes: 0,
+			},
 			sessionId: 3,
 			exitCode: undefined,
 			signal: null,
@@ -157,7 +161,11 @@ describe("unified-exec renderers", () => {
 		const nextDetails = finalizeProcessResult({
 			operation: "write_stdin",
 			wallTimeSec: 0.2,
-			collected: encoder.encode(Array.from({ length: 8 }, (_, index) => `new-${index + 1}`).join("\n")),
+			collected: {
+				kind: "stream",
+				bytes: encoder.encode(Array.from({ length: 8 }, (_, index) => `new-${index + 1}`).join("\n")),
+				omittedBytes: 0,
+			},
 			sessionId: 3,
 			exitCode: undefined,
 			signal: null,

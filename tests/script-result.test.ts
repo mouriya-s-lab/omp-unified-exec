@@ -26,6 +26,7 @@ import {
 } from "../src/script-result.ts";
 import { IS_WINDOWS } from "../src/shell.ts";
 import { finalizeKillResult, finalizeProcessResult, renderProcessResultText } from "../src/tool-result.ts";
+import type { TerminalObservation } from "../src/terminal-screen.ts";
 
 const encoder = new TextEncoder();
 
@@ -37,7 +38,7 @@ function processInput(overrides: Partial<Parameters<typeof finalizeProcessResult
 	return {
 		operation: "exec_command" as const,
 		wallTimeSec: 0.25,
-		collected: encoder.encode("hello\nworld\n"),
+		collected: { kind: "stream" as const, bytes: encoder.encode("hello\nworld\n"), omittedBytes: 0 },
 		sessionId: undefined,
 		exitCode: 0,
 		signal: null,
@@ -104,7 +105,9 @@ describe("script result projections", () => {
 
 	it("truncated output stays within Pi's byte cap and is flagged", () => {
 		const big = "x".repeat(DEFAULT_MAX_BYTES * 2);
-		const value = processScriptResult(finalizeProcessResult(processInput({ collected: encoder.encode(big) })));
+		const value = processScriptResult(
+			finalizeProcessResult(processInput({ collected: { kind: "stream", bytes: encoder.encode(big), omittedBytes: 0 } })),
+		);
 		assert.ok(Value.Check(processScriptResultSchema, value));
 		assert.equal(value.truncated, true);
 		assert.ok(Buffer.byteLength(value.output) <= DEFAULT_MAX_BYTES);
@@ -112,16 +115,97 @@ describe("script result projections", () => {
 
 	it("terminal control sequences never reach script output", () => {
 		const value = processScriptResult(
-			finalizeProcessResult(processInput({ collected: encoder.encode("\u001b[31mred\u001b[0m\u0007 ok\n") })),
+			finalizeProcessResult(
+				processInput({
+					collected: { kind: "stream", bytes: encoder.encode("\u001b[31mred\u001b[0m\u0007 ok\n"), omittedBytes: 0 },
+				}),
+			),
 		);
 		assert.doesNotMatch(value.output, /\u001b|\u0007/);
 		assert.match(value.output, /red ok/);
 	});
 
+	for (const screen of ["normal", "alternate"] as const) {
+		for (const historyMayBeTruncated of screen === "normal" ? [false, true] : [false]) {
+			it(`projects ${screen} screen metadata with history truncation ${historyMayBeTruncated} as schema-valid JSON`, () => {
+				const observation: TerminalObservation = {
+					kind: "rendered",
+					view: { screen, cols: 80, rows: 24, cursor: { row: 3, col: 7 } },
+					text: "history\n\x1b[31mcurrent\x1b[0m",
+					historyLines: screen === "normal" ? 1 : 0,
+					historyMayBeTruncated,
+				};
+				const process = processScriptResult(finalizeProcessResult(processInput({
+					tty: true,
+					collected: { kind: "screen", observation },
+				})));
+				const kill = killScriptResult(finalizeKillResult({
+					wallTimeSec: 0.1,
+					collected: { kind: "screen", observation },
+					sessionId: 4,
+					requestedSignal: "SIGTERM",
+					exitCode: undefined,
+					signal: "SIGTERM",
+					failure: null,
+					tty: true,
+					escalated: false,
+					killed: true,
+				}));
+				assert.ok(Value.Check(processScriptResultSchema, process));
+				assert.ok(Value.Check(killScriptResultSchema, kill));
+				for (const value of [process, kill]) {
+					assertPlainJson(value);
+					assert.equal(value.output, "history\ncurrent");
+					assert.equal(value.truncated, historyMayBeTruncated);
+					assert.deepEqual(value.terminal, {
+						screen, cols: 80, rows: 24, cursor_row: 3, cursor_col: 7,
+						screen_changed: true, ...(screen === "normal" ? { history_lines: 1 } : {}),
+						...(historyMayBeTruncated ? { history_may_be_truncated: true } : {}),
+					});
+					assert.equal(Object.hasOwn(value, "omitted_bytes"), false);
+				}
+			});
+		}
+
+		it(`projects an unchanged ${screen} screen as empty untruncated output`, () => {
+			const observation: TerminalObservation = {
+				kind: "unchanged",
+				view: { screen, cols: 80, rows: 24, cursor: { row: 3, col: 7 } },
+			};
+			const process = processScriptResult(finalizeProcessResult(processInput({
+				tty: true,
+				collected: { kind: "screen", observation },
+			})));
+			const kill = killScriptResult(finalizeKillResult({
+				wallTimeSec: 0.1,
+				collected: { kind: "screen", observation },
+				sessionId: 4,
+				requestedSignal: "SIGTERM",
+				exitCode: undefined,
+				signal: "SIGTERM",
+				failure: null,
+				tty: true,
+				escalated: false,
+				killed: true,
+			}));
+			assert.ok(Value.Check(processScriptResultSchema, process));
+			assert.ok(Value.Check(killScriptResultSchema, kill));
+			for (const value of [process, kill]) {
+				assertPlainJson(value);
+				assert.equal(value.output, "");
+				assert.equal(value.truncated, false);
+				assert.deepEqual(value.terminal, {
+					screen, cols: 80, rows: 24, cursor_row: 3, cursor_col: 7, screen_changed: false,
+				});
+				assert.equal(Object.hasOwn(value, "omitted_bytes"), false);
+			}
+		});
+	}
+
 	it("kill results, including failed and unknown sessions, match the kill schema", () => {
 		const killInput = {
 			wallTimeSec: 0.1,
-			collected: encoder.encode("bye\n"),
+			collected: { kind: "stream" as const, bytes: encoder.encode("bye\n"), omittedBytes: 0 },
 			sessionId: 4,
 			pid: 1234,
 			requestedSignal: "SIGTERM" as NodeJS.Signals,

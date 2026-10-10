@@ -18,6 +18,7 @@
 
 import type { HeadTailBuffer } from "./head-tail-buffer.ts";
 import type { Gate, Notify } from "./notify.ts";
+import type { TerminalObservation } from "./terminal-screen.ts";
 
 const POST_EXIT_CLOSE_WAIT_MS = 50;
 
@@ -51,13 +52,25 @@ export interface CollectInputs {
 	postExitCloseWaitMs?: number;
 }
 
-/** Collected payload plus how many middle bytes the retention cap dropped. */
-export interface CollectResult {
+/** Pipe-session payload: drained bytes plus how many middle bytes the retention cap dropped. */
+export interface StreamOutput {
+	readonly kind: "stream";
 	/** Concatenated bytes, with an omission marker spliced in when bytes were dropped. */
-	bytes: Uint8Array;
+	readonly bytes: Uint8Array;
 	/** Total middle bytes dropped by the HeadTailBuffer across this call's drains. */
-	omittedBytes: number;
+	readonly omittedBytes: number;
 }
+
+/** Tty-session payload: what the session's terminal shows (see terminal-screen.ts). */
+export interface ScreenOutput {
+	readonly kind: "screen";
+	readonly observation: TerminalObservation;
+}
+
+export type CollectResult = StreamOutput | ScreenOutput;
+
+/** Nothing observed (spawn failure, cancelled wait). */
+export const NO_OUTPUT: StreamOutput = { kind: "stream", bytes: new Uint8Array(0), omittedBytes: 0 };
 
 /**
  * Collect all currently-buffered bytes, then keep waiting for more until the
@@ -67,7 +80,7 @@ export interface CollectResult {
  * The buffer is drained non-destructively to the process output pipe — new
  * output arriving after we return stays in the buffer for the next collect().
  */
-export async function collectOutputUntilDeadline(inputs: CollectInputs): Promise<CollectResult> {
+export async function collectOutputUntilDeadline(inputs: CollectInputs): Promise<StreamOutput> {
 	const { buffer, outputNotify, outputClosed, exited, deadlineMs, externalAbort } = inputs;
 	const postExitCloseWaitCap = inputs.postExitCloseWaitMs ?? POST_EXIT_CLOSE_WAIT_MS;
 
@@ -154,7 +167,7 @@ export async function collectOutputUntilDeadline(inputs: CollectInputs): Promise
 		for (const cleanup of cleanups) cleanup();
 	}
 
-	return { bytes: concat(collected), omittedBytes: omittedTotal };
+	return { kind: "stream", bytes: concat(collected), omittedBytes: omittedTotal };
 }
 
 /**

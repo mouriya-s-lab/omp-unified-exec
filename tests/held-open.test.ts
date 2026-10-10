@@ -108,7 +108,7 @@ describe("held-open session diagnostics", { skip: IS_WINDOWS }, () => {
 		const running = finalizeProcessResult({
 			operation: "exec_command",
 			wallTimeSec: 1,
-			collected: new Uint8Array(0),
+			collected: { kind: "stream", bytes: new Uint8Array(0), omittedBytes: 0 },
 			sessionId: 7,
 			exitCode: undefined,
 			signal: null,
@@ -123,7 +123,7 @@ describe("held-open session diagnostics", { skip: IS_WINDOWS }, () => {
 		const exited = finalizeProcessResult({
 			operation: "exec_command",
 			wallTimeSec: 0.1,
-			collected: new Uint8Array(0),
+			collected: { kind: "stream", bytes: new Uint8Array(0), omittedBytes: 0 },
 			sessionId: undefined,
 			exitCode: 0,
 			signal: null,

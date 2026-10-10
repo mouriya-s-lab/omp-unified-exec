@@ -1,7 +1,9 @@
 /**
  * ExecSession — wraps a SpawnedChild with:
- *   - a head+tail output buffer (drained by polls)
- *   - a rolling tail window (for TUI streaming via onUpdate)
+ *   - pipe sessions: a head+tail output buffer (drained by polls) and a
+ *     rolling tail window (for TUI streaming via onUpdate)
+ *   - tty sessions: a TerminalScreen that renders the child's output as a
+ *     terminal shows it (observed by polls, snapshotted for TUI streaming)
  *   - state transitions (has_exited / exit_code / signal / failure)
  *   - lifecycle callbacks (onData taps, onExit fan-out)
  *
@@ -17,7 +19,8 @@ import { join } from "node:path";
 import { type CollectResult, collectOutputUntilDeadline } from "./collect.ts";
 import { HeadTailBuffer } from "./head-tail-buffer.ts";
 import { Gate, Notify } from "./notify.ts";
-import { type SpawnedChild, spawnChild } from "./pty.ts";
+import { DEFAULT_PTY_COLS, DEFAULT_PTY_ROWS, type SpawnedChild, spawnChild } from "./pty.ts";
+import { TerminalScreen, type TerminalSnapshot } from "./terminal-screen.ts";
 
 /** Default per-session output retention. */
 export const DEFAULT_HEAD_TAIL_MAX_BYTES = 1024 * 1024; // 1 MiB
@@ -46,6 +49,11 @@ export interface SessionState {
 	failureMessage: string | null;
 }
 
+/** What a live (non-consuming) streaming update can show right now. */
+export type LiveOutput =
+	| { readonly kind: "stream"; readonly bytes: Uint8Array }
+	| { readonly kind: "screen"; readonly snapshot: TerminalSnapshot };
+
 export class ExecSession {
 	readonly id: number;
 	readonly tty: boolean;
@@ -58,8 +66,10 @@ export class ExecSession {
 	readonly logPath: string;
 	private logStream: WriteStream | undefined;
 
-	/** Head+tail buffer drained by each collectOutputUntilDeadline() call. */
+	/** Head+tail buffer drained by each collectOutputUntilDeadline() call (pipe sessions). */
 	readonly outputBuffer: HeadTailBuffer;
+	/** Rendered terminal for tty sessions; created once the PTY child exists. */
+	private screen: TerminalScreen | undefined;
 	/** Fired whenever new data arrives in outputBuffer. */
 	readonly outputNotify = new Notify();
 	/** Closed when the stream is done (all data flushed after exit). */
@@ -125,14 +135,16 @@ export class ExecSession {
 			return self;
 		}
 
+		const cols = opts.cols ?? DEFAULT_PTY_COLS;
+		const rows = opts.rows ?? DEFAULT_PTY_ROWS;
 		try {
 			self.child = spawnChild({
 				command: opts.command,
 				cwd: opts.cwd,
 				env: opts.env,
 				tty: opts.tty,
-				cols: opts.cols,
-				rows: opts.rows,
+				cols,
+				rows,
 				windowsVerbatimArguments: opts.windowsVerbatimArguments,
 			});
 		} catch (err: any) {
@@ -147,10 +159,18 @@ export class ExecSession {
 		// child's actual pid
 		Object.defineProperty(self, "pid", { value: self.child.pid, enumerable: true });
 
+		// A real terminal answers queries (cursor position, device attributes);
+		// a child that waits for the answer would otherwise stall.
+		if (opts.tty) self.screen = new TerminalScreen(cols, rows, (reply) => void self.write(reply));
+
 		self.child.onData((chunk) => {
 			self.totalOutputBytes += chunk.length;
-			self.outputBuffer.pushChunk(chunk);
-			self.appendStreamTail(chunk);
+			if (self.screen) {
+				self.screen.write(chunk);
+			} else {
+				self.outputBuffer.pushChunk(chunk);
+				self.appendStreamTail(chunk);
+			}
 			// Mirror every byte to the log file. Errors are handled by the
 			// 'error' listener on the stream, which nulls `logStream` out.
 			self.logStream?.write(Buffer.from(chunk));
@@ -264,8 +284,9 @@ export class ExecSession {
 		return () => this.exitListeners.delete(listener);
 	}
 
-	/** Snapshot the current rolling tail (for streaming updates). */
-	snapshotStreamTail(): Uint8Array {
+	/** What a streaming update shows now, without consuming anything. */
+	liveOutput(): LiveOutput {
+		if (this.screen) return { kind: "screen", snapshot: this.screen.snapshot() };
 		let total = 0;
 		for (const c of this.streamTail) total += c.length;
 		const out = new Uint8Array(total);
@@ -274,16 +295,16 @@ export class ExecSession {
 			out.set(c, offset);
 			offset += c.length;
 		}
-		return out;
+		return { kind: "stream", bytes: out };
 	}
 
 	/**
-	 * Drain this session's retained output until `deadlineMs` (or exit/abort).
-	 * Thin wrapper over collectOutputUntilDeadline so call sites don't repeat
-	 * the buffer/notify/gate plumbing.
+	 * Wait until `deadlineMs` (or exit/abort), then consume this session's
+	 * output: pipe sessions drain their retained bytes; tty sessions observe
+	 * their terminal screen (see terminal-screen.ts).
 	 */
-	collect(opts: { deadlineMs: number; externalAbort?: AbortSignal; postExitCloseWaitMs?: number }): Promise<CollectResult> {
-		return collectOutputUntilDeadline({
+	async collect(opts: { deadlineMs: number; externalAbort?: AbortSignal; postExitCloseWaitMs?: number }): Promise<CollectResult> {
+		const drained = await collectOutputUntilDeadline({
 			buffer: this.outputBuffer,
 			outputNotify: this.outputNotify,
 			outputClosed: this.outputClosed,
@@ -292,6 +313,13 @@ export class ExecSession {
 			externalAbort: opts.externalAbort,
 			postExitCloseWaitMs: opts.postExitCloseWaitMs,
 		});
+		if (!this.screen) return drained;
+		return { kind: "screen", observation: await this.screen.observe() };
+	}
+
+	/** Release the terminal emulator once the session leaves ownership (removed, evicted, never registered). */
+	release(): Promise<void> {
+		return this.screen?.release() ?? Promise.resolve();
 	}
 
 	/** Write bytes to stdin. Returns true on success, false if closed/dead. */
