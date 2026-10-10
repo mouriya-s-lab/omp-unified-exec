@@ -4,6 +4,10 @@ All notable changes to this project. **Newest entries go on top.**
 
 ## Unreleased
 
+## 0.14.2 - 2026-10-11
+
+- Tern terminal HUD: the terminal scrolls, not the panel ([#21](https://github.com/mouriya-s-lab/omp-unified-exec/issues/21)). Every session card showed its full screen, so a 30–40 row screen overflowed the panel's 60% height and the whole panel scrolled while the screen itself could not. The panel now shows one session at a time, picked from a tab strip, and a screen that fits the panel width is bounded to the panel's line budget (from omp's terminal rows): it scrolls inside itself and follows the newest row, and the panel never scrolls. A screen wider than the panel still scrolls sideways; Tern's plain-text grid has no vertical scroll of its own, so such a screen taller than the budget scrolls with the panel.
+
 ## 0.14.1 - 2026-10-11
 
 - Fix the Tern terminal HUD scrambling wide screens ([#19](https://github.com/mouriya-s-lab/omp-unified-exec/issues/19)). The panel's 720px card held about 95 columns, and Tern's `ansi` node reflows at its width, so a 120–140 column screen broke its box lines and turned full-width background rows into stripes. The panel now spans the pane width (top 60%, so the pill and composer stay usable). A screen that fits draws as a colored grid that never wraps; a wider one draws as an unwrapped plain-text grid that scrolls sideways, so nothing is cut off. The panel follows window width changes.
