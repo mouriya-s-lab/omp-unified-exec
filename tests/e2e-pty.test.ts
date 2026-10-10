@@ -1,6 +1,6 @@
 /**
- * PTY-mode end-to-end tests. Require node-pty-prebuilt-multiarch to be loaded.
- * Skipped when PTY is unavailable.
+ * Node-hosted PTY end-to-end tests. Require the optional node-pty provider.
+ * Bun's native backend has a separate source/compiled runtime fixture.
  */
 
 import { strict as assert } from "node:assert";

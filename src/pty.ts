@@ -1,5 +1,5 @@
 /**
- * Unified spawn: PTY (via @homebridge/node-pty-prebuilt-multiarch) or plain pipes.
+ * Unified spawn: Bun's native terminal, node-pty, or plain pipes.
  *
  * Presents a single `SpawnedChild` abstraction used by `session.ts` regardless
  * of underlying mode. Mirrors codex's `codex_utils_pty::pty` (tty=true) and
@@ -57,7 +57,72 @@ export interface SpawnedChild {
 	kill(signal?: NodeJS.Signals): void;
 }
 
-// ---------------- PTY loader (best-effort) ----------------
+// ---------------- PTY backends ----------------
+
+type BunTerminal = {
+	readonly closed: boolean;
+	write(data: Uint8Array): number;
+	close(): void;
+};
+
+type BunSubprocess = {
+	readonly pid: number;
+	readonly terminal?: BunTerminal;
+	kill(signal?: NodeJS.Signals): void;
+};
+
+type BunSpawnOptions = {
+	cwd: string;
+	env: NodeJS.ProcessEnv;
+	windowsVerbatimArguments?: boolean;
+	terminal: {
+		name: string;
+		cols: number;
+		rows: number;
+		data(terminal: BunTerminal, data: Uint8Array): void;
+		exit(
+			terminal: BunTerminal,
+			exitCode: number | null,
+			signalCode: number | string | null,
+			error?: Error,
+		): void;
+	};
+	onExit(
+		subprocess: BunSubprocess,
+		exitCode: number | null,
+		signalCode: number | string | null,
+		error?: Error,
+	): void;
+};
+
+type BunRuntime = {
+	readonly version?: string;
+	spawn(command: string[], options: BunSpawnOptions): BunSubprocess;
+};
+
+type BunRuntimeStatus =
+	| { kind: "absent" }
+	| { kind: "unsupported"; error: string }
+	| { kind: "available"; runtime: BunRuntime };
+
+function detectBunRuntime(): BunRuntimeStatus {
+	// TypeScript's Node globals omit Bun; the value is validated below before use.
+	const globals = globalThis as unknown as Record<string, unknown>;
+	const candidate = globals.Bun;
+	if (candidate === undefined) return { kind: "absent" };
+	if ((typeof candidate !== "object" || candidate === null) && typeof candidate !== "function") {
+		return { kind: "absent" };
+	}
+	const fields = candidate as Record<string, unknown>;
+	const version = typeof fields.version === "string" ? fields.version : "unknown";
+	if (typeof fields.spawn !== "function" || typeof fields.Terminal !== "function") {
+		return {
+			kind: "unsupported",
+			error: `Bun ${version} does not provide Bun.spawn with Bun.Terminal support`,
+		};
+	}
+	return { kind: "available", runtime: candidate as BunRuntime };
+}
 
 type PtyModule = {
 	spawn: (
@@ -86,44 +151,45 @@ type PtyProcess = {
 };
 
 /**
- * PTY provider package. The @homebridge fork of node-pty-prebuilt-multiarch
- * ships win32 prebuilds (conpty/winpty) in addition to linux/macOS. Loaded
- * strictly by this name — no fallback to the old package: Node's require
- * walks ancestor node_modules, so a fallback name could load an unaudited
- * native module planted in an enclosing project.
+ * Node-only PTY provider. Bun uses Bun.Terminal instead: omp installs package
+ * dependencies with lifecycle scripts blocked, and Node ABI prebuilds cannot
+ * provide a reliable native backend to a compiled Bun executable.
  *
- * Required through its entry file rather than the bare name: omp is a
- * `bun build --compile` executable, which since Bun 1.3.4 does not read
- * dependency package.json at runtime, so the bare name ignores `main` and
- * fails to resolve. The package declares no `exports`, so this subpath
- * resolves identically under Node, plain Bun and compiled Bun.
+ * Loaded strictly by this name — no fallback to the old package: Node's
+ * require walks ancestor node_modules, so a fallback name could load an
+ * unaudited native module planted in an enclosing project.
  */
 const PTY_PACKAGE = "@homebridge/node-pty-prebuilt-multiarch";
-const PTY_ENTRY = `${PTY_PACKAGE}/lib/index.js`;
 
 let ptyModule: PtyModule | null | undefined;
 let ptyLoadError: string | undefined;
 
 export function getPtyLoadError(): string | undefined {
-	loadPty();
+	const bun = detectBunRuntime();
+	if (bun.kind === "available") return undefined;
+	if (bun.kind === "unsupported") return bun.error;
+	loadNodePty();
 	return ptyLoadError;
 }
 
 export function isPtyAvailable(): boolean {
-	loadPty();
+	const bun = detectBunRuntime();
+	if (bun.kind === "available") return true;
+	if (bun.kind === "unsupported") return false;
+	loadNodePty();
 	return !!ptyModule;
 }
 
-function loadPty(): void {
+function loadNodePty(): void {
 	if (ptyModule !== undefined) return; // already attempted
 	try {
 		// Use createRequire so CJS-only native modules work under ESM + jiti.
 		const req = createRequire(import.meta.url);
-		ptyModule = req(PTY_ENTRY) as PtyModule;
+		ptyModule = req(PTY_PACKAGE) as PtyModule;
 		ptyLoadError = undefined;
-	} catch (err: any) {
+	} catch (err: unknown) {
 		ptyModule = null;
-		ptyLoadError = `${PTY_PACKAGE}: ${err?.message ?? err}`;
+		ptyLoadError = `${PTY_PACKAGE}: ${err instanceof Error ? err.message : String(err)}`;
 	}
 }
 
@@ -197,23 +263,184 @@ export function disposeWindowsConpty(child: unknown): void {
 
 /** Spawn a child with PTY or pipes. Throws if PTY requested but unavailable. */
 export function spawnChild(opts: SpawnOptions): SpawnedChild {
-	if (opts.tty) {
-		loadPty();
-		if (!ptyModule) {
-			throw new Error(
-				`tty: true requires @homebridge/node-pty-prebuilt-multiarch, but it failed to load: ${ptyLoadError ?? "unknown error"}.\n` +
-					`Install it with:  cd .pi/extensions/unified-exec && npm install\n` +
-					`Or call with tty: false to use pipes instead.`,
-			);
-		}
-		return spawnPty(ptyModule, opts);
+	if (!opts.tty) return spawnPipes(opts);
+
+	const bun = detectBunRuntime();
+	if (bun.kind === "available") return spawnBunPty(bun.runtime, opts);
+	if (bun.kind === "unsupported") {
+		throw new Error(`tty: true is unavailable: ${bun.error}. Upgrade Bun or call with tty: false.`);
 	}
-	return spawnPipes(opts);
+
+	loadNodePty();
+	if (!ptyModule) {
+		throw new Error(
+			`tty: true requires @homebridge/node-pty-prebuilt-multiarch under Node, but it failed to load: ${ptyLoadError ?? "unknown error"}.\n` +
+				`Install this package's optional dependencies or call with tty: false.`,
+		);
+	}
+	return spawnNodePty(ptyModule, opts);
 }
 
-// ---------------- PTY impl ----------------
+// ---------------- Bun PTY impl ----------------
 
-function spawnPty(mod: PtyModule, opts: SpawnOptions): SpawnedChild {
+type ProcessExit = {
+	exitCode: number | null;
+	signal: NodeJS.Signals | null;
+	failureMessage?: string;
+};
+
+function bunSignalName(signalCode: number | string | null): NodeJS.Signals | null {
+	if (typeof signalCode === "number") return signalCode === 0 ? null : signalNameFromNumber(signalCode);
+	if (
+		typeof signalCode === "string" &&
+		Object.prototype.hasOwnProperty.call(osConstants.signals, signalCode)
+	) {
+		return signalCode as NodeJS.Signals;
+	}
+	return null;
+}
+
+function spawnBunPty(runtime: BunRuntime, opts: SpawnOptions): SpawnedChild {
+	let [file, ...args] = opts.command;
+	if (!file) throw new Error("spawnChild: empty command");
+	if (IS_WINDOWS) file = resolveBinary(file);
+
+	const dataHandlers = new Set<(chunk: Uint8Array) => void>();
+	const exitHandlers = new Set<ExitCallback>();
+	let processExited = false;
+	let terminalClosed = false;
+	let finalized = false;
+	let processExit: ProcessExit | undefined;
+	let terminal: BunTerminal | undefined;
+	let bufferingInitialData = true;
+	let pendingData: Uint8Array[] = [];
+
+	const emitData = (chunk: Uint8Array) => {
+		if (finalized) return;
+		if (bufferingInitialData) {
+			// Bun may invoke terminal callbacks before spawn() returns. Preserve
+			// those bytes until ExecSession can subscribe to the returned child.
+			pendingData.push(chunk.slice());
+			return;
+		}
+		for (const handler of dataHandlers) {
+			try {
+				handler(chunk);
+			} catch {
+				// ignore handler errors
+			}
+		}
+	};
+
+	const finalize = () => {
+		if (finalized || !terminalClosed || !processExit) return;
+		finalized = true;
+		for (const handler of exitHandlers) {
+			try {
+				handler(processExit.exitCode, processExit.signal, processExit.failureMessage);
+			} catch {
+				// ignore handler errors
+			}
+		}
+		exitHandlers.clear();
+		dataHandlers.clear();
+	};
+
+	const child = runtime.spawn([file, ...args], {
+		cwd: opts.cwd,
+		env: opts.env.TERM === undefined ? { ...opts.env, TERM: "xterm-256color" } : opts.env,
+		windowsVerbatimArguments: opts.windowsVerbatimArguments,
+		terminal: {
+			name: "xterm-256color",
+			cols: opts.cols ?? 120,
+			rows: opts.rows ?? 30,
+			data(activeTerminal, chunk) {
+				terminal = activeTerminal;
+				emitData(chunk);
+			},
+			exit(activeTerminal) {
+				terminal = activeTerminal;
+				terminalClosed = true;
+				finalize();
+			},
+		},
+		onExit(subprocess, exitCode, signalCode, error) {
+			processExited = true;
+			terminal = subprocess.terminal ?? terminal;
+			const signal = bunSignalName(signalCode);
+			processExit = {
+				exitCode: signal ? null : exitCode,
+				signal,
+				...(error ? { failureMessage: `process error: ${error.message}` } : {}),
+			};
+			if (terminal?.closed) terminalClosed = true;
+			finalize();
+		},
+	});
+	terminal = child.terminal;
+	if (!terminal) throw new Error("Bun.spawn did not return a terminal for tty: true");
+
+	return {
+		pid: child.pid,
+		tty: true,
+		get processExited() {
+			return processExited;
+		},
+		write(data) {
+			const activeTerminal = terminal;
+			if (finalized || processExited || !activeTerminal || activeTerminal.closed) return false;
+			try {
+				activeTerminal.write(data);
+				return true;
+			} catch {
+				return false;
+			}
+		},
+		onData(handler) {
+			bufferingInitialData = false;
+			for (const chunk of pendingData) {
+				try {
+					handler(chunk);
+				} catch {
+					// ignore handler errors
+				}
+			}
+			pendingData = [];
+			if (finalized) return () => {};
+			dataHandlers.add(handler);
+			return () => dataHandlers.delete(handler);
+		},
+		onExit(handler) {
+			if (finalized) {
+				const exit = processExit;
+				if (!exit) return;
+				try {
+					handler(exit.exitCode, exit.signal, exit.failureMessage);
+				} catch {
+					// ignore handler errors
+				}
+				return;
+			}
+			exitHandlers.add(handler);
+		},
+		kill(signal = "SIGTERM") {
+			if (processExited) return;
+			if (IS_WINDOWS) {
+				killWindowsTree(child.pid);
+				return;
+			}
+			try {
+				child.kill(signal);
+			} catch {
+				// already gone
+			}
+		},
+	};
+}
+
+// ---------------- Node PTY impl ----------------
+
+function spawnNodePty(mod: PtyModule, opts: SpawnOptions): SpawnedChild {
 	let [file, ...args] = opts.command;
 	if (!file) throw new Error("spawnChild: empty command");
 	// conpty needs a resolvable executable: bare "bash" fails with

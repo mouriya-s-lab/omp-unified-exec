@@ -239,9 +239,8 @@ async function runExecCommand(
 	const tty = args.tty ?? false;
 	if (tty && !isPtyAvailable()) {
 		throw new Error(
-			`tty: true requires @homebridge/node-pty-prebuilt-multiarch but it failed to load: ${getPtyLoadError() ?? "unknown"}.\n` +
-				`Run:  cd .pi/extensions/unified-exec && npm install\n` +
-				`Or call with tty: false (default).`,
+			`tty: true is unavailable: ${getPtyLoadError() ?? "no supported PTY backend"}.\n` +
+				`Upgrade Bun to a version with Bun.Terminal, install Node optional dependencies, or call with tty: false.`,
 		);
 	}
 
@@ -961,7 +960,7 @@ export default function (pi: ExtensionAPI) {
 		if (!isPtyAvailable() && eventCtx.hasUI) {
 			// Non-fatal: pipes mode still works.
 			eventCtx.ui.notify(
-				"unified-exec: node-pty not available; tty: true will fail. Pipes (tty: false) still work.",
+				`unified-exec: PTY backend unavailable (${getPtyLoadError() ?? "unknown error"}); tty: true will fail. Pipes still work.`,
 				"info",
 			);
 		}
