@@ -17,8 +17,10 @@ import type { ExtensionAPI, ToolDefinition, TruncationResult } from "@earendil-w
 import { sanitizeOutputText } from "../src/output-safety.ts";
 import { base64ByteLength, stringifyChars } from "../src/render.ts";
 import type { SessionStore } from "../src/session-store.ts";
+import type { TerminalAppearance } from "../src/terminal-screen.ts";
 import { truncationMarker } from "../src/tool-result.ts";
 import { loadNativeRenderingState, mountTerminalHud } from "./tern-terminal-hud.ts";
+import { installTernPluginOnStart } from "./tern-plugin-install.ts";
 
 // ---------------- omp bash renderer contract ----------------
 
@@ -367,25 +369,53 @@ async function presentOnOmp(pi: ExtensionAPI): Promise<ExtensionAPI> {
 /** What the extension hands back to host-specific features after activating. */
 export interface ActivatedExtension {
 	readonly store: SessionStore;
+	/** Kill a stored session as `kill_session` does; resolves whether it exited. */
+	readonly kill: (id: number) => Promise<boolean>;
+}
+
+/**
+ * Load omp's active-theme appearance: whether its current theme is light.
+ * In Tern omp follows Tern's appearance, the surface the HUD shows screens on.
+ */
+async function loadOmpAppearance(): Promise<() => TerminalAppearance> {
+	// Dynamic: this module exists only inside omp, so a static import would break Pi hosts.
+	const themeModule: unknown = await import("@oh-my-pi/pi-tui/theme");
+	if (
+		typeof themeModule !== "object" ||
+		themeModule === null ||
+		!("isLightTheme" in themeModule) ||
+		typeof themeModule.isLightTheme !== "function" ||
+		!("getCurrentThemeName" in themeModule) ||
+		typeof themeModule.getCurrentThemeName !== "function"
+	) {
+		throw new Error("omp-unified-exec: @oh-my-pi/pi-tui/theme lacks isLightTheme/getCurrentThemeName");
+	}
+	const isLightTheme = themeModule.isLightTheme as (name?: string) => boolean;
+	const getCurrentThemeName = themeModule.getCurrentThemeName as () => string | undefined;
+	return () => (isLightTheme(getCurrentThemeName()) ? "light" : "dark");
 }
 
 /**
  * Wraps the extension factory per host. Pi hosts activate synchronously with
  * `pi` unchanged. omp is identified by its injected `arktype` builder and
- * activates through {@link presentOnOmp}, then mounts the Tern terminal HUD on
- * the activated session store.
+ * activates through {@link presentOnOmp} with omp's theme appearance (tty
+ * sessions answer it to OSC 10/11), then mounts the Tern terminal HUD on the
+ * activated session store and, inside a Tern pane, installs the package's
+ * Tern plugin at the first interactive session.
  */
 export function withHostPresentation(
-	activate: (pi: ExtensionAPI) => ActivatedExtension,
+	activate: (pi: ExtensionAPI, appearance?: () => TerminalAppearance) => ActivatedExtension,
 ): (host: ExtensionAPI) => void | Promise<void> {
 	return (host) => {
 		if (!("arktype" in host)) {
 			activate(host);
 			return;
 		}
-		// Both omp modules load before activating, so a reshaped omp fails plugin loading with nothing registered.
-		return Promise.all([presentOnOmp(host), loadNativeRenderingState()]).then(([pi, native]) =>
-			mountTerminalHud(pi, activate(pi).store, native),
-		);
+		// The omp modules load before activating, so a reshaped omp fails plugin loading with nothing registered.
+		return Promise.all([presentOnOmp(host), loadNativeRenderingState(), loadOmpAppearance()]).then(([pi, native, appearance]) => {
+			const activated = activate(pi, appearance);
+			mountTerminalHud(pi, activated.store, native, activated.kill);
+			installTernPluginOnStart(pi);
+		});
 	};
 }

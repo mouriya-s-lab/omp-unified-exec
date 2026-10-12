@@ -2,23 +2,28 @@
  * Tern terminal HUD (fork): live view of every tty session for omp's native
  * (Tern Surface Protocol) frontend.
  *
- * A chip at the pane's top-left counts the stored tty sessions. Clicking it
- * opens the Terminals sheet, built the way omp's own Background jobs sheet is
- * (omp `packages/tui/src/overlays/jobs-panel.ts`): a centred glass sheet with
- * a selectable list of sessions, the selected session's current screen, and
- * a Close button mirroring Esc. The chip adds no row to omp's dock. The sheet
- * is read-only; input still goes through write_stdin.
+ * A counter pill built like omp's running-work counter (`omp.hud.pill` with
+ * one `omp.hud.seg`: a tinted icon and the bare count, the words in the hover
+ * label) counts the stored tty sessions. Clicking it opens the Terminals
+ * sheet, built like omp's Agents sheet: a `picker` listing the sessions with
+ * a status dot, and the selected session's retained history and current
+ * screen as its preview, colored, scrolling back inside itself and following
+ * new output without any tool call. The HUD is read-only; input still goes
+ * through write_stdin.
  *
  * Authority: each session's TerminalScreen (src/terminal-screen.ts) and the
- * SessionStore. Neither the chip nor the sheet keeps a copy of either: every
- * description re-reads them, and subscriptions only ask omp to describe again.
+ * SessionStore. The HUD keeps no copy of either: every description re-reads
+ * them, and subscriptions only ask omp to describe again.
  *
- * omp hoists an `overlay` node found in a component's description into the
- * surface `layer` (omp `packages/tui/src/native/reconcile.ts`), so the chip
- * floats without a dock row. The sheet is an extension custom overlay
- * (`ctx.ui.custom(..., { overlay: true })`), which omp focuses and draws
- * from the component's `nativeOverlay`, like every omp sheet.
+ * The widget describes its pill row below omp's editor; the fork's Tern
+ * plugin (`fork-features/tern-plugin/`, CSS only) moves that row to the front
+ * of omp's dock, a line of its own above omp's pill line. The sheet is an
+ * extension custom overlay whose component answers `nativeSheet`, so omp
+ * mounts its `picker` description as the modal sheet itself, as it does for
+ * the Agents sheet (omp `packages/tui/src/native/backend.ts`).
  */
+import { homedir } from "node:os";
+
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { matchesKey, type Component } from "@earendil-works/pi-tui";
 
@@ -56,43 +61,24 @@ export interface HudNode {
 	readonly key?: string;
 }
 
-/** The sheet frame omp reads from an overlay component (omp `Component.nativeOverlay`). */
-export interface SheetFrame {
-	readonly role: string;
-	readonly size: "lg" | "full";
-	readonly anchor: "center";
-	readonly head: string;
-}
-
-/** The action the chip's click sends to the chip component (not a Tern built-in action name). */
+/** The action a pill click sends (not a Tern built-in action name, which Tern handles itself). */
 export const OPEN_ACTION = "unified-exec.terminals.open";
-/** The action of the sheet's Close button; Esc runs the same path. */
+/** The action of the pill's ✕: hide the HUD until a new tty session starts. */
+export const DISMISS_ACTION = "unified-exec.terminals.dismiss";
+/** Picker action: open the selected session's full-pane terminal page. */
+export const OPEN_TERMINAL_ACTION = "open";
+/** Picker / page action: kill the session, as `kill_session` does. */
+export const KILL_ACTION = "kill";
+/** The picker action that closes the sheet: omp's `CLOSE_ACTION` id, which Tern's backdrop and head `esc` send too. */
 export const CLOSE_ACTION = "close";
-/** Key of the sheet's session list; its `select`/`activate` events pick the shown session. */
-export const LIST_KEY = "terminals";
+/** The terminal page's way back to the list (Tern's backdrop and head `esc` send `close` too). */
+export const BACK_ACTION = "back";
 const WIDGET_KEY = "unified-exec-terminals";
+/** Role of the widget's root row: the hook the fork's Tern plugin styles. */
+export const ROOT_ROLE = "unified-exec.terminals";
+/** Role of the sheet preview's Recent output block, which the fork's Tern plugin sets in the mono face. */
+export const TAIL_ROLE = "unified-exec.terminals.tail";
 const COMMAND_MAX = 120;
-/** Width of the chip, in cells (icon, spinner and "N terminals"). */
-const CHIP_COLS = 22;
-/** Cells the sheet body adds around the shown screen. */
-export const SHEET_INSET_COLS = 4;
-/** Widest screen, in cells, a `lg` sheet (720px) shows unwrapped; wider screens get a `full` sheet, like omp's Console. */
-export const LG_SCREEN_COLS = 88;
-/** Screen lines a `lg` sheet shows before the screen scrolls inside itself (omp's jobs output uses the same). */
-export const LG_SCREEN_LINES = 16;
-/**
- * Measured Tern geometry of a `full` sheet, in text lines of 16px: the
- * sheet's offset, title and body padding above the list plus the status row
- * and the action bar below it come to 7 lines; each list row is 22px.
- */
-const FULL_CHROME_LINES = 7;
-const LIST_ROW_PX = 22;
-const LINE_PX = 16;
-/** Lines a `code` grid spends besides its rows: its padding and the hidden-rows note. */
-const CODE_CHROME_LINES = 3;
-/** Session rows the list shows before it scrolls (omp's jobs list uses the same). */
-const LIST_LINES = 6;
-const SGR = /\x1b\[[0-9;]*m/g;
 
 // ---------------- view model ----------------
 
@@ -110,6 +96,11 @@ export interface TerminalEntry {
 	readonly command: string;
 	readonly state: TerminalState;
 	readonly screen: StyledScreen;
+	readonly cwd: string;
+	readonly pid: number | undefined;
+	/** Epoch ms the session started. */
+	readonly startedAt: number;
+	readonly logPath: string;
 }
 
 function oneLine(command: string): string {
@@ -121,219 +112,298 @@ function terminalEntry(session: ExecSession, screen: StyledScreen): TerminalEntr
 	const state: TerminalState = session.hasExited
 		? { kind: "exited", exitCode: session.exitCode, signal: session.signal, failure: session.failureMessage }
 		: { kind: "running" };
-	return { id: session.id, command: oneLine(session.displayCommand), state, screen };
+	return {
+		id: session.id,
+		command: oneLine(session.displayCommand),
+		state,
+		screen,
+		cwd: sanitizeOutputText(session.cwd),
+		pid: session.pid,
+		startedAt: session.startedAt,
+		logPath: sanitizeOutputText(session.logPath),
+	};
 }
 
 function exitSucceeded(state: Extract<TerminalState, { kind: "exited" }>): boolean {
 	return state.exitCode === 0 && state.signal === null && state.failure === null;
 }
 
-function exitNote(state: Extract<TerminalState, { kind: "exited" }>): string {
+function stateText(state: TerminalState): string {
+	if (state.kind === "running") return "running";
 	if (state.failure !== null) return `failed: ${oneLine(state.failure)}`;
 	if (state.signal !== null) return state.signal;
 	return state.exitCode === null ? "exited" : `exit ${state.exitCode}`;
 }
 
-/** The pane the sheet spans, in cells (omp's terminal size). */
-export interface PaneSize {
-	readonly cols: number;
-	readonly rows: number;
+/** Status tone, as omp's Agents sheet colours its dots (running accent, done success, failed error). */
+function stateTone(state: TerminalState): string {
+	if (state.kind === "running") return "accent";
+	return exitSucceeded(state) ? "success" : "error";
 }
 
-type Span = { readonly t: string; readonly s?: string; readonly fx?: string };
-
-/** Status dot, as omp's jobs sheet draws it. */
-function stateDot(state: TerminalState): Span {
-	if (state.kind === "running") return { t: "●", s: "accent", fx: "pulse" };
-	return { t: "●", s: exitSucceeded(state) ? "success" : "error" };
-}
-
-function stateSpan(state: TerminalState): Span {
-	if (state.kind === "running") return { t: "running", s: "accent" };
-	return { t: exitNote(state), s: exitSucceeded(state) ? "muted" : "error" };
-}
-
-/** Item key of a session in the list; `select` events report it back. */
-function itemKey(id: number): string {
+function itemId(id: number): string {
 	return `s${id}`;
 }
 
-/**
- * The sheet size the listed screens need: `lg` unless one is wider than a
- * `lg` sheet shows unwrapped, then `full`, as omp's Console sheet. One size
- * for every session, so selecting another never resizes the sheet.
- */
-export function sheetSize(entries: readonly TerminalEntry[]): SheetFrame["size"] {
-	return entries.every((entry) => entry.screen.view.cols <= LG_SCREEN_COLS) ? "lg" : "full";
-}
-
-/** Lines the shown screen takes before it scrolls inside itself (`lg`) or fills the sheet (`full`). */
-export function screenLineBudget(size: SheetFrame["size"], pane: PaneSize, listRows: number): number {
-	if (size === "lg") return LG_SCREEN_LINES;
-	const listLines = Math.ceil((Math.min(listRows, LIST_LINES) * LIST_ROW_PX) / LINE_PX);
-	return Math.max(LG_SCREEN_LINES, pane.rows - FULL_CHROME_LINES - listLines);
+function parseItemId(item: unknown): number | undefined {
+	if (typeof item !== "string" || !/^s\d+$/.test(item)) return undefined;
+	const id = Number(item.slice(1));
+	return Number.isSafeInteger(id) ? id : undefined;
 }
 
 /**
- * A terminal screen is a fixed grid; Tern's `ansi` reflows at the block width,
- * which breaks box lines and full-width backgrounds. A screen that fits the
- * sheet draws as `ansi` (colors kept, never wrapped), bounded to the line
- * budget so it scrolls vertically inside itself and follows the newest row.
- * A wider one draws as an unwrapped `code` block of the same rows, which
- * scrolls sideways. Tern's `code` has no vertical scroll of its own, so a
- * wider screen keeps its newest `budget` rows (where a terminal's cursor and
- * prompt live) and says how many rows above are hidden.
+ * Pure: the dock row for `count` stored tty sessions (at least one: the
+ * widget is unmounted otherwise). omp's running-work counter, copied: a row
+ * right-aligned like `omp.hud`, holding an `omp.hud.pill` with one
+ * `omp.hud.seg` segment, a tinted icon and the bare count; the words live in
+ * the hover label. The ✕ beside it hides the HUD until a new tty session.
  */
-function describeScreen(screen: StyledScreen, fits: boolean, budget: number): HudNode[] {
-	if (fits) {
-		return [{ k: "ansi", p: { text: screen.text, cols: screen.view.cols, follow: true, max: { h: `${budget}lines` } } }];
-	}
-	const rows = screen.text.replace(SGR, "").split("\n");
-	const hidden = Math.max(0, rows.length - budget);
-	const grid: HudNode = { k: "code", key: "grid", p: { text: rows.slice(hidden).join("\n"), lang: "text" } };
-	if (hidden === 0) return [grid];
+export function describeTerminalPill(count: number): HudNode {
+	const label = `${count} terminal${count === 1 ? "" : "s"}`;
+	const segment: HudNode = {
+		k: "row",
+		key: "terminals",
+		p: { role: "omp.hud.seg", gap: "xs", align: "center", title: label, aria: label, actions: { click: OPEN_ACTION } },
+		c: [
+			{ k: "icon", key: "icon", p: { name: "terminal", tone: "success" } },
+			{ k: "text", key: "count", p: { spans: [{ t: String(count), s: "num" }], wrap: "none" } },
+		],
+	};
+	return {
+		k: "row",
+		p: { role: ROOT_ROLE, justify: "end", gap: "xs", align: "center" },
+		c: [
+			{ k: "row", key: "running", p: { role: "omp.hud.pill", align: "center" }, c: [segment] },
+			{
+				k: "row",
+				key: "dismiss",
+				p: { role: "omp.btn", align: "center", title: "Hide until a new terminal starts", actions: { click: DISMISS_ACTION } },
+				c: [{ k: "text", key: "x", p: { text: "✕", wrap: "none" } }],
+			},
+		],
+	};
+}
+
+/** A picker / sheet action button, as omp's `actionButton` builds it. */
+function actionButton(label: string, act: string, keys?: string, tone?: string): HudNode {
+	return {
+		k: "row",
+		key: act,
+		p: { role: "omp.btn", gap: "xs", align: "center", title: keys ? `${label}  ${keys}` : label, actions: { click: act }, ...(tone ? { tone } : {}) },
+		c: [{ k: "text", p: { text: label } }, ...(keys ? [{ k: "kbd", p: { keys: [keys] } }] : [])],
+	};
+}
+
+/** Picker fact columns, as the Agents sheet's roster shows Cost / Time / …; lower priorities hide first. */
+const TERMINAL_COLUMNS = [
+	{ id: "size", head: "Size", format: "dim", priority: 2 },
+	{ id: "pid", head: "PID", format: "text", priority: 3 },
+	{ id: "time", head: "Time", format: "elapsed", priority: 5 },
+] as const;
+
+/** Screen rows the preview's Recent output section shows (the newest ones). */
+const PREVIEW_TAIL_ROWS = 12;
+const SGR = /\x1b\[[0-9;:]*m/g;
+
+/**
+ * The newest rows of a screen as plain text, trailing blank rows dropped: the
+ * preview is a glance, Open shows the colors at the session's full width.
+ */
+function screenTail(screen: StyledScreen, rows: number): string[] {
+	const lines = screen.text.replace(SGR, "").split("\n");
+	while (lines.length > 0 && lines[lines.length - 1]!.trim() === "") lines.pop();
+	return lines.slice(-rows);
+}
+
+/** A leading home directory as `~`, as omp's `shortenPath` shows paths. */
+function shortenHome(path: string): string {
+	const home = homedir();
+	return path === home || path.startsWith(`${home}/`) ? `~${path.slice(home.length)}` : path;
+}
+
+function localDateTime(at: number): string {
+	const d = new Date(at);
+	const pad = (n: number) => String(n).padStart(2, "0");
+	return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+/**
+ * The selected session's preview, laid out like the Agents sheet's: a title
+ * row (command and a state badge), a facts grid, and a Recent output section
+ * with the screen's newest rows.
+ */
+function describePreview(entry: TerminalEntry): HudNode[] {
+	const facts: { k: string; v: unknown }[] = [
+		{ k: "Session", v: `#${entry.id}` },
+		{ k: "Directory", v: [{ t: shortenHome(entry.cwd), s: "path" }] },
+		...(entry.pid !== undefined ? [{ k: "PID", v: String(entry.pid) }] : []),
+		{ k: "Size", v: `${entry.screen.view.cols} × ${entry.screen.view.rows}` },
+		{ k: "Started", v: [{ t: localDateTime(entry.startedAt), s: "dim" }] },
+	];
+	const tail = screenTail(entry.screen, PREVIEW_TAIL_ROWS);
 	return [
 		{
-			k: "text",
-			key: "hidden",
-			p: { wrap: "none", spans: [{ t: `${hidden} rows above hidden — widen the window to see the whole screen`, s: "muted" }] },
+			k: "row",
+			key: "title",
+			p: { role: "omp.hub.title", gap: "sm", align: "center" },
+			c: [
+				{ k: "text", key: "name", p: { text: entry.command, role: "omp.picker.title", truncate: "end" } },
+				{ k: "badge", key: "state", p: { text: stateText(entry.state), tone: stateTone(entry.state) } },
+			],
 		},
-		grid,
+		{ k: "kv", key: "facts", p: { items: facts, layout: "grid", role: "omp.hub.kv" } },
+		// The log path is long and lives in the temp dir: one line cut at its start keeps the file name, the link opens it.
+		{
+			k: "row",
+			key: "log",
+			p: { gap: "md", align: "baseline" },
+			c: [
+				{ k: "text", key: "k", p: { spans: [{ t: "Log", s: "muted" }], shrink: 0 } },
+				{
+					k: "text",
+					key: "v",
+					p: { spans: [{ t: entry.logPath, s: "path", href: `file://${entry.logPath}` }], truncate: "start", wrap: "none", grow: 1, title: entry.logPath },
+				},
+			],
+		},
+		{
+			k: "section",
+			key: `output-${itemId(entry.id)}`,
+			p: { head: "Recent output" },
+			c: [
+				tail.length === 0
+					? { k: "text", key: "empty", p: { spans: [{ t: "No output yet", s: "dim" }] } }
+					: // Plain-text `code` keeps the rows' spacing and scrolls sideways instead of reflowing; the fork's
+						// Tern plugin gives the role the mono face (Tern draws preview code in the UI face).
+						{ k: "code", key: "tail", p: { text: tail.join("\n"), lang: "text", wrap: false, role: TAIL_ROLE } },
+			],
+		},
 	];
 }
 
 /**
- * Pure: the chip for the given tty sessions (ascending id). Empty `entries`
- * never reach here: the widget is unmounted instead. The widget's root holds
- * only the chip's overlay, which omp hoists into the TSP `layer`, so it adds
- * no row to omp's dock and never moves the activity line, todo HUD, meter or
- * composer. `max.w` narrows the `sm` sheet, which also pins it left.
+ * Pure: the Terminals sheet, built like omp's Agents sheet: a `lg` `picker`
+ * titled with an icon, one row per session (status dot, command, state) with
+ * Time / PID / Size columns, the selected session laid out like the Agents
+ * preview, and the action bar Kill (x, only while running), Close (esc) and
+ * Open (enter).
  */
-export function describeTerminalChip(entries: readonly TerminalEntry[]): HudNode {
-	const running = entries.some((entry) => entry.state.kind === "running");
-	const pill: HudNode = {
-		k: "row",
-		key: "pill",
-		p: {
-			role: "omp.hud.pill",
-			gap: "xs",
-			align: "center",
-			basis: "content",
-			title: "Show terminals",
-			actions: { click: OPEN_ACTION },
-		},
-		c: [
-			{ k: "icon", key: "icon", p: { name: "terminal" } },
-			...(running ? [{ k: "spinner", key: "spinner", p: { style: "dots", tone: "accent" } }] : []),
-			{
-				k: "text",
-				key: "label",
-				p: { text: `${entries.length} ${entries.length === 1 ? "terminal" : "terminals"}`, wrap: "none" },
-			},
-		],
-	};
+export function describeTerminalsSheet(
+	entries: readonly TerminalEntry[],
+	selectedId: number | undefined,
+	now = Date.now(),
+): HudNode {
+	const selected = entries.find((entry) => entry.id === selectedId) ?? entries[0];
+	const running = entries.filter((entry) => entry.state.kind === "running").length;
 	return {
-		k: "col",
-		p: { role: "unified-exec.terminals" },
-		c: [{ k: "overlay", key: "chip", p: { anchor: "top", size: "sm", max: { w: `${CHIP_COLS}ch` }, head: "" }, c: [pill] }],
+		k: "picker",
+		p: {
+			title: "Terminals",
+			subtitle: `${running} running · ${entries.length} stored`,
+			icon: "terminal",
+			noun: "terminals",
+			size: "lg",
+			layout: "rows",
+			preview: "side",
+			query: null,
+			columns: TERMINAL_COLUMNS,
+			items: entries.map((entry) => ({
+				id: itemId(entry.id),
+				label: entry.command,
+				mono: true,
+				dot: stateTone(entry.state),
+				detail: `#${entry.id} · ${stateText(entry.state)}`,
+				facts: {
+					// A running session's age ticks Tern-side from the age at send; an exited one is frozen.
+					time: entry.state.kind === "running" ? Math.max(0, now - entry.startedAt) : stateText(entry.state),
+					pid: entry.pid === undefined ? "—" : String(entry.pid),
+					size: `${entry.screen.view.cols}×${entry.screen.view.rows}`,
+				},
+			})),
+			selected: selected ? itemId(selected.id) : null,
+			state: "ready",
+			empty: "No tty sessions. Start one with exec_command tty: true.",
+			actions: [
+				{
+					id: KILL_ACTION,
+					label: "Kill",
+					keys: ["x"],
+					danger: true,
+					...(selected?.state.kind === "running" ? {} : { disabled: selected ? "Already exited" : true }),
+				},
+				{ id: CLOSE_ACTION, label: "Close", keys: ["esc"], end: true },
+				{ id: OPEN_TERMINAL_ACTION, label: "Open", keys: ["enter"], primary: true, ...(selected ? {} : { disabled: true }) },
+			],
+			focus: "list",
+		},
+		c: selected ? describePreview(selected) : [],
+	};
+}
+
+/** The full-pane terminal page's sheet frame: a `full` glass sheet titled with the path back to the list. */
+export function terminalPageFrame(entry: TerminalEntry | undefined, id: number): Readonly<Record<string, unknown>> {
+	return {
+		role: "unified-exec.overlay.terminal",
+		size: "full",
+		head: [
+			{ t: "Terminals · ", s: "muted" },
+			{ t: `#${id} ` },
+			...(entry ? [{ t: entry.command, s: "mono" }, { t: "  " }, { t: stateText(entry.state), s: stateTone(entry.state) }] : [{ t: "removed", s: "muted" }]),
+		],
 	};
 }
 
 /**
- * Pure: the Terminals sheet body, shaped like omp's Background jobs sheet:
- * the session list, the selected session's status and screen, and the action
- * bar. The detail is keyed per session, so switching sessions mounts a fresh
- * screen that starts at its newest row instead of inheriting the previous
- * session's scroll offset.
+ * Pure: the full-pane terminal page, built like omp's Console sheet: the
+ * session's history and screen as colored `ansi` at the session's own width,
+ * following its newest row and scrolling back inside itself, then an action
+ * bar: a note that keys go to the terminal while it runs, Kill and Back (esc).
  */
-export function describeTerminalsSheet(entries: readonly TerminalEntry[], selected: TerminalEntry | undefined, pane: PaneSize): HudNode {
-	const list: HudNode = {
-		k: "list",
-		key: LIST_KEY,
-		p: {
-			selected: selected ? itemKey(selected.id) : null,
-			empty: "No terminals",
-			max: { lines: LIST_LINES },
-			actions: { click: "select", dblclick: "activate" },
-		},
-		c: entries.map((entry) => ({
-			k: "item",
-			key: itemKey(entry.id),
-			p: {
-				label: [stateDot(entry.state), { t: " " }, { t: entry.command }],
-				value: [{ t: `#${entry.id}`, s: "dim" }],
-				title: `#${entry.id} · ${entry.command}`,
-			},
-		})),
-	};
-	const close: HudNode = {
-		k: "row",
-		key: CLOSE_ACTION,
-		p: { role: "omp.btn", gap: "xs", align: "center", actions: { click: CLOSE_ACTION }, title: "Close  Esc" },
+export function describeTerminalPage(entry: TerminalEntry | undefined): HudNode {
+	if (!entry) {
+		return {
+			k: "col",
+			p: { gap: "sm" },
+			c: [
+				{ k: "text", key: "gone", p: { spans: [{ t: "This terminal is no longer stored.", s: "dim" }] } },
+				{ k: "row", key: "actions", p: { role: "omp.actions", gap: "sm", align: "center" }, c: [{ k: "spacer", p: { grow: 1 } }, actionButton("Back", BACK_ACTION, "esc")] },
+			],
+		};
+	}
+	const running = entry.state.kind === "running";
+	// The column fills the sheet and the screen grows into it, so the action bar sits at the bottom like the Console's.
+	return {
+		k: "col",
+		p: { gap: "sm", min: { h: 1 } },
 		c: [
-			{ k: "text", p: { text: "Close" } },
-			{ k: "kbd", p: { keys: ["escape"] } },
-		],
-	};
-	const actions: HudNode = {
-		k: "row",
-		key: "actions",
-		p: { role: "omp.actions", gap: "sm", align: "center" },
-		c: [{ k: "spacer", p: { grow: 1 } }, close],
-	};
-	const children: HudNode[] = [list];
-	if (selected) {
-		const size = sheetSize(entries);
-		const view = selected.screen.view;
-		const sheetCols = size === "lg" ? LG_SCREEN_COLS : pane.cols;
-		const fits = view.cols + SHEET_INSET_COLS <= sheetCols;
-		const budget = screenLineBudget(size, pane, entries.length) - (fits ? 0 : CODE_CHROME_LINES);
-		const status: HudNode = {
-			k: "text",
-			key: "status",
-			p: {
-				wrap: "none",
-				truncate: "end",
-				spans: [
-					stateDot(selected.state),
-					{ t: " " },
-					{ ...stateSpan(selected.state), s: "strong" },
-					{ t: ` · #${selected.id} · ${view.cols}×${view.rows}`, s: "muted" },
+			{
+				k: "ansi",
+				key: `page-${itemId(entry.id)}`,
+				p: {
+					text: entry.screen.text,
+					cols: entry.screen.view.cols,
+					follow: true,
+					grow: 1,
+					// A fraction of the available extent: the screen takes the sheet's height left by the action bar.
+					max: { h: 1 },
+				},
+			},
+			{
+				k: "row",
+				key: "actions",
+				p: { role: "omp.actions", gap: "sm", align: "center" },
+				c: [
+					{ k: "text", key: "note", p: { spans: [{ t: running ? "Keys go to the terminal" : "Session finished", s: "dim" }] } },
+					{ k: "spacer", p: { grow: 1 } },
+					...(running ? [actionButton("Kill", KILL_ACTION, undefined, "error")] : []),
+					actionButton("Back", BACK_ACTION, "esc"),
 				],
 			},
-		};
-		children.push({
-			k: "col",
-			key: `detail-${itemKey(selected.id)}`,
-			p: { gap: "sm", role: "unified-exec.terminals.detail" },
-			c: [status, ...describeScreen(selected.screen, fits, budget)],
-		});
-	}
-	children.push(actions);
-	return { k: "col", p: { gap: "md" }, c: children };
+		],
+	};
 }
 
 // ---------------- components ----------------
-
-/** A user event from omp's native events, parsed at the boundary. */
-type ChipEvent = { readonly kind: "open" };
-type SheetEvent = { readonly kind: "close" } | { readonly kind: "select"; readonly id: number };
-
-function parseChipEvent(event: unknown): ChipEvent | undefined {
-	if (typeof event !== "object" || event === null || !("type" in event) || !("act" in event)) return undefined;
-	if (event.type === "action" && event.act === OPEN_ACTION) return { kind: "open" };
-	return undefined;
-}
-
-function parseSheetEvent(event: unknown): SheetEvent | undefined {
-	if (typeof event !== "object" || event === null || !("type" in event)) return undefined;
-	if (event.type === "action" && "act" in event && event.act === CLOSE_ACTION) return { kind: "close" };
-	if ((event.type === "select" || event.type === "activate") && "item" in event && typeof event.item === "string") {
-		const id = /^s\d+$/.test(event.item) ? Number(event.item.slice(1)) : NaN;
-		if (Number.isSafeInteger(id)) return { kind: "select", id };
-	}
-	return undefined;
-}
 
 function ttySessions(store: SessionStore): ExecSession[] {
 	return store
@@ -342,28 +412,146 @@ function ttySessions(store: SessionStore): ExecSession[] {
 		.sort((a, b) => a.id - b.id);
 }
 
-function terminalEntries(store: SessionStore): TerminalEntry[] {
-	return ttySessions(store).flatMap((session) => {
-		const screen = session.styledScreen();
-		return screen ? [terminalEntry(session, screen)] : [];
-	});
+function entryOf(session: ExecSession | undefined): TerminalEntry | undefined {
+	const screen = session?.styledScreen();
+	return session && screen ? terminalEntry(session, screen) : undefined;
+}
+
+/** What a native event asks of the HUD's components. */
+type HudEvent =
+	| { readonly kind: "action"; readonly act: string }
+	| { readonly kind: "select"; readonly id: number; readonly activate: boolean };
+
+function parseHudEvent(event: unknown): HudEvent | undefined {
+	if (typeof event !== "object" || event === null || !("type" in event)) return undefined;
+	if (event.type === "action" && "act" in event && typeof event.act === "string") return { kind: "action", act: event.act };
+	if ((event.type === "select" || event.type === "activate") && "item" in event) {
+		const id = parseItemId(event.item);
+		if (id !== undefined) return { kind: "select", id, activate: event.type === "activate" };
+	}
+	return undefined;
+}
+
+/** Kill a stored session the way `kill_session` does; resolves whether it exited. */
+export type KillSession = (id: number) => Promise<boolean>;
+
+/** How the Terminals sheet was left. */
+export type SheetResult = { readonly kind: "closed" } | { readonly kind: "open"; readonly id: number };
+
+/**
+ * The dock widget: the counter pill and its ✕. omp calls `describe` instead
+ * of `render` while Tern renders natively; it is only mounted then, so
+ * `render` draws nothing.
+ */
+class TerminalPill implements Component {
+	private described: { readonly count: number; readonly node: HudNode } | undefined;
+
+	constructor(
+		private readonly store: SessionStore,
+		private readonly open: () => void,
+		private readonly dismiss: () => void,
+		private readonly requestRender: () => void,
+	) {}
+
+	/** The stored sessions changed. */
+	membershipChanged(): void {
+		this.described = undefined;
+		this.requestRender();
+	}
+
+	describe(): HudNode {
+		const count = ttySessions(this.store).length;
+		if (this.described?.count !== count) this.described = { count, node: describeTerminalPill(count) };
+		return this.described.node;
+	}
+
+	handleNativeEvent(event: unknown): void {
+		const parsed = parseHudEvent(event);
+		if (parsed?.kind !== "action") return;
+		if (parsed.act === OPEN_ACTION) this.open();
+		else if (parsed.act === DISMISS_ACTION) this.dismiss();
+	}
+
+	render(): string[] {
+		return [];
+	}
+
+	invalidate(): void {
+		this.described = undefined;
+	}
+}
+
+/** Store and per-session subscriptions shared by the sheet and the page; each change re-describes. */
+class SessionWatch {
+	private readonly watches = new Map<number, { readonly exit: () => void; screen: (() => void) | undefined }>();
+	private readonly unsubscribeStore: () => void;
+
+	constructor(
+		private readonly store: SessionStore,
+		private readonly changed: () => void,
+		private readonly shown: () => number | undefined,
+	) {
+		this.unsubscribeStore = store.subscribe(() => {
+			this.sync();
+			changed();
+		});
+		this.sync();
+	}
+
+	/** Watch every stored tty session's exit and only the shown one's screen. */
+	sync(): void {
+		const sessions = ttySessions(this.store);
+		const shownId = this.shown() ?? sessions[0]?.id;
+		const live = new Set<number>();
+		for (const session of sessions) {
+			live.add(session.id);
+			let watch = this.watches.get(session.id);
+			if (!watch) {
+				watch = { exit: session.onExit(this.changed), screen: undefined };
+				this.watches.set(session.id, watch);
+			}
+			const wantScreen = session.id === shownId;
+			if (wantScreen && !watch.screen) watch.screen = session.onScreenChange(this.changed);
+			if (!wantScreen && watch.screen) {
+				watch.screen();
+				watch.screen = undefined;
+			}
+		}
+		for (const [id, watch] of this.watches) {
+			if (live.has(id)) continue;
+			watch.exit();
+			watch.screen?.();
+			this.watches.delete(id);
+		}
+	}
+
+	dispose(): void {
+		this.unsubscribeStore();
+		for (const watch of this.watches.values()) {
+			watch.exit();
+			watch.screen?.();
+		}
+		this.watches.clear();
+	}
 }
 
 /**
- * The dock widget: only the chip. omp calls `describe` instead of `render`
- * while Tern renders natively; it is only mounted then, so `render` draws nothing.
+ * The Terminals sheet, an extension custom overlay. `nativeSheet` makes omp
+ * mount the `picker` description as the modal sheet; it holds focus, so
+ * esc / ↑ / ↓ / enter / x arrive in `handleInput`.
  */
-class TerminalChip implements Component {
+class TerminalsSheet implements Component {
 	private described: HudNode | undefined;
-	/** Per tty session: exit, which changes the chip's spinner. */
-	private readonly exits = new Map<number, () => void>();
+	private readonly watch: SessionWatch;
 
 	constructor(
 		private readonly store: SessionStore,
 		private readonly requestRender: () => void,
-		private readonly open: () => void,
+		private selectedId: number | undefined,
+		private readonly done: (result: SheetResult) => void,
+		private readonly kill: KillSession,
 	) {
-		this.syncWatches();
+		this.watch = new SessionWatch(store, this.changed, () => this.selectedId);
 	}
 
 	private changed = (): void => {
@@ -371,32 +559,67 @@ class TerminalChip implements Component {
 		this.requestRender();
 	};
 
-	private syncWatches(): void {
-		const live = new Set<number>();
-		for (const session of ttySessions(this.store)) {
-			live.add(session.id);
-			if (!this.exits.has(session.id)) this.exits.set(session.id, session.onExit(this.changed));
-		}
-		for (const [id, stop] of this.exits) {
-			if (live.has(id)) continue;
-			stop();
-			this.exits.delete(id);
-		}
+	private selected(): ExecSession | undefined {
+		const sessions = ttySessions(this.store);
+		return sessions.find((session) => session.id === this.selectedId) ?? sessions[0];
 	}
 
-	/** The stored sessions changed. */
-	membershipChanged(): void {
-		this.syncWatches();
+	private select(id: number): void {
+		if (id === this.selectedId) return;
+		this.selectedId = id;
+		this.watch.sync();
 		this.changed();
 	}
 
+	private move(delta: number): void {
+		const sessions = ttySessions(this.store);
+		if (sessions.length === 0) return;
+		const index = Math.max(0, sessions.findIndex((session) => session.id === this.selectedId));
+		this.select(sessions[Math.min(sessions.length - 1, Math.max(0, index + delta))]!.id);
+	}
+
+	private openSelected(): void {
+		const session = this.selected();
+		if (session) this.done({ kind: "open", id: session.id });
+	}
+
+	private killSelected(): void {
+		const session = this.selected();
+		if (!session || session.hasExited) return;
+		void this.kill(session.id).then(this.changed);
+	}
+
+	nativeSheet(): boolean {
+		return true;
+	}
+
 	describe(): HudNode {
-		this.described ??= describeTerminalChip(terminalEntries(this.store));
+		if (!this.described) {
+			const entries = ttySessions(this.store).flatMap((session) => entryOf(session) ?? []);
+			this.described = describeTerminalsSheet(entries, this.selectedId);
+		}
 		return this.described;
 	}
 
 	handleNativeEvent(event: unknown): void {
-		if (parseChipEvent(event)) this.open();
+		const parsed = parseHudEvent(event);
+		if (!parsed) return;
+		if (parsed.kind === "select") {
+			this.select(parsed.id);
+			if (parsed.activate) this.openSelected();
+			return;
+		}
+		if (parsed.act === CLOSE_ACTION) this.done({ kind: "closed" });
+		else if (parsed.act === OPEN_TERMINAL_ACTION) this.openSelected();
+		else if (parsed.act === KILL_ACTION) this.killSelected();
+	}
+
+	handleInput(data: string): void {
+		if (matchesKey(data, "escape")) this.done({ kind: "closed" });
+		else if (matchesKey(data, "up")) this.move(-1);
+		else if (matchesKey(data, "down")) this.move(1);
+		else if (matchesKey(data, "enter")) this.openSelected();
+		else if (data === "x") this.killSelected();
 	}
 
 	render(): string[] {
@@ -408,121 +631,68 @@ class TerminalChip implements Component {
 	}
 
 	dispose(): void {
-		for (const stop of this.exits.values()) stop();
-		this.exits.clear();
+		this.watch.dispose();
 	}
 }
 
+const encoder = new TextEncoder();
+
 /**
- * The Terminals sheet, an extension custom overlay. omp focuses it, routes
- * keys to `handleInput` and native events to `handleNativeEvent`, and draws
- * its frame from `nativeOverlay`. `render` is the ANSI fallback omp needs
- * from every overlay; the sheet is only opened while Tern renders natively.
+ * The full-pane terminal page, built like omp's Console sheet: the session's
+ * history and screen at full height, keys forwarded to the session while it
+ * runs (Esc goes back to the list instead), Kill and Back.
  */
-class TerminalsSheet implements Component {
-	private selectedId: number | undefined;
-	private described: { readonly cols: number; readonly rows: number; readonly node: HudNode } | undefined;
-	private readonly unsubscribe: () => void;
-	private screenWatch: { readonly id: number; readonly stop: () => void } | undefined;
-	private readonly exits = new Map<number, () => void>();
+class TerminalPage implements Component {
+	private described: HudNode | undefined;
+	private readonly watch: SessionWatch;
 
 	constructor(
 		private readonly store: SessionStore,
-		private readonly pane: () => PaneSize,
+		private readonly id: number,
 		private readonly requestRender: () => void,
-		private readonly close: () => void,
+		private readonly back: () => void,
+		private readonly kill: KillSession,
 	) {
-		this.unsubscribe = store.subscribe(this.changed);
-		this.syncWatches();
+		this.watch = new SessionWatch(store, this.changed, () => id);
 	}
 
 	private changed = (): void => {
-		this.syncWatches();
 		this.described = undefined;
 		this.requestRender();
 	};
 
-	/** The listed entries and the selected one (the first when the selection left). */
-	private current(): { entries: TerminalEntry[]; selected: TerminalEntry | undefined } {
-		const entries = terminalEntries(this.store);
-		const selected = entries.find((entry) => entry.id === this.selectedId) ?? entries[0];
-		this.selectedId = selected?.id;
-		return { entries, selected };
+	private session(): ExecSession | undefined {
+		const session = this.store.get(this.id);
+		return session?.tty ? session : undefined;
 	}
 
-	/** Watch every session's exit (list dots) and only the selected session's screen. */
-	private syncWatches(): void {
-		const sessions = ttySessions(this.store);
-		const live = new Set(sessions.map((session) => session.id));
-		for (const session of sessions) {
-			if (!this.exits.has(session.id)) this.exits.set(session.id, session.onExit(this.changed));
-		}
-		for (const [id, stop] of this.exits) {
-			if (live.has(id)) continue;
-			stop();
-			this.exits.delete(id);
-		}
-		const shown = sessions.find((session) => session.id === this.selectedId) ?? sessions[0];
-		if (this.screenWatch?.id === shown?.id) return;
-		this.screenWatch?.stop();
-		this.screenWatch = shown ? { id: shown.id, stop: shown.onScreenChange(this.changed) } : undefined;
-	}
-
-	get nativeOverlay(): SheetFrame {
-		const { selected } = this.current();
-		return {
-			role: "unified-exec.overlay.terminals",
-			size: sheetSize(this.current().entries),
-			anchor: "center",
-			head: "Terminals",
-		};
+	get nativeOverlay(): Readonly<Record<string, unknown>> {
+		return terminalPageFrame(entryOf(this.session()), this.id);
 	}
 
 	describe(): HudNode {
-		const pane = this.pane();
-		if (this.described?.cols !== pane.cols || this.described.rows !== pane.rows) {
-			const { entries, selected } = this.current();
-			this.described = { ...pane, node: describeTerminalsSheet(entries, selected, pane) };
-		}
-		return this.described.node;
-	}
-
-	handleInput(data: string): void {
-		if (matchesKey(data, "escape")) this.close();
-		else if (matchesKey(data, "up")) this.move(-1);
-		else if (matchesKey(data, "down")) this.move(1);
+		this.described ??= describeTerminalPage(entryOf(this.session()));
+		return this.described;
 	}
 
 	handleNativeEvent(event: unknown): void {
-		const parsed = parseSheetEvent(event);
-		if (!parsed) return;
-		switch (parsed.kind) {
-			case "close":
-				this.close();
-				return;
-			case "select":
-				this.select(parsed.id);
-				return;
+		const parsed = parseHudEvent(event);
+		if (parsed?.kind !== "action") return;
+		if (parsed.act === BACK_ACTION || parsed.act === CLOSE_ACTION) this.back();
+		else if (parsed.act === KILL_ACTION && this.session() && !this.session()!.hasExited) void this.kill(this.id).then(this.changed);
+	}
+
+	handleInput(data: string): void {
+		if (matchesKey(data, "escape")) {
+			this.back();
+			return;
 		}
+		const session = this.session();
+		if (session && !session.hasExited) session.write(encoder.encode(data));
 	}
 
-	private move(delta: number): void {
-		const { entries, selected } = this.current();
-		if (!selected) return;
-		const index = Math.max(0, Math.min(entries.length - 1, entries.indexOf(selected) + delta));
-		this.select(entries[index]!.id);
-	}
-
-	private select(id: number): void {
-		if (id === this.selectedId) return;
-		this.selectedId = id;
-		this.changed();
-	}
-
-	render(width: number): string[] {
-		const { entries, selected } = this.current();
-		const lines = entries.map((entry) => `${entry === selected ? ">" : " "} #${entry.id} ${entry.command}`);
-		return [" Terminals", ...lines].map((line) => line.slice(0, width));
+	render(): string[] {
+		return [];
 	}
 
 	invalidate(): void {
@@ -530,11 +700,7 @@ class TerminalsSheet implements Component {
 	}
 
 	dispose(): void {
-		this.unsubscribe();
-		this.screenWatch?.stop();
-		this.screenWatch = undefined;
-		for (const stop of this.exits.values()) stop();
-		this.exits.clear();
+		this.watch.dispose();
 	}
 }
 
@@ -547,59 +713,80 @@ export async function loadNativeRenderingState(): Promise<NativeRenderingState> 
 }
 
 /**
- * Keep the chip mounted in omp's dock exactly while omp renders natively and
- * the store holds a tty session; the ANSI TUI never gets a widget (and so no
- * spacer row). The chip opens the Terminals sheet; one sheet at a time.
+ * Keep the pill mounted in omp's dock exactly while omp renders natively and
+ * the store holds a tty session the user has not dismissed; the ANSI TUI
+ * never gets a widget (and so no spacer row). Dismissing hides the HUD until
+ * a tty session with a higher id than any dismissed one is stored. A pill
+ * click opens the Terminals sheet; Open replaces it with the session's
+ * terminal page, whose Back reopens the sheet on the same session. At most
+ * one of them is open.
  */
-export function mountTerminalHud(pi: ExtensionAPI, store: SessionStore, native: NativeRenderingState): void {
+export function mountTerminalHud(pi: ExtensionAPI, store: SessionStore, native: NativeRenderingState, kill: KillSession): void {
 	let ui: ExtensionContext["ui"] | undefined;
-	let chip: TerminalChip | undefined;
+	let pill: TerminalPill | undefined;
 	let sheetOpen = false;
+	/** Highest tty session id present when the user dismissed the HUD. */
+	let dismissedThrough = 0;
 
-	const openSheet = (): void => {
-		if (!ui || sheetOpen) return;
+	const openSheet = async (): Promise<void> => {
+		const host = ui;
+		if (!host || sheetOpen) return;
 		sheetOpen = true;
-		void ui
-			.custom<void>(
-				(tui, _theme, _keybindings, done) =>
-					new TerminalsSheet(
-						store,
-						() => ({ cols: tui.terminal.columns, rows: tui.terminal.rows }),
-						() => tui.requestRender(),
-						() => done(undefined),
-					),
-				{ overlay: true, overlayOptions: { anchor: "center", width: "90%", maxHeight: "90%" } },
-			)
-			.finally(() => {
-				sheetOpen = false;
-			});
+		try {
+			let selected: number | undefined;
+			while (ui === host) {
+				const result = await host.custom<SheetResult>(
+					(tui, _theme, _keybindings, done) =>
+						new TerminalsSheet(store, () => tui.requestRender(), selected, done, kill),
+					{ overlay: true },
+				);
+				if (result.kind === "closed" || ui !== host) return;
+				selected = result.id;
+				await host.custom<void>(
+					(tui, _theme, _keybindings, done) =>
+						new TerminalPage(store, result.id, () => tui.requestRender(), () => done(), kill),
+					{ overlay: true },
+				);
+			}
+		} finally {
+			sheetOpen = false;
+		}
 	};
 
 	const unmount = (): void => {
-		if (!chip) return;
-		chip = undefined;
+		if (!pill) return;
+		pill = undefined;
 		// omp disposes the removed widget component.
 		ui?.setWidget(WIDGET_KEY, undefined);
 	};
 
 	const sync = (): void => {
-		const wanted = ui !== undefined && native.isNativeRendering() && store.values().some((session) => session.tty);
+		const wanted =
+			ui !== undefined && native.isNativeRendering() && ttySessions(store).some((session) => session.id > dismissedThrough);
 		if (!wanted) {
 			unmount();
 			return;
 		}
-		if (chip) {
-			chip.membershipChanged();
+		if (pill) {
+			pill.membershipChanged();
 			return;
 		}
 		ui?.setWidget(
 			WIDGET_KEY,
 			(tui) => {
-				chip = new TerminalChip(store, () => tui.requestRender(), openSheet);
-				return chip;
+				pill = new TerminalPill(
+					store,
+					() => void openSheet(),
+					() => {
+						dismissedThrough = Math.max(dismissedThrough, ...ttySessions(store).map((session) => session.id));
+						sync();
+					},
+					() => tui.requestRender(),
+				);
+				return pill;
 			},
-			// `belowEditor`: omp adds no spacer for it, and a root holding only
-			// overlays takes no height, so the dock keeps its native layout.
+			// `belowEditor`: omp adds no spacer for it (`aboveEditor` gets one);
+			// the fork's Tern plugin moves the row above omp's pill line.
 			{ placement: "belowEditor" },
 		);
 	};
@@ -608,6 +795,7 @@ export function mountTerminalHud(pi: ExtensionAPI, store: SessionStore, native: 
 	native.onNativeRenderingChange(sync);
 	pi.on("session_start", async (_event, eventCtx) => {
 		unmount();
+		dismissedThrough = 0;
 		ui = eventCtx.hasUI ? eventCtx.ui : undefined;
 		sync();
 	});

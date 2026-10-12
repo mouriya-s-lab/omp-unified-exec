@@ -353,7 +353,7 @@ describe("host presentation activation", () => {
 			assert.equal(host, api);
 			activations++;
 			host.registerTool(definition);
-			return { store: new SessionStore({ maxSessions: 10, lruProtectedCount: 2 }) };
+			return { store: new SessionStore({ maxSessions: 10, lruProtectedCount: 2 }), kill: async () => false };
 		});
 		const result = activate(api);
 		returned = true;
@@ -375,7 +375,7 @@ describe("host presentation activation", () => {
 		const activate = withHostPresentation((host): ActivatedExtension => {
 			activations++;
 			host.registerTool(definition);
-			return { store: new SessionStore({ maxSessions: 10, lruProtectedCount: 2 }) };
+			return { store: new SessionStore({ maxSessions: 10, lruProtectedCount: 2 }), kill: async () => false };
 		});
 		const result = activate(api);
 		assert.ok(result instanceof Promise);

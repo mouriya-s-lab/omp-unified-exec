@@ -1,0 +1,1 @@
+-- Tern requires a host or window entry; this plugin only ships `terminals.css`.

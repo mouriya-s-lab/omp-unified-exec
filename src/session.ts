@@ -20,7 +20,7 @@ import { type CollectResult, collectOutputUntilDeadline } from "./collect.ts";
 import { HeadTailBuffer } from "./head-tail-buffer.ts";
 import { Gate, Notify } from "./notify.ts";
 import { DEFAULT_PTY_COLS, DEFAULT_PTY_ROWS, type SpawnedChild, spawnChild } from "./pty.ts";
-import { type StyledScreen, TerminalScreen, type TerminalSnapshot } from "./terminal-screen.ts";
+import { type StyledScreen, type TerminalAppearance, TerminalScreen, type TerminalSnapshot } from "./terminal-screen.ts";
 
 /** Default per-session output retention. */
 export const DEFAULT_HEAD_TAIL_MAX_BYTES = 1024 * 1024; // 1 MiB
@@ -40,6 +40,8 @@ export interface SessionSpawnOptions {
 	displayCommand?: string; // human-readable command for list_sessions/UI
 	shell?: string; // raw `shell` arg recorded for introspection
 	windowsVerbatimArguments?: boolean; // Windows cmd.exe quoting (see shell.ts)
+	/** tty only: the background the session's screen is shown on (default dark), answered to OSC 10/11. */
+	appearance?: () => TerminalAppearance;
 }
 
 export interface SessionState {
@@ -161,7 +163,7 @@ export class ExecSession {
 
 		// A real terminal answers queries (cursor position, device attributes);
 		// a child that waits for the answer would otherwise stall.
-		if (opts.tty) self.screen = new TerminalScreen(cols, rows, (reply) => void self.write(reply));
+		if (opts.tty) self.screen = new TerminalScreen(cols, rows, (reply) => void self.write(reply), opts.appearance);
 
 		self.child.onData((chunk) => {
 			self.totalOutputBytes += chunk.length;

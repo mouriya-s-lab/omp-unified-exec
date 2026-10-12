@@ -199,6 +199,21 @@ describe("TerminalScreen observable terminal state", () => {
 		assert.deepEqual(replies, ["\x1b[2;4R"]);
 	});
 
+	it("answers OSC 10/11 colour queries from the current appearance, before a following DA1, and ignores colour sets", async (t) => {
+		const replies: string[] = [];
+		let appearance: "dark" | "light" = "light";
+		const screen = new TerminalScreen(20, 3, (bytes) => replies.push(decoder.decode(bytes)), () => appearance);
+		t.after(() => screen.release());
+		fragmented(screen, "\x1b]11;?\x07\x1b]10;?\x1b\\\x1b]11;rgb:1234/1234/1234\x07\x1b[c");
+		await screen.observe();
+		assert.deepEqual(replies, ["\x1b]11;rgb:ffff/ffff/ffff\x07", "\x1b]10;rgb:0000/0000/0000\x07", "\x1b[?1;2c"]);
+		appearance = "dark";
+		replies.length = 0;
+		fragmented(screen, "\x1b]11;?\x07");
+		await screen.observe();
+		assert.deepEqual(replies, ["\x1b]11;rgb:0000/0000/0000\x07"]);
+	});
+
 	it("keeps OSC title, clipboard and hyperlink payloads out of rendered text", async (t) => {
 		const screen = terminal(t);
 		fragmented(screen, "\x1b]0;secret-title\x07before\x1b]52;c;c2VjcmV0\x1b\\\x1b]8;;https://secret.example/\x1b\\link\x1b]8;;\x1b\\after");
@@ -316,10 +331,24 @@ describe("TerminalScreen styled display", () => {
 		fragmented(screen, "1\r\n2\r\n3\r\n\x1b[31m4\x1b[0m\x1b[6n");
 		assert.equal(decoder.decode(await reply), "\x1b[3;2R");
 		const styled = screen.styledScreen();
-		assert.equal(withoutSgr(styled.text), "2\n3\n4");
+		assert.equal(withoutSgr(styled.text), "1\n2\n3\n4");
 		const observation = rendered(await screen.observe(), "1\n2\n3\n4", 1);
 		assert.deepEqual(styled.view, observation.view);
 		assert.deepEqual(await screen.observe(), { kind: "unchanged", view: observation.view });
+	});
+
+	it("keeps the history a consuming observation reported, while the next observation reports only rows scrolled since", async (t) => {
+		let parsed!: () => void;
+		const screen = terminal(t, 20, 3, () => parsed());
+		fragmented(screen, "1\r\n2\r\n3\r\n4\r\n5");
+		rendered(await screen.observe(), "1\n2\n3\n4\n5", 2);
+		// The cursor report arrives only after the preceding output is parsed.
+		const replied = new Promise<void>((resolve) => { parsed = resolve; });
+		fragmented(screen, "\r\n6\r\n7\x1b[6n");
+		await replied;
+		assert.equal(withoutSgr(screen.styledScreen().text), "1\n2\n3\n4\n5\n6\n7");
+		rendered(await screen.observe(), "5\n6\n7");
+		assert.equal(withoutSgr(screen.styledScreen().text), "1\n2\n3\n4\n5\n6\n7");
 	});
 });
 
@@ -338,7 +367,7 @@ describe("TerminalScreen parsed change subscriptions", () => {
 		rendered(await screen.observe(), "after");
 		assert.deepEqual(seen, ["after"]);
 		await screen.observe();
-		assert.deepEqual(seen, ["after"], "observe's internal ED3 must not notify");
+		assert.deepEqual(seen, ["after"], "a consuming observation must not notify");
 	});
 
 	it("stops notifying immediately after unsubscribe, including a queued child write", async (t) => {

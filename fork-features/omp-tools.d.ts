@@ -9,3 +9,8 @@ declare module "@oh-my-pi/pi-tui/native/state" {
 	export const isNativeRendering: unknown;
 	export const onNativeRenderingChange: unknown;
 }
+
+declare module "@oh-my-pi/pi-tui/theme" {
+	export const isLightTheme: unknown;
+	export const getCurrentThemeName: unknown;
+}

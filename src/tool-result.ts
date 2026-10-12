@@ -63,7 +63,7 @@ export interface TerminalDetails {
 	cursor_col: number;
 	screen_changed: boolean;
 	history_lines?: number;
-	/** History reached the emulator's capacity, so older scrolled-off lines may only be in the log. */
+	/** Rows that scrolled off since the previous call were evicted from the capped history before being reported; they are only in the log. */
 	history_may_be_truncated?: true;
 }
 

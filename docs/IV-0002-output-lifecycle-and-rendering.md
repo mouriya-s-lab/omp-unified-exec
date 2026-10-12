@@ -52,16 +52,23 @@ The initiative establishes a durable output contract across these layers:
    per-session headless terminal emulator, and each result reports the unseen
    history plus the current screen and cursor.
 8. **Tern terminal HUD (fork):** a tool result shows a tty screen only as it
-   was when that call returned. On omp rendering natively in Tern, a chip at
-   the pane's top-left counts the stored tty sessions; clicking it opens the
-   Terminals sheet, built like omp's Background jobs sheet: the session list,
-   the selected session's current screen as a grid that scrolls inside itself
-   and follows new output without any tool call, and Close (Esc). The chip
-   adds no row to omp's dock
+   was when that call returned. On omp rendering natively in Tern, a counter
+   pill copied from omp's running-work counter (a terminal icon and the bare
+   count, the words in its hover label), on its own line just above omp's
+   counter, counts the stored tty sessions; its ✕ hides the HUD until a new
+   tty session starts. Clicking the pill opens the Terminals sheet, built like
+   omp's Agents sheet: the sessions listed with a status dot, the selected
+   session's facts and newest output rows as the preview, Kill, Close and
+   Open. Open shows the
+   session as a full-pane terminal page built like omp's Console sheet: its
+   retained history and current screen, colored, scrollable back and
+   following new output without any tool call, with typed keys sent to the
+   session
    ([#17](https://github.com/mouriya-s-lab/omp-unified-exec/issues/17),
    [#19](https://github.com/mouriya-s-lab/omp-unified-exec/issues/19),
    [#21](https://github.com/mouriya-s-lab/omp-unified-exec/issues/21),
-   [#23](https://github.com/mouriya-s-lab/omp-unified-exec/issues/23)).
+   [#23](https://github.com/mouriya-s-lab/omp-unified-exec/issues/23),
+   [#25](https://github.com/mouriya-s-lab/omp-unified-exec/issues/25)).
 
 ## Requirements
 
@@ -95,11 +102,14 @@ The initiative establishes a durable output contract across these layers:
   describe hooks delegating to omp's bash renderer; set_on_exit and
   list_sessions use omp's bounded default card.
 - On omp, mount the terminal HUD only while omp renders natively and the store
-  holds a tty session, so the ANSI TUI gains no row. In Tern the chip adds no
-  row either: omp's activity line, todo HUD, meter and composer keep their
-  native positions. The sheet takes focus and keys like every omp sheet (Esc,
-  ↑/↓), sends nothing to sessions, and keeps no copy of session or screen
-  state.
+  holds a tty session, so the ANSI TUI gains no row. In Tern the pill takes a
+  line of its own above omp's pill line, and omp's activity line, todo HUD,
+  meter and composer keep the geometry omp gives them; with the HUD hidden
+  the dock matches a plugin-free one. Only the open Terminals sheet and
+  terminal page take focus and keys, as omp's Agents and Console sheets do.
+  The page writes typed keys to its running session (Esc goes back instead),
+  and Kill ends a session through `kill_session`'s path; nothing else reaches
+  sessions, and the HUD keeps no copy of session or screen state.
 - Count collapsed child output in visual lines after terminal wrapping.
 - Keep truncation and log-recovery warnings visible while collapsed.
 - Do not synchronously load an arbitrary log file when expanded. Expanded mode
@@ -137,20 +147,19 @@ The initiative establishes a durable output contract across these layers:
 | Mark omp Tern failures with view tone, not result `isError` | Tern derives card status from the host result's `isError`, which stays false for a nonzero exit because that is an ordinary completion for the model. The describe view sets `tone: "error"` for failed exits, signals, start failures and failed or unknown kills; the exit chip comes from omp's bash head. |
 | Render tty output through `@xterm/headless` | Proven identical under Node, Bun and a `bun build --compile` binary, with no DOM, assets or native code. Rejected: Codex's `TERM=dumb`/`NO_COLOR`/`PAGER=cat` mitigation (openai/codex `core/src/unified_exec/process_manager.rs:94-104`), which cannot stop programs that force redraws ([openai/codex#32325](https://github.com/openai/codex/issues/32325)). |
 | tty result = unseen history + full current screen + cursor | A self-contained screen matches what a human sees and does not ask the model to splice earlier results. Rejected: a first-changed-row delta, which leaves full-screen redraws without context. Lines scrolled off since the last observation that equal the previous screen's rows at the same position were already reported and are skipped; an unchanged screen reports `screen_changed: false`. Results represent only plain text and the cursor (owner's choice); styling stays in the log and, on Tern, in the HUD. |
-| Align history by erasing the emulator's scrollback (ED3) after each observation | The next observation's history then starts at the previous screen's top row, so positional comparison is exact. Rejected: counting scroll events into absolute line numbers, which leaving the alternate screen, DECSTBM regions, ED3 and RIS all break. |
-| Bound tty history by cells, not lines | History rows = 240000 cells / `cols`, at least one screen; reaching the cap reports `history_may_be_truncated` because the emulator exposes no exact eviction count. |
-| Tern HUD inside the omp extension, not a Tern Luau plugin | The sessions and their emulators live in this process; a dock widget reads them directly. A Luau plugin block would need the screen pushed to it across processes (a second copy of state) and shows as a pane, not a floating panel (owner's choice, [#17](https://github.com/mouriya-s-lab/omp-unified-exec/issues/17)). |
-| Chip = an `overlay` node in the widget's own description | omp's reconciler hoists `overlay` nodes from component descriptions into the surface `layer` (omp `packages/tui/src/native/reconcile.ts`), so the chip floats without focus or a dock row. |
-| No dock row: `belowEditor` widget whose root holds only overlays | An `aboveEditor` widget gets omp's leading spacer, and any described row is laid out in the dock; both pushed omp's activity line and todo HUD up by 36px and overlapped the meter ([#21](https://github.com/mouriya-s-lab/omp-unified-exec/issues/21), measured with a running turn and five todos). omp adds no spacer below the editor, and a root holding only `overlay` nodes takes no height, so all four native rects match a widget-free baseline. |
-| Chip at the top-left | Overlay anchors reach only `center`/`top`/`bottom` or the widget's own nodes, and `bottom` collides with the composer. A `top` sheet narrowed by `max.w` pins to the left; the chip is a `sm` card, so it never covers anything else. An extension cannot add a pill to omp's `HudPillsRow`, which builds only the agents and jobs pills. |
-| Sheet = extension custom overlay shaped like omp's Background jobs sheet | `ctx.ui.custom(factory, { overlay: true })` hands the component to omp's `showOverlay`, which focuses it and draws it from its `nativeOverlay` frame, as omp's own sheets (omp `packages/tui/src/overlays/jobs-panel.ts`). The body copies the jobs sheet: a selectable `list` (click selects; ↑/↓ move), the selected item's status and output, and an action bar with Close mirroring Esc, so the HUD looks and behaves like the sheets next to it. |
-| Sheet size: `lg` while every screen fits 88 columns, else `full` | Only a `full` sheet may exceed 720px, as omp's own Console sheet. One size for all listed sessions, so selecting another never resizes the sheet. A `full` overlay makes Tern add `.sf-covered` to `main`/`dock`, pausing their CSS animations while it is open (measured: omp's working timer still advances and the todo HUD stays drawn under it). |
-| Fitting screen → bounded `ansi`; wider screen → newest rows in unwrapped `code` | Tern's `ansi` reflows at the block width, which broke box lines and turned full-width background rows into stripes. A screen at most the sheet's width minus `SHEET_INSET_COLS` draws as `ansi` with colors, never wrapped, `follow` on and `max.h` set to the line budget, so it scrolls vertically inside itself and the sheet never scrolls. The budget is 16 lines in a `lg` sheet (the jobs sheet's output height) and the pane's rows less measured chrome and list rows in a `full` one. A wider screen draws as a `code` block without SGR, which scrolls sideways; measured in Tern, `code` has no vertical scroll of its own (a `max.h` only clips it), so it keeps the newest budget rows, where a terminal's prompt and cursor live, under a muted count of the rows above. Rejected: `rows`, which clips the right edge with no scrolling; `code` always, which drops colors that fit; a smaller font, because an extension cannot send stylesheets. |
-| Detail keyed per session | The selected session's status and screen sit in a node keyed by its id, so selecting another session mounts a fresh screen at its newest row instead of inheriting the previous one's scroll offset. The selection falls back to the first session when it leaves the store. |
-| Open by a chip action | The chip click is an `action` (`unified-exec.terminals.open`, not a Tern built-in name such as `toggle`, which Tern handles itself and never sends) routed to the widget's `handleNativeEvent`. One sheet at a time. |
+| Align history with an xterm marker on the observed screen's top row | Each observation registers a marker at the screen's top row; the next observation's history starts there, so positional comparison with the previous screen is exact. The marker follows the row as it scrolls and is disposed when the row is trimmed from the history, so the emulator keeps its history for the HUD. Rejected: erasing the emulator's scrollback (ED3) after each observation, which left the HUD screen nothing to scroll back through; counting scroll events into absolute line numbers, which leaving the alternate screen, DECSTBM regions, ED3 and RIS all break. |
+| Bound tty history by cells, not lines | History rows = 240000 cells / `cols`, at least one screen. `history_may_be_truncated` is reported when the marked row was evicted while the history sits at that cap (on the first observation, whenever it sits at the cap); a child's ED3 or RIS also drops the marker but erased those rows itself. |
+| HUD logic inside the omp extension; a CSS-only Tern plugin places the pill and sets the preview's output in the mono face | The sessions and their emulators live in this process; a dock widget reads them directly. A Luau plugin block would need the screen pushed to it across processes (a second copy of state) and shows as a pane, not a floating panel (owner's choice, [#17](https://github.com/mouriya-s-lab/omp-unified-exec/issues/17)). The fork's Tern plugin (`fork-features/tern-plugin/`) only injects CSS (owner's choice): a stylesheet listed in its manifest `styles`, which Tern loads with the plugin; the window entry Tern requires of every plugin is empty. |
+| omp installs the Tern plugin itself | A plugin the owner must link by hand is missed on new machines and after updates (owner's choice: install automatically). On omp, at the first interactive session start, the extension checks it runs in a Tern pane as omp itself does (`TERN_PANE_SOCKET` set and `TERN_PANE` a block id, omp's `resolveTernPane`) and asks that Tern through the `tern` CLI on PATH, which inherits omp's environment and so addresses the same daemon and plugin directory. Tern's daemon is the authority: `tern plugin list --json` tells whether it runs the package's plugin with the same version and stylesheet; only when it does not, `tern plugin link <package>/fork-features/tern-plugin` links the package's directory in place (so later package updates are picked up by the next relink), and an installed copy that blocks the link is removed first. An install or update is reported as an omp status toast, a failure as a warning naming the manual command; when Tern already runs the files nothing is shown or changed. Rejected: copying with `tern plugin install`, which would need a reinstall on every package update; writing Tern's plugin directory directly, which bypasses the daemon's reload. |
+| Pill = omp's running-work counter, copied, plus its ✕ | omp 18.10 replaced its agents/jobs pills with one counter (`omp.hud.pill` holding `omp.hud.seg` segments: a tinted icon and the bare count, the words only in the hover label). The widget's root is a row with role `unified-exec.terminals` and `justify: "end"`, as omp describes `omp.hud`, holding the same structure with one `terminal` segment whose click sends `unified-exec.terminals.open` (Tern handles its built-in action names itself and never sends them), and an `omp.btn` ✕ that sends `unified-exec.terminals.dismiss`: it unmounts the widget and records the highest stored tty id, and the widget mounts again only when a session with a higher id is stored. `belowEditor` because an `aboveEditor` widget gets omp's leading spacer row; omp renders the `belowEditor` container as the dock's last child, which is what the stylesheet selects. |
+| Pill above omp's pill line through the stylesheet | An extension cannot add a segment to omp's `HudPillsRow` (`describeHudPills` builds only the agents and jobs segments), and an extension overlay cannot attach to the dock. For the pill the stylesheet only moves the widget's container to the front of the dock (`order: -1`); Tern's Reader style already lays its row on omp's 720px line (`.sf-chat-reader.sf-dock > .sf-col:not([data-role]) > *`: centred, `calc(100% - 32px)` wide, at most 720px), so it ends exactly where omp's counter ends at every width. Rejected: wrapping the dock so our pill shares omp's pill line, which during a running turn pulled omp's activity row up onto that line (Tern's own flex rule on the activity row wins), and Tern's style engine has no `:has()`, `:not()` or `~` to restyle omp's rows only while the HUD is shown. |
+| Sheet = a `picker` like omp's Agents sheet | omp's Agents sheet is a `picker` (title with icon and subtitle, `lg`, rows with status dots and fact columns, the selected item as a side preview, an action bar Kill `x` … Close `esc`, Open transcript `enter`) that its component mounts as the modal sheet by answering `nativeSheet` (omp `packages/tui/src/native/backend.ts`); measured in Tern, its Kill ends the agent without confirmation and Enter replaces the sheet with a full-pane transcript page. The Terminals sheet is an extension custom overlay (`ctx.ui.custom(..., { overlay: true })`) whose component does the same: title Terminals with a `running · stored` subtitle, one row per session (command in mono, `#id · state`, dot accent while running, success after exit 0, error otherwise) with Size, PID and Time columns (elapsed while running, as the Agents roster's Time), and Kill (`x`, only while running), Close (`esc`) and Open (`enter`, also a row's `activate`). The preview follows the Agents preview (omp `agent-hub.ts` `#describePreview`): a title row with the command and a state badge, a `kv` facts grid (Session, Directory with the home directory as `~`, PID, Size, Started), the log path on its own line cut at its start so the file name stays, linked to the file, and a Recent output section. Picker `select` events and ↑/↓ pick the session. Kill runs `terminateSessionById` (SIGTERM, then SIGKILL after 2s), the path `kill_session` and `/unified-exec-sessions` use, handed to the HUD as `ActivatedExtension.kill`; a confirmed exit removes the session from the store, so its row leaves the list. Rejected: a non-modal `overlay` node with tabs, which matched no omp sheet (owner's choice); the below-list preview, whose fixed short region left the list area empty; the log path in the facts grid, where its value column wrapped it over several lines. |
+| Terminal page = a `full` sheet like omp's Console | omp's own terminal window is the Console sheet its bash tool opens with `pty: true`: `ui.custom` with `nativeOverlay { size: "full" }`, the PTY screen as `ansi`, keys forwarded to the process, and an action bar. Open closes the Terminals sheet and opens the page the same way (role `unified-exec.overlay.terminal`, head `Terminals · #id command state`); its body is a column filling the sheet (`min.h` 1) holding the session's history and screen as `ansi` at the session's own width, which grows into the height the action bar leaves (`grow` 1, `max.h` 1, a fraction of the available height) and follows the newest row, and the action bar with Kill (while running) and Back (`esc`) pinned at the bottom. Back, Esc and Tern's `close` reopen the Terminals sheet on the same session; at most one of the two is open. Typed keys go to the running session through `ExecSession.write`, as `write_stdin` writes, so the model's next observation sees their effect (owner's choice); Esc is kept for Back. The PTY keeps the size the model's session started with. Rejected: showing a session only in the sheet's side preview, which wrapped wide screens into a narrow column; a `max.h` in rows computed from the pane's rows less the sheet's chrome, which left the action bar floating above empty space. |
+| Page screen = `ansi`; preview output = plain `code` in the mono face | `ansi` keeps the colors and follows the newest row. Its text is the session's retained history plus the current screen (the alternate screen has no history), so its scrollbar scrolls back through the terminal's history. In the side preview Tern draws `ansi` as a mini terminal that reflows rows at the column's width, which shredded a 120-column `top` into fragments, so the preview shows only the newest 12 non-blank rows as a plain-text `code` block (`lang: "text"`, `wrap: false`, as omp sends its QR code), whose rows keep their spacing and scroll sideways. Tern draws a preview's `code` lines and `mono` spans in the UI face; the plugin's stylesheet sets the block (role `unified-exec.terminals.tail`) in the mono face and the facts' size, so columns align. Rejected: one `mono` text row per screen row, which Tern drew in the UI face with collapsed spacing and wide line gaps; restyling a truncated text's font, whose truncation Tern measures in the original face. |
 | HUD colors from cell attributes | `TerminalScreen.styledScreen()` writes SGR for palette/256/RGB colors and bold, dim, italic, underline, blink, inverse, invisible, strikethrough and overline. Child OSC, cursor and mode sequences cannot pass, because nothing is copied from the byte stream. |
+| Answer OSC 10/11 with the host's appearance | xterm answers DSR and DA1 itself but not the default-colour queries, so a child that picks its palette from them (omp probes OSC 11 with a DA1 sentinel) got no answer and fell back to dark, drawing dark blocks on a light Tern page. The emulator answers `?` queries inside the parse, before a following DA1, with white on black for a dark host and black on white for a light one. On omp the appearance is read at each query from omp's theme (`isLightTheme(getCurrentThemeName())` from `@oh-my-pi/pi-tui/theme`, loaded with the other omp modules so a reshaped omp fails plugin loading); Pi has no such signal and answers dark, as omp's Console responder does. Colour sets (`OSC 11;rgb:…`) are ignored. |
 | Mount only while native and a tty session exists | omp's `isNativeRendering`/`onNativeRenderingChange` (`@oh-my-pi/pi-tui/native/state`) gate the widget, so the ANSI TUI never gets the widget container's spacer row. Store membership and native changes re-evaluate the gate; a missing module fails omp plugin loading before anything registers, like the bash renderer. |
-| Watch screens only while the sheet is open | The chip watches exits (its spinner). The sheet watches store membership, exits and only the selected session's parsed output, and each re-description reads the current screens, so a closed sheet costs nothing per chunk. |
+| Watch screens only while the sheet or page is open | The pill re-describes on store membership only; the open sheet or page watches every listed session's exit (its dot or state) and only the shown session's parsed-output notifications, and each re-description reads the current screens, so a closed HUD costs nothing per chunk. |
 
 ## Implementation map
 
@@ -164,7 +173,8 @@ The initiative establishes a durable output contract across these layers:
 | Kill collection, partial sanitization, and tool registration | `src/index.ts` (`TerminateOutcome`, `buildStreamUpdate`, `kill_session`) |
 | Explicit Pi renderers and shared five-line preview | `src/render.ts` |
 | omp host selection, bash-renderer delegation, result/args display adapters | `fork-features/omp-presentation.ts`, `fork-features/omp-tools.d.ts`; wired by `withHostPresentation` in `src/index.ts`; tests `tests/omp-presentation.test.ts` |
-| Tern terminal HUD: chip, Terminals sheet, fit-or-crop grids, mount gate | `fork-features/tern-terminal-hud.ts`, mounted by `withHostPresentation` with the store `activate` returns; tests `tests/tern-terminal-hud.test.ts` |
+| Tern terminal HUD: counter pill and ✕, Terminals picker sheet, terminal page, mount gate | `fork-features/tern-terminal-hud.ts`, mounted by `withHostPresentation` with the store and kill `activate` returns; tests `tests/tern-terminal-hud.test.ts` |
+| Tern plugin placing the pill above omp's pill line and setting the sheet preview's output rows in the mono face | `fork-features/tern-plugin/` (`plugin.toml`, `terminals.css`, empty `window.luau`), shipped in the package; installed and kept current by `fork-features/tern-plugin-install.ts` (called from `withHostPresentation`); tests `tests/tern-plugin-install.test.ts` |
 | Native codemode factory/renderer wrapper | `src/codemode-render.ts`; registration from `src/index.ts` |
 | Codemode width/cache/schema and real-CLI parity | `tests/codemode-render.test.ts`, `tests/codemode-cli.test.ts` |
 | Real codemode TUI A/B/C, opt-out, no-warning, legacy exclusion and recovery | `tests/tui-codemode.test.mjs`, `tests/fixtures/codemode-*` |
@@ -196,6 +206,67 @@ whose GitHub issues are intentionally disabled:
   quota/failure concerns tracked below.
 
 ## Evidence and reproduction
+
+Tern qualification of the counter pill and Terminals sheet, 2026-10-12,
+macOS arm64, omp 18.10.1: a real Tern window (`tern --control`, an isolated
+`TERN_CONFIG_DIR` holding only this plugin) ran the installed omp, which
+started tty sessions (`top -l 0 -s 2`, `bash -c 'seq 1 300; sleep 600'`) and
+a background agent. The pill showed the terminal icon and count above omp's
+agents counter; clicking it opened the Terminals sheet in the same frame as
+omp's Agents sheet (shot side by side at 1280×800); the preview followed
+`top`, ↓ selected the `seq` session and its preview showed rows 269–300, and
+Esc closed the sheet.
+
+Tern qualification of the terminal page, Kill and the ✕, 2026-10-12, same
+setup: with `top -l 0 -s 2` and `cat` in tty sessions, the pill showed `2`
+and its ✕; Enter on `top` opened the full-pane page with `top` at its full
+120 columns and Kill and Back in its bar; Esc returned to the sheet; ↓ and
+Enter opened `cat`, and typing `hello-from-tern` and Enter showed the typed
+line and `cat`'s echo; Esc and `x` killed `cat`, whose row left the list
+(`1 running · 1 stored`) once its exit was confirmed. The pill's ✕ hid the
+HUD, and it came back with the count when the model started a third tty
+session.
+
+Tern qualification of the Agents-style preview and the page's pinned action
+bar, 2026-10-12, same setup at 1280×800: with `top -l 0 -s 2` and `cat` in tty
+sessions, the sheet showed Size `120×30`, PID and a ticking Time per row; the
+`top` preview showed its title and `running` badge, the facts grid, the log
+path on one line ending in its file name, and `top`'s newest rows column-aligned
+in the mono face (`tern ctl dump` of `.sf-code-lines`: `Berkeley Mono`, before
+the stylesheet rule `Geist`); after typing `hello-from-tern` on `cat`'s page,
+Back showed the typed line and its echo in `cat`'s preview. The page filled the
+sheet with the action bar at its bottom edge. Kill, the ✕ and its return with
+a new tty session behaved as above. `npm test` passed 431 tests (four skips),
+and `EXPECT_PTY=1 bun test ./tests/tern-terminal-hud.test.ts
+./tests/omp-presentation.test.ts` passed 56.
+
+Tern qualification of the plugin auto-install and the OSC 10/11 answer,
+2026-10-12, same setup: with the plugin unlinked from the isolated Tern,
+starting omp showed the toast `unified-exec: installed its Tern plugin
+0.14.6`, `tern plugin list` then listed it `ready`, and a new tty session's
+pill sat above the composer. With a 0.14.5 copy installed by `tern plugin
+install` instead, starting omp removed the copy and linked the package
+(`0.14.6 … ready`). Starting omp again showed no toast and changed nothing.
+An omp started in a tty session and opened on the terminal page drew omp's
+light palette on the light page (it had drawn black message and thinking
+blocks before the emulator answered OSC 11).
+
+Tern qualification for 0.14.5, 2026-10-11, macOS arm64, omp 18.8.9: a real
+Tern window (`tern --control`, an isolated `TERN_CONFIG_DIR` holding only
+this plugin and the owner's `settings.json`, font size 12; `tern serve` loads
+no plugins) ran the installed omp with a running turn, five todos, a
+background agent and tty sessions, measured with `tern ctl tree`. With the
+plugin loaded and the HUD dismissed, at 1280px: agents pill y 590 ending at
+972, activity row 623, todo 624, meter 682, composer 706, identical to the
+same state with the plugin removed. With the HUD shown, its row sat at y 592
+above omp's agents pill (623) and spanned omp's column at every width
+(1600: 467.7–1132.3; 1280: 307.7–972.3; 900: 117.7–782.3; 700: 30.8–669.2,
+the same as omp's activity row), with the meter (682) and composer (706)
+unmoved. A tty session printing `row-1` … `row-400` and then sleeping was
+observed by the model's `exec_command` and then by a `write_stdin` poll; the
+open panel followed `row-400`, and scrolling it up reached `row-1` after
+both observations. `npm test` passed 428 tests (four skips), and
+`EXPECT_PTY=1 bun test ./tests/tern-terminal-hud.test.ts` passed 21.
 
 omp 18.8.7 presentation qualification, 2026-10-10, macOS arm64
 ([#11](https://github.com/mouriya-s-lab/omp-unified-exec/issues/11)). The
@@ -342,8 +413,9 @@ existing backlogs; they do not weaken this output contract.
 - No child ANSI styling in model/result text or in Pi/omp tool rows; the raw
   log is the recovery surface. The Tern HUD shows colors re-encoded from the
   emulator, never the child's bytes.
-- No input from the Tern HUD to sessions; `write_stdin` stays the only way to
-  drive a session.
+- No input from the Tern HUD to sessions beyond the terminal page's typed keys
+  and Kill; neither is model-visible except through the session's own output
+  and exit.
 - No new model tool or output-size parameter.
 - No change to process signaling, wake suppression, or kill escalation.
 - No archive cap or deletion policy in 0.9.0.

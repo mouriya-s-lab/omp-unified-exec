@@ -197,8 +197,9 @@ history_lines: 2                   (optional: the first 2 output lines scrolled 
   queries get the emulator's reply on the child's input, as a real terminal
   would send, so programs that wait for them keep running.
 - History between calls is bounded by a cell budget (`TERMINAL_HISTORY_CELLS`
-  divided by `cols` rows). Reaching it adds `history_may_be_truncated: true`;
-  the older lines are only in the log.
+  divided by `cols` rows). When lines scroll past it before a call reports
+  them, the result adds `history_may_be_truncated: true`; those lines are only
+  in the log.
 
 ### `write_stdin`
 

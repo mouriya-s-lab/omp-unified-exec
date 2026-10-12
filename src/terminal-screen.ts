@@ -14,9 +14,11 @@
  * Observation contract (consuming, serialized per session):
  *   - normal screen: rows that scrolled into history since the previous
  *     observation and were not already reported, then the full current
- *     screen. After observing, history is dropped inside the emulator (ED3) so
- *     the next observation's history starts at this screen's top row and lines
- *     up positionally with it.
+ *     screen. Each observation marks the screen's top row (an xterm marker,
+ *     which follows the row as it scrolls and is disposed when the row leaves
+ *     the history), so the next observation's history starts at that row and
+ *     lines up positionally with the previous screen. History stays in the
+ *     emulator for the styled display.
  *   - alternate screen: the full screen.
  *   - nothing changed (rows, cursor, screen): `unchanged`.
  * Snapshots (partial TUI updates) and styled screens (live display) never
@@ -28,16 +30,13 @@
 
 // @xterm/headless ships CommonJS; Node's ESM loader exposes it only as the default export.
 import xtermHeadless from "@xterm/headless";
-import type { IBufferCell } from "@xterm/headless";
+import type { IBufferCell, IMarker } from "@xterm/headless";
 
 const { Terminal } = xtermHeadless;
 type Terminal = InstanceType<typeof Terminal>;
 
 /** History budget in cells; scrollback rows = budget / cols (never below one screen). */
 export const TERMINAL_HISTORY_CELLS = 240_000;
-
-/** Emulator-only "erase saved lines": resets history without touching the screen or cursor. */
-const ERASE_SCROLLBACK = "\x1b[3J";
 
 export type TerminalScreenKind = "normal" | "alternate";
 
@@ -58,7 +57,7 @@ export type TerminalObservation =
 			readonly text: string;
 			/** Leading lines of `text` that scrolled off above the screen since the previous observation. */
 			readonly historyLines: number;
-			/** History reached the emulator's capacity, so older scrolled-off lines may be missing (see the log). */
+			/** Rows that scrolled off since the previous observation were evicted from the capped history before being reported (see the log). */
 			readonly historyMayBeTruncated: boolean;
 	  };
 
@@ -67,10 +66,10 @@ export interface TerminalSnapshot {
 	readonly text: string;
 }
 
-/** The current screen with SGR styling, one line per terminal row. */
+/** The retained history and the current screen with SGR styling, one line per terminal row. */
 export interface StyledScreen {
 	readonly view: TerminalView;
-	/** Rows joined by `\n`; trailing blank rows dropped. Only SGR (`ESC [ … m`) sequences appear. */
+	/** History rows, then screen rows, joined by `\n`; trailing blank rows dropped. Only SGR (`ESC [ … m`) sequences appear. */
 	readonly text: string;
 }
 
@@ -148,6 +147,15 @@ function cellSgr(cell: IBufferCell): string {
 	return params.join(";");
 }
 
+/** Whether the surface showing a screen is light or dark. */
+export type TerminalAppearance = "dark" | "light";
+
+/** OSC 10/11 answers (default foreground, background) per appearance, in xterm's `rgb:` form. */
+const DEFAULT_COLORS: Readonly<Record<TerminalAppearance, { readonly fg: string; readonly bg: string }>> = {
+	dark: { fg: "rgb:ffff/ffff/ffff", bg: "rgb:0000/0000/0000" },
+	light: { fg: "rgb:0000/0000/0000", bg: "rgb:ffff/ffff/ffff" },
+};
+
 /** A cell that draws nothing: blank glyph on the default background, not inverted. */
 function isBlankCell(cell: IBufferCell): boolean {
 	const chars = cell.getChars();
@@ -168,21 +176,40 @@ export class TerminalScreen {
 	private lastNormal: ObservedScreen | undefined;
 	private lastAlt: ObservedScreen | undefined;
 	private lastScreen: TerminalScreenKind | undefined;
+	/** Normal-screen row that was the top of the last observed normal screen. */
+	private observedTop: IMarker | undefined;
 	private disposed = false;
 	/** Notified after each child write is parsed into the screen. */
 	private readonly changeListeners = new Set<() => void>();
 
 	/**
 	 * @param reply receives the terminal's own responses to queries (cursor
-	 *   position, device attributes), which a real terminal sends back to the child.
+	 *   position, device attributes, default colors), which a real terminal
+	 *   sends back to the child.
+	 * @param appearance the background the screen is shown on, read at each
+	 *   OSC 10/11 query: programs such as omp pick their light or dark palette
+	 *   from the answer, and xterm answers neither query itself.
 	 */
-	constructor(cols: number, rows: number, reply: (bytes: Uint8Array) => void) {
+	constructor(
+		cols: number,
+		rows: number,
+		reply: (bytes: Uint8Array) => void,
+		appearance: () => TerminalAppearance = () => "dark",
+	) {
 		this.cols = cols;
 		this.rows = rows;
 		this.scrollback = Math.max(rows, Math.floor(TERMINAL_HISTORY_CELLS / cols));
 		this.term = new Terminal({ cols, rows, scrollback: this.scrollback, allowProposedApi: true });
 		const encoder = new TextEncoder();
 		this.term.onData((data) => reply(encoder.encode(data)));
+		// Answered inside the parse, so the reply precedes that of a DA1 sent after the query (omp's sentinel).
+		for (const [osc, slot] of [[10, "fg"], [11, "bg"]] as const) {
+			this.term.parser.registerOscHandler(osc, (data) => {
+				if (data !== "?") return false;
+				reply(encoder.encode(`\x1b]${osc};${DEFAULT_COLORS[appearance()][slot]}\x07`));
+				return true;
+			});
+		}
 		this.term.buffer.onBufferChange((buffer) => {
 			if (buffer.type === "alternate") this.altEpoch++;
 		});
@@ -249,14 +276,15 @@ export class TerminalScreen {
 	}
 
 	/**
-	 * The current screen with each row's colors and attributes as SGR, without
-	 * consuming anything. May lag unparsed output. Must not be called after release.
+	 * The retained history and the current screen, each row's colors and
+	 * attributes as SGR, without consuming anything. The alternate screen has
+	 * no history. May lag unparsed output. Must not be called after release.
 	 */
 	styledScreen(): StyledScreen {
 		const buffer = this.term.buffer.active;
 		const cell = buffer.getNullCell();
 		const lines: string[] = [];
-		for (let y = buffer.baseY; y < buffer.baseY + this.rows; y++) {
+		for (let y = 0; y < buffer.baseY + this.rows; y++) {
 			const line = buffer.getLine(y);
 			if (!line) {
 				lines.push("");
@@ -327,16 +355,18 @@ export class TerminalScreen {
 		}
 
 		const baseY = buffer.baseY;
-		const history = this.readRows("normal", 0, baseY);
+		const top = this.observedTop;
+		const start = top && !top.isDisposed ? Math.min(top.line, baseY) : 0;
+		const history = this.readRows("normal", start, baseY);
 		const screen = this.readRows("normal", baseY, baseY + this.rows);
 		const previous = this.lastNormal;
 		const returningFromAlt = this.lastScreen === "alternate";
 		this.lastNormal = { screen: "normal", rows: screen, cursorRow: view.cursor.row, cursorCol: view.cursor.col, altEpoch: 0 };
 		this.lastScreen = "normal";
 
-		// History rows line up with the previous screen's rows (ED3 reset history
-		// at its top). Skip the prefix already reported unchanged; never start
-		// inside a wrapped logical line.
+		// History rows from the marked row line up with the previous screen's
+		// rows. Skip the prefix already reported unchanged; never start inside a
+		// wrapped logical line.
 		const priorRows = previous?.rows ?? [];
 		let skip = 0;
 		while (
@@ -351,11 +381,14 @@ export class TerminalScreen {
 		// screen); back up while it continues a line whose start was skipped.
 		while (skip > 0 && (skip < history.length ? history[skip]! : screen[0])?.wrapped) skip--;
 		const newHistory = history.slice(skip);
-		const historyMayBeTruncated = baseY >= this.scrollback;
+		// Rows were evicted only if the marked row is gone while the history is
+		// at its cap; a child's ED3 or RIS also drops the marker, but then the
+		// child erased those rows itself.
+		const historyMayBeTruncated = (top === undefined || top.isDisposed) && baseY >= this.scrollback;
 
-		// Drop the history we just read so the next observation aligns with this screen.
-		this.enqueue(ERASE_SCROLLBACK, false);
-		await this.flushed();
+		// Mark this screen's top row for the next observation.
+		top?.dispose();
+		this.observedTop = this.term.registerMarker(-buffer.cursorY);
 
 		if (
 			previous &&

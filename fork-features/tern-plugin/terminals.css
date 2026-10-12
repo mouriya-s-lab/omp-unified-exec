@@ -1,0 +1,31 @@
+/*
+ * omp-unified-exec's terminals pill sits above omp's pill line.
+ *
+ * omp's dock (`.sf-dock`) starts with its pill line (`omp.hud`) and ends with
+ * the `belowEditor` widget container, where omp-unified-exec describes its
+ * row (`unified-exec.terminals`). Tern's Reader style already lays that row
+ * on omp's 720px line (`.sf-chat-reader.sf-dock > .sf-col:not([data-role]) >
+ * *`: centred, `calc(100% - 32px)` wide, at most 720px), and the row is
+ * right-aligned like omp's pills, so only its place in the dock changes:
+ * `order: -1` puts the container first, a line of its own above omp's pill
+ * line. omp's own rows keep their flow and geometry: rearranging them broke
+ * the activity row during a running turn. The container keeps the 6px omp's
+ * pill line keeps below itself, so the pill clears the meter's labels as
+ * omp's counter does. While no tty session is stored the widget is
+ * unmounted and nothing here matches.
+ */
+.sf-dock > .sf-col.gap-none:last-child {
+	order: -1;
+	margin-bottom: 6px;
+}
+
+/*
+ * The Terminals sheet's Recent output: Tern draws a `code` block inside a
+ * picker preview in the UI face, which misaligns a terminal's columns. Its
+ * rows take the mono face and size of the preview's facts instead. Without
+ * the plugin the rows stay readable, only unaligned.
+ */
+[data-role="unified-exec.terminals.tail"] .sf-code-lines {
+	font-family: var(--mono);
+	font-size: 12px;
+}

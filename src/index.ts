@@ -61,6 +61,7 @@ import {
 import { ExecSession } from "./session.ts";
 import { SessionStore } from "./session-store.ts";
 import { buildShellCommand, IS_WINDOWS, resolveDefaultShell, resolveWindowsShell } from "./shell.ts";
+import type { TerminalAppearance } from "./terminal-screen.ts";
 import { MIN_EMPTY_YIELD_TIME_MS, nowUtcIso, parseYieldUntil, resolveEmptyPollYield } from "./time.ts";
 export { MAX_EMPTY_POLL_ENV_VAR, resolveMaxEmptyPollMs } from "./time.ts";
 import {
@@ -163,6 +164,8 @@ interface ExtensionCtx {
 	pendingSessions: Set<ExecSession>;
 	/** Set on session_shutdown; new exec_commands are rejected. */
 	shuttingDown: boolean;
+	/** The host's light/dark appearance, which tty sessions answer to OSC 10/11. */
+	appearance: () => TerminalAppearance;
 }
 
 type ExecCommandArgs = {
@@ -291,6 +294,7 @@ async function runExecCommand(
 		displayCommand: args.cmd,
 		shell: shellBin,
 		windowsVerbatimArguments: shellCommand.windowsVerbatimArguments,
+		appearance: ctx.appearance,
 	});
 
 	if (session.failureMessage) {
@@ -888,7 +892,11 @@ function startStreaming(
 	};
 }
 
-function activate(pi: ExtensionAPI): ActivatedExtension {
+/**
+ * @param appearance the host's light/dark appearance; hosts that cannot tell
+ *   (Pi) leave the default dark, as omp's own Console answers.
+ */
+function activate(pi: ExtensionAPI, appearance: () => TerminalAppearance = () => "dark"): ActivatedExtension {
 	const coordinator = new CompletionCoordinator({
 		send: (message) => {
 			// If pi is idle this starts a model turn; if a run is active it is
@@ -922,6 +930,7 @@ function activate(pi: ExtensionAPI): ActivatedExtension {
 		notifiedBashSource: false,
 		pendingSessions: new Set(),
 		shuttingDown: false,
+		appearance,
 	};
 
 	// By default, unified-exec removes pi's built-in `bash` tool so the LLM
@@ -1403,7 +1412,15 @@ function activate(pi: ExtensionAPI): ActivatedExtension {
 	// Shadows native codemode at session start without replacing
 	// builtin:codemode. Presentation only, for every nested tool.
 	registerCompactCodemode(pi);
-	return { store: ctx.store };
+	return {
+		store: ctx.store,
+		// A human kill from the Tern HUD: same path as the slash command.
+		kill: async (id) => {
+			const outcome = await terminateSessionById(ctx, id, "SIGTERM");
+			updateRunningSessionsUi(ctx);
+			return outcome?.killed === true;
+		},
+	};
 }
 
 // Fork: on oh-my-pi, tools present through omp's bash renderer and tty sessions
