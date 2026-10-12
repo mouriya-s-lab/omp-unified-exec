@@ -1,115 +1,102 @@
-# unified-exec
+# omp-unified-exec
 
-[![npm version](https://img.shields.io/npm/v/pi-unified-exec.svg?logo=npm&label=npm)](https://www.npmjs.com/package/pi-unified-exec)
-[![npm downloads](https://img.shields.io/npm/dm/pi-unified-exec.svg)](https://www.npmjs.com/package/pi-unified-exec)
-[![License](https://img.shields.io/npm/l/pi-unified-exec.svg)](./LICENSE)
-[![CI](https://github.com/iamwrm/pi-unified-exec/actions/workflows/ci.yml/badge.svg)](https://github.com/iamwrm/pi-unified-exec/actions/workflows/ci.yml)
-[![Publish to npm](https://github.com/iamwrm/pi-unified-exec/actions/workflows/publish.yml/badge.svg)](https://github.com/iamwrm/pi-unified-exec/actions/workflows/publish.yml)
+English | [简体中文](README.zh-CN.md)
 
-A pi extension that ports codex's `unified_exec` session model: every bash
-command becomes a long-lived session the LLM drives with writes and polls,
-instead of a single blocking call the agent waits on.
+Long-lived shell sessions for [oh-my-pi](https://github.com/can1357/oh-my-pi)
+(omp), with a terminal HUD in Tern. Every command the
+model runs becomes a session it drives with writes and polls, instead of a
+single blocking call: dev servers, REPLs, `ssh`, `sudo`, full-screen programs
+and long jobs keep running between turns, and a human can watch and type into
+them from Tern.
 
-Mirrors codex's `exec_command` + `write_stdin` tool surface, with small
-pi-flavor additions (`set_on_exit`, `kill_session`, `list_sessions`).
-
-> [!IMPORTANT]
-> **Maintenance notice:** We don't have the bandwidth to maintain this
-> repository for the community. Issues are disabled and external pull
-> requests are not accepted. If you'd like to improve or build on this
-> project, please **fork it** — it's [MIT licensed](./LICENSE), so you're
-> free to use, modify, and redistribute it.
-
-> **Install:**
-> ```bash
-> pi install npm:pi-unified-exec
-> ```
-
-## Highlights
-
-- **Session-oriented, two-way I/O.** `exec_command` opens a long-lived
-  session; the LLM keeps the `session_id` and drives the same process
-  across turns by interleaving `write_stdin` writes and polls. Every
-  byte the child prints is mirrored to an on-disk log file in parallel
-  with the in-memory buffer, so the full history is recoverable via
-  `read(log_path)` even after the LLM-visible tail truncates.
-- **Independent process and attachment lifetimes.** Initial `exec_command`
-  and input-bearing `write_stdin` calls yield within 30 seconds. Empty polls
-  default to five seconds and accept finite relative durations without a
-  built-in maximum. Human-requested `yield_until` waits use an absolute UTC
-  deadline. Both return on exit, cancellation, or deadline; cancellation
-  leaves the process alive. Multi-day waits re-arm timers safely and retain
-  bounded output instead of accumulating it inside the waiting call.
-- **Completion can resume the agent (opt-in).** `exec_command(on_exit: "wake")`
-  (default is `"none"`) delivers exactly one follow-up model prompt (bounded
-  exit metadata, no raw output) when a backgrounded process exits while
-  nothing is observing it — completions seen directly by a tool result
-  consume the wake instead. `set_on_exit` disarms or re-arms wake without
-  killing the process (including coordinator tombstones after eviction);
-  `list_sessions` and the running-session UI surface `wake_armed` / `[wake]`.
-- **Compact, bounded output with complete recovery.** Every output-bearing
-  result—including `kill_session`—is tail-capped at 50 KiB / 2000 lines before
-  it reaches model context or persisted details. All five tools have explicit
-  TUI renderers; child output defaults to a five-visual-line tail and expands
-  with Pi's configured `app.tools.expand` binding. Pipe output strips
-  terminal-control sequences; the complete raw stream remains available at
-  `log_path`.
-- **PTY output is what a terminal shows.** `tty: true` sessions render their
-  output through a headless terminal emulator, so progress bars, redraws and
-  full-screen programs come back as the current screen (plus lines that
-  scrolled off since the last call and the cursor position) instead of every
-  redraw appended to the last.
-- **Default-on compact codemode previews.** A display-only wrapper bounds
-  collapsed codemode results to ten visual rows, including object/settled
-  output from any nested tool. Native execution and expansion are unchanged,
-  no settings are needed, and Pi prints no replacement warning;
-  `PI_UNIFIED_EXEC_COMPACT_CODEMODE=0` opts out.
-- **Ctrl-C and other control bytes, not just stdin text.**
-  `write_stdin` decodes C-style escapes (`\x03` Ctrl-C, `\x04` EOF,
-  `\x1b[A` arrow-up, …) before writing, so the LLM can interrupt a
-  stuck command or drive an interactive TUI — `chars_b64` covers the
-  arbitrary-binary case.
-
-## Why
-
-Pi's built-in `bash` suits commands that run and exit. It can stream output
-and benefit from Pi's cache warmer during long calls, but cancellation kills
-the process tree. This extension provides reusable process handles, later
-input, PTYs, and observation that can end without terminating the process.
-
-Codex's alternative: every call opens a session, yields after a bounded
-`yield_time_ms` with output-so-far plus a `session_id`, and the LLM polls or
-drives the session on later turns via `write_stdin(session_id, chars, …)`. A
-PTY is available for interactive programs (Python REPL, ssh, sudo, TUIs).
-
-This extension keeps that session model while letting Pi own cache warming.
-Attachment durations are not tied to a provider's cache lifetime.
+This is a fork of [iamwrm/pi-unified-exec](https://github.com/iamwrm/pi-unified-exec),
+a Pi port of codex's `unified_exec`. The tool surface (`exec_command`,
+`write_stdin`, `set_on_exit`, `kill_session`, `list_sessions`) and its
+semantics are upstream's; the fork adds what omp and Tern need. The full list
+of fork changes, why each exists and how to requalify them on omp/Tern
+upgrades is in [fork-features/README.md](fork-features/README.md).
 
 ## Install
 
-Published on npm as [`pi-unified-exec`](https://www.npmjs.com/package/pi-unified-exec).
-Install via pi's package manager:
-
 ```bash
-pi install npm:pi-unified-exec            # global (~/.pi/agent/settings.json)
-pi install -l npm:pi-unified-exec         # project-local (.pi/settings.json)
+omp install https://github.com/mouriya-s-lab/omp-unified-exec
 ```
 
-Under Node, `pi install` fetches the optional
-`@homebridge/node-pty-prebuilt-multiarch` package and its prebuilt binaries for
-Linux, macOS, and Windows. Under Bun 1.4 or newer—including a
-`bun build --compile` host—PTY mode uses Bun's native `Bun.Terminal` instead
-and does not load that package. If the active runtime provides neither
-backend, pipe mode (`tty: false`) still works and `tty: true` reports the
-missing capability.
+Remove an existing `pi-unified-exec` first (`omp plugin uninstall
+pi-unified-exec`): both register the same tools. The fork publishes nothing to
+npm.
 
-To try without installing:
+Run inside Tern, omp installs the package's Tern plugin itself at the first
+session (see [Tern terminal HUD](#tern-terminal-hud)). Nothing else is
+configured.
 
-```bash
-pi -e npm:pi-unified-exec
-```
+The package still loads on Pi unchanged (Pi's renderers, no HUD). PTY mode uses
+Bun's native `Bun.Terminal` under Bun 1.4+ (omp is a compiled Bun executable),
+and the optional `@homebridge/node-pty-prebuilt-multiarch` under Node. Without
+either, pipe mode (`tty: false`) still works and `tty: true` reports the missing
+capability.
 
-Reload a running pi with `/reload`.
+## What it does
+
+- **Sessions, not calls.** `exec_command` starts a process and returns within
+  its yield window with output so far and a `session_id`; `write_stdin` writes
+  to it, polls it, or sends control bytes (`\x03` Ctrl-C, arrow keys) on later
+  turns. Cancelling a call never kills the process.
+- **PTY output is what a terminal shows.** `tty: true` sessions run through a
+  headless terminal emulator, so progress bars, redraws and full-screen
+  programs come back as the current screen (plus lines scrolled off since the
+  last call and the cursor), not every redraw appended. The emulator answers
+  the terminal queries a real terminal would (cursor position, device
+  attributes, default colours), so programs that wait for them, or pick a light
+  or dark palette from them, behave as in a real terminal.
+- **Bounded output, complete recovery.** Every result the model sees is
+  tail-capped at 50 KiB / 2000 lines and stripped of terminal controls; the
+  complete raw stream of every session is written to `log_path`.
+- **Opt-in completion wake.** `on_exit: "wake"` resumes the agent once when a
+  backgrounded process exits unobserved; `set_on_exit` disarms it.
+- **omp-native presentation.** `exec_command`, `write_stdin` and
+  `kill_session` render through omp's own bash card (command line, output,
+  exit chip, error tone), in the ANSI TUI and in Tern alike.
+- **A terminal HUD in Tern.** Watch, scroll back through, type into and kill
+  the model's tty sessions without a tool call.
+
+## Tern terminal HUD
+
+When omp renders natively in Tern and a tty session exists:
+
+- **Counter pill.** A terminal icon and the session count, copied from omp's
+  running-work counter, sit on their own line just above omp's counter. Its ✕
+  hides the HUD until a new tty session starts.
+- **Terminals sheet.** Clicking the pill opens a sheet built like omp's Agents
+  sheet: one row per tty session with a status dot, size, PID and running
+  time; the selected session's command, state, directory, PID, size, start
+  time, linked log path and newest output rows as the preview. ↑/↓ or a click
+  picks a session, `x` / Kill ends it the way `kill_session` does, Esc / Close
+  leaves.
+- **Terminal page.** Enter / Open shows the session as a full-pane page built
+  like omp's Console: its retained history and current screen in colour, at
+  its own width, following new output and scrollable back. Typed keys go to
+  the session (as `write_stdin` writes them, so the model sees their effect);
+  Esc / Back returns to the sheet; Kill ends the session.
+
+The HUD reads the sessions in place and keeps no copy of them. It only exists
+while omp renders natively, so omp's ANSI TUI gains no row. Model-visible
+results stay plain text.
+
+**The Tern plugin.** An omp extension cannot add to omp's pill line, so the
+package ships a CSS-only Tern plugin (`fork-features/tern-plugin/`). It moves
+the HUD's row above omp's pill line and sets the sheet's output preview in the
+monospace face; omp's own rows are untouched. omp keeps it installed: at the
+first interactive session inside a Tern pane (detected as omp does, from
+`TERN_PANE_SOCKET` and `TERN_PANE`) it asks Tern with `tern plugin list --json`
+and, unless Tern already runs the plugin's current version, links the
+package's plugin directory with `tern plugin link`. An install or update shows
+a toast; a failure shows a warning with the manual command. The link reloads
+Tern's plugins, so the open window picks the stylesheet up. Without the plugin the pill sits below
+the composer.
+
+Design, decisions and Tern qualification evidence:
+[docs/IV-0002-output-lifecycle-and-rendering.md](docs/IV-0002-output-lifecycle-and-rendering.md).
 
 ## Tools
 
@@ -121,12 +108,12 @@ Runs a command in a persistent session.
 |---|---|---|---|
 | `cmd` | string | — | Shell command. Required. |
 | `workdir` | string | turn cwd | Working directory. |
-| `shell` | string | `bash` | Shell binary. On Windows: `bash` if on PATH, else `powershell`. `cmd` / `powershell` / `pwsh` get shell-appropriate flags. |
-| `tty` | boolean | `false` | Allocate a PTY (native `Bun.Terminal` under Bun; node-pty under Node). Output is then the rendered terminal screen; see [PTY sessions](#pty-sessions-tty-true). |
-| `cols` | number | `120` | PTY width in columns (`tty: true` only; ignored for pipes). Clamped to [20, 500]. |
-| `rows` | number | `30` | PTY height in rows (`tty: true` only; ignored for pipes). Clamped to [5, 300]. |
-| `yield_time_ms` | number | `10_000` | How long this call stays attached waiting for output (an attachment window, not the command's lifetime), clamped to [250, 30_000]. |
-| `on_exit` | `"none"` \| `"wake"` | `"none"` | Persistent per-session policy for exits nobody is observing. Prefer `"none"`. `"wake"`: one synthetic follow-up prompt resumes the agent — only when the human explicitly wants auto-resume. Change later with `set_on_exit`. |
+| `shell` | string | `bash` | Shell binary. On Windows: `bash` if found, else `powershell`. `cmd` / `powershell` / `pwsh` get shell-appropriate flags. |
+| `tty` | boolean | `false` | Allocate a PTY. Output is then the rendered terminal screen; see [PTY sessions](#pty-sessions-tty-true). |
+| `cols` | number | `120` | PTY width (`tty: true` only). Clamped to [20, 500]. |
+| `rows` | number | `30` | PTY height (`tty: true` only). Clamped to [5, 300]. |
+| `yield_time_ms` | number | `10_000` | How long this call stays attached waiting for output (not the command's lifetime), clamped to [250, 30_000]. |
+| `on_exit` | `"none"` \| `"wake"` | `"none"` | Policy for exits nobody is observing. `"wake"`: one follow-up prompt resumes the agent — only when the human explicitly wants auto-resume. Change later with `set_on_exit`. |
 
 Response body (short output, no truncation):
 
@@ -147,8 +134,8 @@ tty: false
 <captured stdout+stderr>
 ```
 
-If a chatty process produces more than the 1 MiB in-memory retention between
-polls, the middle is dropped and a marker is spliced at the exact omission
+If a chatty pipe session produces more than the 1 MiB in-memory retention
+between polls, the middle is dropped and a marker is spliced at the omission
 point (the full stream is always in `log_path`):
 
 ```
@@ -176,7 +163,7 @@ session_id: 3
 …
 tty: true
 terminal: normal screen 120x30, cursor row 4 col 5
-history_lines: 2                   (optional: the first 2 output lines scrolled off above the screen since the last call)
+history_lines: 2                   (optional: lines scrolled off above the screen since the last call)
 ---
 <history lines not yet reported>
 <the full current screen, trailing blank rows removed>
@@ -184,22 +171,20 @@ history_lines: 2                   (optional: the first 2 output lines scrolled 
 
 - **History plus screen.** Lines that scrolled off the top since the previous
   call and were not already reported come first, then the whole current screen.
-  Carriage-return progress bars, cursor-up redraws and clear-screen redraws
-  therefore show their final state, not every frame.
+  Carriage-return progress bars and redraws show their final state.
 - **Unchanged screen.** When neither the screen, the cursor nor the history
   changed, the result has `screen_changed: false` and `(no output)`.
 - **Full-screen programs** (alternate screen, e.g. `top`, editors) are reported
-  as `terminal: alternate screen …` with the whole screen; leaving it restores
-  the normal screen.
-- **Plain text and cursor only.** Colours and reverse video are not
-  represented. The raw byte stream, styling included, stays in `log_path`.
-- **Terminal queries are answered.** Cursor-position and device-attribute
-  queries get the emulator's reply on the child's input, as a real terminal
-  would send, so programs that wait for them keep running.
+  as `terminal: alternate screen …`; leaving it restores the normal screen.
+- **Plain text and cursor only.** Colours are not in model results; the raw
+  stream stays in `log_path`, and Tern's terminal page shows the colours.
+- **Terminal queries are answered** on the child's input: cursor position and
+  device attributes, and the default foreground/background colours (OSC 10/11).
+  On omp the colours follow omp's theme (light or dark, which in Tern follows
+  Tern's appearance); on Pi they are dark.
 - History between calls is bounded by a cell budget (`TERMINAL_HISTORY_CELLS`
-  divided by `cols` rows). When lines scroll past it before a call reports
-  them, the result adds `history_may_be_truncated: true`; those lines are only
-  in the log.
+  divided by `cols` rows). Lines scrolled past it before a call reports them
+  set `history_may_be_truncated: true`; they are only in the log.
 
 ### `write_stdin`
 
@@ -210,66 +195,39 @@ Drives or polls an existing session.
 | `session_id` | number | — | Required. |
 | `chars` | string | `""` | Empty = pure poll; non-empty writes (after escape decoding) then polls. Mutually exclusive with `chars_b64`. |
 | `chars_b64` | string | `""` | Base64-encoded bytes to write. Binary-safe. Mutually exclusive with `chars`. |
-| `yield_time_ms` | number | `250` with input; `5_000` empty | Attachment window, not a process timeout. Input-bearing calls clamp to [250, 30_000]. Empty polls have a 5_000 minimum and no built-in maximum. Supply a non-negative finite number no greater than `Number.MAX_SAFE_INTEGER`; fractional milliseconds round down. An explicit operator cap rejects larger relative polls. Mutually exclusive with `yield_until`. |
-| `yield_until` | string | — | Absolute UTC deadline for an **empty poll only**, strict RFC 3339 UTC (`2026-07-21T18:30:00Z` or with `.mmm`; uppercase `Z`; no offsets/local time; real calendar dates only). **Only when the human explicitly asks** for a long attached wait or wall-clock deadline. The call stays attached until the process exits, the call is cancelled, or the deadline arrives — whichever is first. A past deadline is an immediate poll. No default max horizon. Mutually exclusive with `yield_time_ms` and with input bytes. |
+| `yield_time_ms` | number | `250` with input; `5_000` empty | Attachment window, not a process timeout. Input-bearing calls clamp to [250, 30_000]. Empty polls have a 5_000 minimum and no built-in maximum; fractional milliseconds round down. An explicit operator cap rejects larger relative polls. Mutually exclusive with `yield_until`. |
+| `yield_until` | string | — | Absolute UTC deadline for an **empty poll only**, strict RFC 3339 UTC (`2026-07-21T18:30:00Z` or with `.mmm`; uppercase `Z`; real calendar dates only). **Only when the human explicitly asks** for a long attached wait. Returns on exit, cancellation or the deadline; a past deadline is an immediate poll. Mutually exclusive with `yield_time_ms` and with input bytes. |
 
-#### Waiting on long-running commands — the rules
+#### Waiting on long-running commands
 
-1. Use a finite `yield_time_ms` based on the expected job duration and how
-   soon progress needs attention. Empty polls default to five seconds and
-   have no built-in maximum. Keep waits short for interactive or indefinite
-   processes. An attachment deadline never kills the process.
-2. Use `yield_until` **only when the human explicitly asks** for a long
-   attached wait or a wall-clock deadline on a **finite, non-interactive**
-   command. Omit `yield_time_ms` and pass a future UTC timestamp ending in
-   `Z`, computed from `tool_time_utc`. The call returns early on process
-   exit; Esc leaves the process alive.
-3. `on_exit` defaults to `"none"`. Use `"wake"` **only when the human
-   explicitly wants** auto-resume on unobserved completion. If you armed
-   wake by mistake or the job is abandoned, call
-   `set_on_exit(session_id, on_exit: "none")` promptly (does not kill).
-4. Combining wake with an observing `write_stdin` is safe: a completion
-   observed directly by a tool result consumes the wake; a deadline or
-   cancellation leaves the wake armed until disarmed or delivered.
+1. Use a finite `yield_time_ms` based on the expected job duration. Empty polls
+   default to five seconds and have no built-in maximum. An attachment deadline
+   never kills the process.
+2. Use `yield_until` **only when the human explicitly asks** for a long attached
+   wait or a wall-clock deadline on a **finite, non-interactive** command,
+   computed from `tool_time_utc`. **Never** for REPLs, `sudo`, `ssh`, password
+   prompts, dev servers, watchers or debuggers.
+3. `on_exit` defaults to `"none"`. Use `"wake"` only when the human explicitly
+   wants auto-resume; `set_on_exit(session_id, on_exit: "none")` disarms it
+   without killing.
+4. A completion observed directly by a tool result consumes the wake; a
+   deadline or cancellation leaves it armed.
 
-**Never** use `yield_until` for REPLs, `sudo`, `ssh`, password prompts,
-dev servers, file watchers, debuggers, or any indefinite/interactive
-session — it is only for finite commands that exit on their own.
-
-Both empty-poll forms use the same event-driven wait. Pipe sessions retain
-output in the bounded head/tail buffer and a rolling TUI tail; tty sessions
-keep it in their terminal screen. Either way, updates are output-driven,
-and the log receives the raw stream. Short relative polls update at most
-four times per second; longer and absolute waits at most once per 30 seconds,
-plus initial/final updates. Quiet waits have no periodic output heartbeat.
-Absolute deadlines convert once to a duration; both forms then use monotonic
-elapsed time, so wall-clock changes cannot stretch or shrink a wait.
-
-Pi owns cache warming independently. Its default `streaming` mode can refresh
-eligible caches during attached tool waits; `idle` also permits warming after
-the agent settles. Warming is best-effort and can stop because of economics,
-missing cache metadata, safety horizons, errors, or extension vetoes. A long
-wait works even when warming is off, but the next request may miss cache.
-
-This release changes wait/output collection, not archive policy. Raw logs are
-still unbounded on disk; archive quotas and bounded log-write backlogs remain
-[follow-up work](docs/IV-0002-output-lifecycle-and-rendering.md#output-archive-safety).
-
-#### Wait/cap configuration
+Both empty-poll forms use the same event-driven wait on monotonic time. Pipe
+sessions keep output in a bounded head/tail buffer, tty sessions in their
+terminal screen; the log always gets the raw stream. Streaming updates are
+output-driven (short polls at most four per second, long and absolute waits at
+most once per 30 seconds), with no heartbeat while quiet. Cache warming during
+waits is the host's business, not this package's. Raw logs are unbounded on
+disk; archive quotas are [follow-up work](docs/IV-0002-output-lifecycle-and-rendering.md#output-archive-safety).
 
 | Env var | Default | Notes |
 |---|---|---|
-| `PI_UNIFIED_EXEC_MAX_EMPTY_POLL_MS` | unset, no cap | Optional limit for empty relative `write_stdin` polls. May exceed 290 seconds. Positive values below `5_000` become `5_000`; fractions round down. Invalid, non-positive, non-finite, or unsafe values fail the relative poll instead of silently removing protection. Does not change human-explicit absolute waits. |
-
-To retain the old limit, explicitly set `PI_UNIFIED_EXEC_MAX_EMPTY_POLL_MS=290000`.
-Unset or blank now means no cap. Malformed explicit values previously fell back
-to the built-in cap; they now report a configuration error.
+| `PI_UNIFIED_EXEC_MAX_EMPTY_POLL_MS` | unset, no cap | Optional limit for empty relative polls. Values below `5_000` become `5_000`; invalid values fail the poll instead of removing the limit. Does not affect `yield_until`. |
 
 #### Control bytes and escapes in `chars`
 
-`chars` is decoded as a C-style escape string before being written to stdin.
-This lets the LLM send control bytes the wire format (antml/JSON tool_use)
-strips of their meaning otherwise.
+`chars` is decoded as a C-style escape string before it is written.
 
 | Escape | Produces |
 |---|---|
@@ -284,292 +242,117 @@ strips of their meaning otherwise.
 | `\\X` not in the list above | preserved literally (both chars) |
 | Raw bytes in the string | pass through untouched |
 
-Examples:
-
 ```
 write_stdin chars="\x03"          → Ctrl-C   (0x03)
 write_stdin chars="\x04"          → Ctrl-D   (0x04)
 write_stdin chars="\x1b:wq\n"     → ESC + ":wq" + LF     (vim save+quit)
 write_stdin chars="\x1b[A"        → ESC + "[A"           (up arrow)
-write_stdin chars="password\n"    → "password" + LF
 write_stdin chars="C:\\\\temp"    → "C:\\temp"           (must escape \)
+write_stdin chars_b64="G3s6wgo="  → exact 5 decoded bytes
 ```
 
-For arbitrary binary or when you want zero ambiguity, use `chars_b64`
-instead:
-
-```
-write_stdin chars_b64="G3s6wgo="    → exact 5 decoded bytes
-```
-
-The two parameters are mutually exclusive — passing both rejects the call.
-Malformed base64 also rejects.
+Passing both `chars` and `chars_b64`, or malformed base64, rejects the call.
+Submit tty input with `\r`: it works everywhere, while `\n` does not run a line
+in legacy Windows consoles.
 
 ### `set_on_exit`
 
-Change `on_exit` policy **without killing the process**.
+Changes the `on_exit` policy **without killing the process**.
 
 | Param | Type | Default | Notes |
 |---|---|---|---|
 | `session_id` | number | — | Required. |
-| `on_exit` | `"none"` \| `"wake"` | — | `"none"`: disarm pending wake (process keeps running; also works for coordinator tombstones after store eviction). `"wake"`: arm auto-resume if still running in the store. Too late once the session has already exited unregistered / already notified. |
+| `on_exit` | `"none"` \| `"wake"` | — | `"none"` disarms a pending wake (also for coordinator tombstones after eviction). `"wake"` arms it while the session is still running in the store. |
 
-Status tokens in the result: `disarmed`, `already_none`, `armed`,
-`already_armed`, `too_late`. Unknown ids return `found: false`.
-
-Use this when wake was armed by mistake, the approach was abandoned, or the
-human no longer wants auto-resume. **Disarm cannot recall a follow-up that
-was already queued to pi.** `kill_session` still both kills and suppresses
-wake.
+Status tokens: `disarmed`, `already_none`, `armed`, `already_armed`,
+`too_late`; unknown ids return `found: false`. Disarming cannot recall a
+follow-up already queued to the host.
 
 ### `on_exit: "wake"` — completion notifications
 
-Default is `"none"`. `exec_command(on_exit: "wake")` arms a per-session
-completion policy once the call commits to returning a background
-`session_id` (a command that finishes inside the initial yield returns its
-exit directly and never arms a wake). Prefer arming only when the human
-explicitly wants auto-resume; use `set_on_exit` to disarm later.
+> Terminal completion is delivered through a finalized tool result **or** it
+> causes one synthetic model prompt — never both.
 
-The exactly-once invariant:
-
-> Terminal completion is delivered through a finalized tool result **or**
-> it causes one synthetic model prompt — normally never both.
-
-Mechanics:
-
-- Any `write_stdin` call that could return terminal status takes an
-  *observation lease*. An exit that lands while an observer is attached is
-  held and returned directly by that call; the wake is consumed when pi
-  finalizes the tool result (`tool_execution_end`). A result finalized as
-  error/cancelled releases the lease and keeps the wake eligible.
-- A relative/absolute deadline or a cancelled call releases the lease and
-  leaves the wake armed; when the process later exits, exactly one
-  follow-up prompt is sent.
-- The prompt is delivered via `pi.sendMessage(…, { triggerTurn: true,
-  deliverAs: "followUp" })`: it starts a turn if pi is idle and is queued
-  as a follow-up if a run is active — it never steers or interrupts the
-  current turn. Simultaneous completions are debounced into **one** bounded
+- An exit that lands while a `write_stdin` is observing is returned by that
+  call, and the wake is consumed when the result is finalized. A result
+  finalized as error or cancelled keeps the wake eligible.
+- A deadline or a cancelled call leaves the wake armed; when the process later
+  exits, exactly one follow-up prompt is sent (`deliverAs: "followUp"`, never
+  interrupting a running turn). Simultaneous completions are batched into one
   prompt.
-- The prompt contains bounded execution metadata only (session id, exit
-  code/signal, sanitized one-line command, cwd, elapsed time, log path,
-  failure info) — never raw stdout/stderr. The exited session remains
-  drainable via an empty `write_stdin` afterwards, and consuming that
-  output never triggers a second wake.
-- Suppression: `kill_session`, the `/unified-exec-sessions` command, LRU
-  eviction of a live process, and `session_shutdown` all suppress the wake
-  (before signaling). A kill that fails to land restores eligibility. A
-  naturally-exited wake session that gets evicted before notification keeps
-  a bounded tombstone snapshot so its one wake (with `log_path`) is still
-  delivered — unless `set_on_exit … none` disarms that tombstone by id.
-  `list_sessions` reporting the exit first counts as direct observation and
-  suppresses a not-yet-queued wake.
-
-Requires pi and TUI ≥ 0.99.1 (`agent_settled` extension event, used as a safe flush
-point for pending/retried notifications; `outputSchema` / `structuredContent` for
-codemode scripts).
+- The prompt carries bounded metadata only (session id, exit code/signal,
+  command, cwd, elapsed time, log path, failure) — never raw output.
+- `kill_session`, the `/unified-exec-sessions` command, LRU eviction of a live
+  process and `session_shutdown` suppress the wake; a kill that fails restores
+  it. A naturally exited wake session evicted before notification keeps a
+  bounded tombstone so its wake is still delivered.
 
 ### `kill_session`
-
-Pi-flavor. Not in codex.
 
 | Param | Type | Default | Notes |
 |---|---|---|---|
 | `session_id` | number | — | Required. |
-| `signal` | string | `"SIGTERM"` | Escalates to SIGKILL after 2s. Pass `"SIGKILL"` to skip the grace. On Windows any signal force-kills the process tree immediately. |
+| `signal` | string | `"SIGTERM"` | Escalates to SIGKILL after 2s. `"SIGKILL"` skips the grace. On Windows any signal force-kills the process tree. |
 
-Signal names are normalized (`term`, `INT`, `sigkill` all work). Unknown
-names are rejected with an error instead of silently no-opping.
-
-The result uses the same bounded output envelope as `exec_command` and
-`write_stdin`: `details.output` contains at most 50 KiB / 2000 lines of
-terminal-inert plain text (for tty sessions, the rendered screen),
-`truncation` and `omitted_bytes` explain any loss, and `log_path` points to
-the complete raw session stream. Explicit `operation`,
-`status`, `running`, `killed`,
-`escalated`, requested/actual signal, and process metadata distinguish session
-identity from liveness. A failed kill remains registered and reports
-`running: true`.
+Signal names are normalized (`term`, `INT`, `sigkill`); unknown names are
+rejected. The result uses the same bounded envelope as the other tools, with
+`killed`, `escalated`, requested/actual signal and `running`. A failed kill
+stays registered and reports `running: true`. The Tern HUD's Kill uses the same
+path.
 
 ### `list_sessions`
 
-Pi-flavor. Not in codex. Prunes exited sessions from the in-memory store, but
-reports each of them one final time (with `running: false`, `exit_code` /
-`signal`, and `log_path`) so exit information is never silently lost.
+Lists live sessions and reports each exited one a final time (with
+`running: false`, `exit_code`/`signal` and `log_path`) before pruning it. Each
+entry has `wake_armed`; the response carries `tool_time_utc` for computing
+`yield_until` deadlines.
 
-Each entry includes **`wake_armed: boolean`** (and the text listing marks
-live armed sessions with `[wake]`) so the model can audit which sessions will
-auto-resume on unobserved exit.
+## Command and flag
 
-The response also carries **`tool_time_utc`** (text trailer + details) so the
-model can compute a `yield_until` deadline from the trustworthy host clock
-without an extra probing call.
+- `/unified-exec-sessions` — lists live sessions in a selector (armed wakes
+  show `[wake]`) and kills the chosen one, or all, without the model, with the
+  same SIGTERM → 2s → SIGKILL escalation.
+- `--keep-builtin-bash` — on Pi, the built-in `bash` tool is removed from the
+  active set by default so the model uses `exec_command` / `write_stdin`; this
+  flag keeps it.
 
-## Command
+## Presentation
 
-- `/unified-exec-sessions` — human-facing escape hatch: lists live sessions in
-  a selector (armed wakes show `[wake]`) and kills the chosen one (or all of
-  them) without going through the model. Uses the same SIGTERM → 2s → SIGKILL
-  escalation as `kill_session`.
+**On omp,** `exec_command`, `write_stdin` and `kill_session` render through
+omp's exported bash renderer, in the ANSI TUI and in Tern: `$ cmd`, collapsed
+output with omp's expand binding, the exit chip and error tone for failures,
+`Backgrounded: session N` for running sessions, and the truncation marker with
+the log path as the last line. `write_stdin` and `kill_session` show their
+action as a bash comment (`# poll session N`, `# stdin → session N: "…"`,
+`# kill session N (SIGTERM)`). `set_on_exit` and `list_sessions` use omp's
+default card. If omp's bash renderer is missing or reshaped, plugin loading
+fails rather than showing raw envelopes.
 
-## Flag
+**On Pi,** all five tools have their own renderers: command banners,
+five-visual-line output tails expanded with `app.tools.expand`, live elapsed
+counters, `⟳ poll` / `» input` banners and kill/list summaries. While a process
+is alive the footer shows `unified-exec: N sessions running`.
 
-By default, this extension **removes pi's built-in `bash` tool** from the
-active set at session start so the LLM is steered toward `exec_command` /
-`write_stdin`.
+Model-visible content and persisted details are the same on both hosts.
 
-- `--keep-builtin-bash` — preserve the built-in `bash` alongside the
-  unified-exec tools. Useful if you've got skills or prompts that explicitly
-  expect `bash(cmd, timeout)`.
+## Codemode scripts (Pi)
 
-## Codemode scripts
-
-Every tool declares an `outputSchema` and returns a matching
-`structuredContent`, so Pi codemode scripts receive an object instead of the
-text envelope the model sees:
+Every tool declares an `outputSchema` and returns matching
+`structuredContent`, so Pi codemode scripts receive an object:
 
 ```js
 const r = await tools.exec_command({ cmd: "npm test", yield_time_ms: 30000 });
 if (r.running) text(`still running as session ${r.session_id}`);
 else text(`exit ${r.exit_code}`);
-text(r.output); // readable multiline output rather than the whole JSON object
+text(r.output); // print the output, not the whole object
 ```
 
-`exec_command` and `write_stdin` resolve to `{ status, running, output,
-truncated, session_id?, exit_code?, signal?, failure_message?, log_path?,
-wall_time_seconds, terminal?, note?, wait_status?, on_exit?, tool_time_utc? }`;
-`kill_session`, `set_on_exit`, and `list_sessions` have matching typed shapes
-(`src/script-result.ts`). `output` is the same bounded, terminal-inert text as
-`details.output`, and `terminal` carries the screen/cursor/history metadata of
-tty sessions. Print `r.output` rather than the whole object: `text(r)`
-serializes newlines as `\n` and turns the output into one long line.
-
-Model-visible `content` and persisted `details` are unchanged.
-
-### Default-on codemode display fix (0.12.1; warning-free since 0.12.2)
-
-Pi 0.99.1's collapsed codemode preview counts logical lines before wrapping.
-`text(r)` or `text({ i, ...settled })` creates one long JSON line, which can
-wrap across the screen even though the result is collapsed. Pi 0.99.2 bounds
-individual preview sections by visual lines, but many nested-call summaries
-can still exceed a whole-result limit. This package registers codemode from
-Pi's public codemode factory and changes **only its
-result renderer**: after native wrapping, the collapsed result text component
-is capped at ten visual rows, including nested-call summaries, spacers and
-footer. Small native previews and expanded output stay unchanged. A configured
-expansion hint and `Full output:` recovery footer remain visible when clipping;
-long footer paths are width-truncated, with the complete path retained on
-expansion.
-
-**No setup.** The replacement is registered at session start, following Pi's
-dynamic-tools pattern, so Pi keeps `builtin:codemode` loaded and prints no
-replacement warning. Pi's tool registry uses the first extension in load order,
-and configured packages load before built-ins, so this codemode is the one in
-use; the built-in is the automatic fallback whenever this fix is off or fails.
-If another extension's codemode takes precedence, or a future Pi has no native
-result renderer to wrap, the package warns at session start and native display
-remains.
-
-The fix applies to **all codemode nested tools**, not only unified-exec. It does
-not activate codemode, rewrite script/model results, change process output
-bounds, patch Pi, or write your settings. The script-call renderer and separate
-inline image components are outside this result-text cap. The replacement
-honors `defaultTools: ["+codemode"]`, CLI tool selection, `codemode.mode`,
-`codemode.inlineBudget`, native MCP activation and branch-local store/load.
-
-**Upgrading from 0.12.1:** its `"-builtin:codemode"` exclusion is no longer
-needed; remove it (or re-enable `codemode` under Built-in in `pi config`) so the
-built-in stays available as a fallback. With the exclusion kept, the package
-still supplies codemode and applies `defaultTools` itself, appending codemode
-after the other active tools.
-
-**Explicit opt-out**, for a different codemode replacement or native display:
-
-```bash
-PI_UNIFIED_EXEC_COMPACT_CODEMODE=0 pi
-```
-
-## TUI rendering
-
-Custom `renderCall` and `renderResult` mirror pi's built-in `bash` tool
-styling and add session-aware details:
-
-**While streaming (live, updates every second):**
-```
-$ for i in {1..12}; do echo round $i; sleep 0.5; done (yield 2.5s · cwd: ~/project)
-… 1 earlier lines
-  round 2
-  round 3
-  round 4
-  round 5
-
-  elapsed 1.3s · session_id=2 · log: /tmp/pi-unified-exec-2-86b3f006.log
-```
-
-For a tty session the live area shows the session's current terminal screen
-rather than a rolling tail of raw output.
-
-**After yield, session still alive:**
-```
-  yielded 2.5s · session_id=2 · log: /tmp/pi-unified-exec-2-86b3f006.log
-```
-
-**After process exits:**
-```
-  took 4.2s · exit_code=0 · log: /tmp/pi-unified-exec-1-5cc5e104.log
-```
-
-**write_stdin:**
-```
-⟳ poll → session_id=2 (yield 5.0s)               # empty chars
-⟳ poll → session_id=2 (2h40m later)              # yield_until (live remaining)
-» print(7*6)\n → session_id=1 (yield 1.0s)         # with input
-» ^C → session_id=1 (yield 1.0s)                  # control byte
-» (base64, 5 bytes) → session_id=1 (yield 1.0s)   # chars_b64 payload
-```
-
-**Absolute-wait footer** (while still attached) shows remaining time such as
-`2h40m later` (ISO deadline stays in tool details for the model). Cancelled
-waits mark `cancelled`; armed wakes may show `wake armed`.
-
-**set_on_exit:**
-```
-set_on_exit session_id=2 → none
-```
-
-**kill_session** (collapsed by default):
-```
-kill_session session_id=2 signal=SIGTERM
-... (147 earlier lines, Ctrl+O to expand)
-last output line 1
-last output line 2
-last output line 3
-last output line 4
-last output line 5
-  took 0.3s · killed session_id=2 · signal=SIGTERM · log: /tmp/...
-```
-
-**list_sessions** shows up to five compact entries while collapsed and all
-bounded entries plus log paths when expanded.
-
-**Running-session UI:** while any unified-exec process is still alive, the TUI
-footer shows `unified-exec: N sessions running`. After `/tree` navigation, a
-widget above the editor lists the live `session_id`s and commands (with
-`[wake]` when auto-resume is armed) so the human sees that processes survived
-branch navigation. The footer/widget refreshes as soon as a background session
-exits; the exited session remains drainable via `write_stdin` until observed,
-preserving the usual lazy cleanup semantics.
-
-By design this display omits some metadata the LLM sees (`chunk_id`,
-`original_token_count`, and tildified paths). Use the configured
-`app.tools.expand` binding (Ctrl+O by default) to reveal the complete **bounded
-result**. Expansion never reads an arbitrary-size log synchronously; use
-`log_path` when the complete raw session stream is required. Raw PTY logs can
-contain terminal mode/clipboard sequences, so inspect them through `read`, a
-hex/escape visualizer, or another non-executing viewer rather than `cat`.
+Shapes are in `src/script-result.ts`. On Pi the package also caps collapsed
+codemode results at ten visual rows (all nested tools, display only);
+`PI_UNIFIED_EXEC_COMPACT_CODEMODE=0` opts out. omp has no codemode, so this is
+off there.
 
 ## Constants
-
-Codex-parity unless noted:
 
 ```
 MIN_YIELD_TIME_MS            = 250
@@ -581,104 +364,35 @@ EARLY_EXIT_GRACE_PERIOD_MS   = 150
 HEAD_TAIL_MAX_BYTES          = 1 MiB   (in-memory drain buffer, pipe sessions)
 TERMINAL_HISTORY_CELLS       = 240_000 (tty history between calls: cells / cols rows, at least one screen)
 MAX_SESSIONS                 = 64
-WARNING_SESSIONS             = 60
 LRU_PROTECTED_COUNT          = 8
-
-# Empty relative polls have no built-in cap. Optional operator limit:
-PI_UNIFIED_EXEC_MAX_EMPTY_POLL_MS = unset
-LONG_WAIT_UPDATE_INTERVAL_MS     = 30_000  (long/absolute empty-poll update rate limit)
-MAX_TIMER_ARM_MS                 = 2^31-1  (timer chunk size for either empty-poll form)
-
-# Diverges from codex — matches pi's built-in bash instead:
-DEFAULT_MAX_BYTES            = 50 KiB  (LLM-visible per-call truncation cap)
+DEFAULT_MAX_BYTES            = 50 KiB  (model-visible per-call cap)
 DEFAULT_MAX_LINES            = 2000
-OUTPUT_POLL_INTERVAL_MS      = 250     (exec/input cadence; short empty-poll rate limit)
-PREVIEW_LINES                = 5       (visual TUI lines before app.tools.expand)
 ```
 
-## Semantic notes
+## Semantics
 
-- **Early exit**: commands that finish in <150 ms never touch the session
-  store. The response has `exit_code`, no `session_id`.
-- **Session persistence between calls**: if a process exits after a tool call
-  returns but before the next one, the session stays in the store. The next
-  `write_stdin(session_id, …)` call will observe the exit and return
-  `exit_code`, then remove the session; `list_sessions` reports it once with
-  exit info before removing it. (Matches codex's `refresh_process_state`
-  pattern.)
-- **Spawn failures are diagnosable**: a nonexistent shell binary or `workdir`
-  (async ENOENT from the OS) surfaces as `failure_message` in the response
-  instead of a silent empty exit.
-- **Shell-exit vs pipe-close**: a session reports "running" until the output
-  pipe reaches EOF — the shell's own exit is not enough. Background
-  processes that inherited stdout/stderr (or a backgrounded `cd … && cmd &`
-  chain whose subshell keeps waiting) hold the pipe open, so the session
-  stays `[still running]` after its shell is gone. Such results carry a
-  `note` explaining the state and how to detach (`(cd dir && cmd >log 2>&1
-  </dev/null) &`, `setsid cmd >log 2>&1 </dev/null &`) or end it with
-  `kill_session`; `list_sessions` marks them `(shell exited, pipe held)`.
-- **Closed stdin is safe**: a child that closes its stdin no longer crashes
-  the host on EPIPE; follow-up `write_stdin` calls report
-  `failure_message: "stdin write failed: …"` when bytes can't be delivered.
-- **External abort (Esc)**: breaks the current call's wait but does not kill
-  the session. The next turn can still drive it. For either empty-poll form the
-  cancelled call reports `wait_status: cancelled`, does not drain buffered
-  output, and leaves an armed `on_exit: "wake"` eligible.
-- **Empty-poll races**: if exit, cancellation, and deadline land almost
-  simultaneously, actual process exit wins whenever the session is already
-  terminal when the result is assembled.
-- **Session shutdown**: all live sessions are terminated with SIGTERM; after a
-  1s grace, survivors (e.g. children that trap SIGTERM) are SIGKILLed so
-  detached process groups don't outlive pi. (Use the separate
-  `bash-background` extension if you need true disown.)
-- **LRU eviction**: at `MAX_SESSIONS`, the oldest non-protected session is
-  evicted. The 8 most-recently-used are never pruned. Exited sessions are
-  preferred as victims.
-- **Head+tail output buffer** (pipe sessions): up to 1 MiB retained, split
-  50/50 between the beginning and end of the output stream. A separate 32 KiB
-  rolling tail window feeds streaming `onUpdate` events during waits.
-- **Terminal screen** (tty sessions): one emulator per session; result-producing
-  calls take turns reading it, and a cancelled empty poll reads nothing, so the
-  next call still reports everything since the last delivered result.
-  Streaming updates show the screen without consuming it.
-
-## Architecture
-
-```
-src/
-├── index.ts              # tool registration, event handlers, flag
-├── session.ts            # ExecSession: spawn, read, write, kill, log-stream, state
-├── session-store.ts      # SessionStore + LRU eviction (matches codex)
-├── head-tail-buffer.ts   # direct port of codex's HeadTailBuffer
-├── collect.ts            # collectOutputUntilDeadline
-├── long-wait.ts          # shared event-driven empty-poll wait + rate-limited streaming
-├── time.ts               # relative duration/operator limit + strict UTC deadline parsing
-├── format-time.ts        # shared elapsed / remaining human labels
-├── completion.ts         # CompletionCoordinator: on_exit "wake" scheduling (exactly-once)
-├── notify.ts             # Notify / Gate / sleep primitives
-├── pty.ts                # Bun.Terminal + Node node-pty backends, pipes, Windows tree-kill
-├── shell.ts              # shell selection & argv construction (Windows-aware)
-├── output-safety.ts      # terminal-control stripping (raw bytes stay in logs)
-├── terminal-screen.ts    # tty sessions: headless terminal, history + screen observations
-├── tool-result.ts        # bounded process/kill envelopes + model-visible text
-├── render.ts             # explicit renderCall / renderResult for all five tools
-├── codemode-render.ts    # default-on native codemode visual-row preview wrapper
-└── unescape.ts           # C-style escape decoder for write_stdin `chars`
-```
-
-Workspace docs (agent memory, not runtime):
-
-```
-docs/
-├── DC-0001-agentic-workspace.md                  # IV/DC doctrine
-├── IV-0001-long-wait-and-wake-control.md         # long-wait / wake initiative
-├── IV-0002-output-lifecycle-and-rendering.md     # bounded output / compact TUI
-└── DEV.md                                        # contributor onboarding
-```
+- **Early exit:** commands that finish within 150 ms never enter the session
+  store; the result has `exit_code` and no `session_id`.
+- **Exits between calls** stay in the store until the next `write_stdin` or
+  `list_sessions` reports them.
+- **Spawn failures** (missing shell or `workdir`) surface as `failure_message`.
+- **Shell exit vs pipe close:** a session runs until its output pipe closes.
+  Background children that inherited stdout keep it open; such results carry a
+  `note` on how to detach them.
+- **Closed stdin** never crashes the host; writes report `failure_message`.
+- **Esc** breaks the current wait but leaves the session running.
+- **Shutdown** sends SIGTERM to every session and SIGKILLs survivors after 1s.
+- **LRU eviction** at 64 sessions takes the oldest non-protected one, preferring
+  exited sessions; the 8 most recent are never evicted.
+- **tty observations** are serialized per session; streaming updates and the
+  Tern HUD read the screen without consuming it.
+- **Logs** live in the temp directory (`/tmp` or `%TEMP%`) and are never
+  deleted by the package. Inspect raw PTY logs with a non-executing viewer, not
+  `cat`.
 
 ## Worked examples
 
-### 1. Dev server (never exits on its own)
+### Dev server
 
 ```
 > exec_command(cmd="npm run dev", yield_time_ms=5000)
@@ -687,59 +401,15 @@ session_id: 1
 ---
 > Server listening on :3000
 
-> exec_command(cmd="curl -s localhost:3000/health", yield_time_ms=2000)
-[exited]
-exit_code: 0
----
-{"ok": true}
-
-> write_stdin(session_id=1, chars="", yield_time_ms=10000)      # poll dev server
+> write_stdin(session_id=1, chars="", yield_time_ms=10000)
 [still running]
 ---
   GET /health 200 in 3ms
 
-> kill_session(session_id=1)                                    # stop it
-Killed session 1 (pid 12345) with SIGTERM — exit_code=143
+> kill_session(session_id=1)
 ```
 
-### 2. Long-running non-interactive job
-
-```
-> exec_command(cmd="npm test", yield_time_ms=1000, on_exit="wake")
-[still running]
-session_id: 2
-completion_notification: armed
-tool_time_utc: 2026-07-21T08:30:00.000Z
----
-> test suite started
-
-> write_stdin(session_id=2, yield_until="2026-07-21T10:30:00Z")  # only if human asked for long attach
-[exited]
-exit_code: 0
-wait_mode: absolute
-wait_status: completed
-completion_delivery: direct
-on_exit_wake: consumed
----
-> all tests passed
-
-# If the job is abandoned before exit:
-> set_on_exit(session_id=2, on_exit="none")   # disarm; process keeps running
-set_on_exit session_id=2 on_exit=none → disarmed …; wake not armed
-
-> list_sessions()
-# live armed sessions include wake_armed: true / "wake" in the text listing
-```
-
-For ordinary progress, choose a finite relative wait such as
-`write_stdin(session_id=2, yield_time_ms=900000)`. It returns early on exit;
-there is no need to split it into 290-second polls. Use `yield_until` only
-when the human explicitly wants a long attached wait or wall-clock deadline. If
-the deadline arrives (or the wait is cancelled) while the process is still
-running and wake is still armed, one follow-up prompt is delivered when the
-process exits — unless you `set_on_exit … none` first.
-
-### 3. Interactive Python REPL
+### Interactive Python REPL
 
 ```
 > exec_command(cmd="python3 -q", tty=true, yield_time_ms=1500)
@@ -749,242 +419,98 @@ terminal: normal screen 120x30, cursor row 1 col 5
 ---
 >>>
 
-> write_stdin(session_id=1, chars="print(7*6)\r", yield_time_ms=1000)     # \r = Enter (portable; \n fails on Windows)
+> write_stdin(session_id=1, chars="print(7*6)\r", yield_time_ms=1000)
 [still running]
 terminal: normal screen 120x30, cursor row 3 col 5
 ---
 >>> print(7*6)
 42
 >>>
-
-> write_stdin(session_id=1, chars="exit()\r", yield_time_ms=1000)
-[exited]
-exit_code: 0
 ```
 
-### 4. `sudo` (interactive password)
+### Long job with auto-resume (human asked for it)
 
 ```
-> exec_command(cmd="sudo -k && sudo whoami", tty=true, yield_time_ms=1500)
+> exec_command(cmd="npm test", yield_time_ms=1000, on_exit="wake")
 [still running]
-session_id: 1
-terminal: normal screen 120x30, cursor row 1 col 25
+session_id: 2
+completion_notification: armed
 ---
-[sudo] password for wr:
+# …the agent ends its turn; when npm test exits, one follow-up prompt resumes it.
+> set_on_exit(session_id=2, on_exit="none")   # if the job is abandoned
+```
 
-> write_stdin(session_id=1, chars="<password>\r", yield_time_ms=2000)
-[exited]
-exit_code: 0
-terminal: normal screen 120x30, cursor row 3 col 1
----
-[sudo] password for wr:
-root
+## Windows
+
+Pipes and PTY both work; `tty: true` uses ConPTY through `Bun.Terminal` (Bun)
+or node-pty (Node).
+
+- **Default shell:** `bash`, found via `PI_UNIFIED_EXEC_BASH`, then `bash` on
+  PATH (excluding System32's WSL stub), then Git for Windows derived from
+  `git.exe` or well-known install roots, then `powershell` with a one-time
+  warning. Shell names are resolved to absolute paths before spawning.
+- **No POSIX signals:** every kill is a tree kill (`taskkill /T /F`); killed
+  processes report `exit_code: 1`, and failed kills are reported, not hidden.
+- **Node PTY prebuilds** are downloaded at install time and not covered by an
+  npm digest; Bun's built-in backend has no such download.
+
+## Layout
+
+```
+src/
+├── index.ts              # tool registration, event handlers, flag
+├── session.ts            # ExecSession: spawn, read, write, kill, log stream, state
+├── session-store.ts      # SessionStore + LRU eviction
+├── head-tail-buffer.ts   # port of codex's HeadTailBuffer
+├── collect.ts            # collectOutputUntilDeadline
+├── long-wait.ts          # event-driven empty-poll wait + rate-limited streaming
+├── time.ts               # durations, operator limit, strict UTC deadlines
+├── format-time.ts        # elapsed / remaining labels
+├── completion.ts         # on_exit "wake" coordination (exactly-once)
+├── notify.ts             # Notify / Gate / sleep primitives
+├── pty.ts                # Bun.Terminal + node-pty backends, pipes, Windows tree-kill
+├── shell.ts              # shell selection and argv (Windows-aware)
+├── output-safety.ts      # terminal-control stripping
+├── terminal-screen.ts    # headless terminal: observations, styled screens, query answers
+├── tool-result.ts        # bounded envelopes + model-visible text
+├── script-result.ts      # codemode outputSchema / structuredContent
+├── render.ts             # Pi renderers for all five tools
+├── codemode-render.ts    # Pi codemode preview cap
+└── unescape.ts           # C-style escape decoder for `chars`
+fork-features/
+├── omp-presentation.ts   # omp host detection, bash-renderer delegation, theme appearance
+├── omp-tools.d.ts        # types of the omp modules loaded at runtime
+├── tern-terminal-hud.ts  # counter pill, Terminals sheet, terminal page
+├── tern-plugin-install.ts# keeps the Tern plugin installed
+├── tern-plugin/          # CSS-only Tern plugin
+└── README.md             # fork customizations and requalification
+docs/
+├── IV-0001-long-wait-and-wake-control.md
+├── IV-0002-output-lifecycle-and-rendering.md
+├── DC-0001-agentic-workspace.md
+└── DEV.md                # upstream's maintainer guide
 ```
 
 ## Tests
 
-From the repo root:
-
 ```bash
 npm install
-npm test                 # strict typecheck + unit/integration + offline actual-CLI tests
-npm run test:tui         # isolated tmux acceptance, skips if tmux is unavailable
+npm test                                   # strict typecheck + unit/integration suites
+EXPECT_PTY=1 bun test ./tests/tern-terminal-hud.test.ts ./tests/omp-presentation.test.ts
+npm run test:tui                           # Pi tmux acceptance (skips without tmux)
 ```
 
-The CLI/TUI fixtures use a local scripted provider, not a live model. Set
-`PI_UNIFIED_EXEC_TEST_CLI=/path/to/pi/dist/cli.js` to exercise another published
-Pi version without changing package dependency pins.
+Under Node the Node PTY suites skip when no prebuild loads; the Bun command runs
+the HUD lifecycle tests against real PTY sessions. Tern behaviour is qualified
+in a real Tern window, as described in
+[fork-features/README.md](fork-features/README.md).
 
-Tests cover yield_until timestamp validation (strict RFC 3339 UTC subset,
-impossible-date rejection, far-future acceptance, `tool_time_utc` on errors),
-event-driven long-wait behavior (monotonic re-arm, multi-day timer chunking,
-cancellation, timer/listener cleanup, rate-limited streaming with no idle
-heartbeat), the CompletionCoordinator (exactly-once invariant, observation
-leases, `setOnExit` disarm/re-arm including tombstones, kill/eviction/shutdown
-suppression, batching, bounded sanitized wake content), wake + yield_until +
-`set_on_exit` + `wake_armed` listing integration through the real tools, plus
-the pre-existing
-coverage: HeadTailBuffer (direct port of codex's unit
-tests), Notify/Gate/sleep, collectOutputUntilDeadline (10 scenarios incl.
-abort-listener/timer cleanup), SessionStore LRU (10 scenarios), truncateTail
-(ported from pi, 13 scenarios), unescapeChars (14 scenarios for
-`\xHH`/`\uHHHH`/`\u{…}`/unknown escapes/Windows path footguns),
-chars-encoding end-to-end (13 scenarios covering raw bytes, escape decoding,
-chars_b64 binary-safety, and mutual-exclusion errors), signal-name mapping,
-full e2e pipes (45+ scenarios incl. log-file retention, byte/line truncation,
-a delayed 4000-line kill drain, renderer registration, spawn-failure
-diagnostics, EPIPE safety, exited-session reporting, shutdown SIGKILL
-escalation, onUpdate streaming, and the `/unified-exec-sessions` command), pure
-output-envelope, terminal-control, rendered tty screen (redraws, scrolling
-history alignment, alternate screen, cursor, queries), cache-refresh, and collapse/expand/re-collapse
-renderer coverage, Node PTY mode (simple command, Python REPL drive, Ctrl-C
-injection, cmd.exe verbatim payload), a dependency-free Bun PTY runtime fixture
-(input/output, geometry, quoted/non-ASCII argv, shell command, normal exit, and
-kill), shell selection (per-shell argv construction, PATH lookup with synthetic
-PATH fixtures, Windows bash→powershell fallback both branches, WSL-stub
-exclusion, binary resolution caching), Node PTY loader guard (`EXPECT_PTY`
-assertion so a prebuild load failure is a red build, ConPTY disposal mock), and
-cmd.exe quoting
-e2e (operators, embedded quotes, %VAR%, parentheses, pipes), and codemode
-script results (`outputSchema`/`structuredContent` for all five tools), native
-codemode renderer cache/width/expansion, and offline actual-CLI parity for
-settings, default activation with and without the legacy exclusion, explicit opt-out, store/load and local-stdio MCP.
-Real-tmux acceptance also exercises object/settled/multiline script output at
-40/80/100 columns, regular/fullscreen, three themes and spill-path recovery.
+## Development and upstream
 
-CI runs the Node suite on Node 22/24 and the Bun PTY fixture both from source
-and as a compiled executable on Ubuntu, macOS, and Windows runners.
+[docs/DEV.md](docs/DEV.md) is upstream's maintainer guide (dev loop, test
+recipes, codex sources); its npm release section does not apply here, since
+the fork's publish workflow is disabled. Upstream changes arrive through the
+daily `Sync upstream` workflow; how fork changes are kept apart from upstream
+and resolved on sync is in [fork-features/README.md](fork-features/README.md).
 
-## Improvements over codex
-
-This port preserves codex's session semantics but borrows two pieces from pi's
-built-in `bash` tool that codex itself treats as unsolved:
-
-**1. Full output retained on disk, not just head+tail in memory.**
-Codex caps each session's in-memory buffer at 1 MiB and silently drops middle
-bytes once it fills. We mirror every byte the child writes to
-`/tmp/pi-unified-exec-<sid>-<random>.log` in parallel with the in-memory
-buffer. The file has the complete, unaltered stream across the entire
-session's lifetime; nothing is lost.
-
-**2. LLM-visible output is tail-capped at pi's `bash` defaults (50 KiB or
-2000 lines, whichever hits first), with a pointer to the log file.**
-Codex serializes up to ~40 KiB to the LLM on every call (10 000 tokens of
-middle-truncated text). That's a bounded-but-generous context cost per call,
-and codex gives the LLM no way to recover the dropped middle. Our port
-tail-truncates per pi's `bash` tool and exposes `log_path` in the response
-header and tool-call details. When the LLM wants the full output it can
-`read(log_path)` with pi's file-read tool.
-
-As a consequence we dropped codex's `max_output_tokens` parameter on both
-`exec_command` and `write_stdin`. The per-call cap is fixed; if the LLM
-wants a tighter snippet it can ask for a specific slice by reading from the
-log file.
-
-| | codex | this port |
-|---|---|---|
-| Session in-memory retention | 1 MiB head+tail (lossy) | 1 MiB head+tail (lossy) — same |
-| **Session full retention** | **none** | **full log file on disk** |
-| LLM-visible per call | ≤40 KiB, middle-truncated | ≤50 KiB / ≤2000 lines, tail-truncated |
-| LLM-visible truncation recovery | none | `read(log_path)` for the full stream |
-| Per-call `max_output_tokens` knob | yes (default 10 000) | removed; fixed 50 KiB/2000 lines |
-| Truncation marker in body | `…N tokens truncated…` | `[Showing lines X-Y of T. Full output: …]` |
-| PTY output | raw stream (`TERM=dumb` to discourage redraws) | rendered terminal screen + unseen history + cursor |
-
-The `log_path` field is exposed in every `exec_command` and `write_stdin`
-response (as a header line and in tool-call details), plus in `list_sessions`
-per-entry and in `kill_session` details.
-
-Log files live in `/tmp/` and are never auto-deleted (they're just regular
-files; `/tmp` cleanup is the OS's problem). If you run the same session to
-completion and never revisit the log, it'll linger until your next reboot.
-
-## Other pi-flavor additions
-
-- `set_on_exit`, `kill_session`, and `list_sessions` tools (codex has none of
-  these). `list_sessions` exposes `wake_armed`; the running-session widget and
-  `/unified-exec-sessions` picker mark armed wakes with `[wake]`.
-- `write_stdin` also works in pipe mode (`tty: false`), not just PTY.
-  Useful for feeding lines to `jq`, `sort`, etc.
-- Streaming `onUpdate` tail window for TUI rendering during yields, plus
-  human remaining-time labels for `yield_until` waits.
-- Running-session UI: footer status while processes are alive and a
-  post-`/tree` widget so humans can see that processes survived branch
-  navigation. The UI refreshes immediately on background session exit without
-  pruning the exited session before the next `write_stdin`/`list_sessions`.
-- Explicit `renderCall` / `renderResult` coverage for all five tools, mirroring
-  Pi bash's styling: command banners, five-visual-line output tails, configured
-  `app.tools.expand` hints, compact session inventories, live elapsed counters,
-  process/kill status footers, and `⟳ poll` / `» input` banners.
-- `cwd`, `command`, and `yield_time_ms` are surfaced in tool-call details
-  (and `cwd` in the LLM-visible response header) for easy debugging.
-
-## What's not here (vs codex)
-
-- No sandbox / approval / permission stack (pi doesn't have one).
-- No network-proxy integration.
-- No persistence across pi restarts. (Processes are terminated on
-  `session_shutdown`.)
-- No live PTY resize (SIGWINCH) handling — `cols`/`rows` are fixed at spawn.
-
-## Windows
-
-Supported — both pipes and PTY mode. `tty: true` uses ConPTY through the
-runtime-native backend: `Bun.Terminal` under Bun 1.4+, or
-`@homebridge/node-pty-prebuilt-multiarch` under Node.
-
-- **Default shell**: `bash`, located with an extended probe (first hit
-  wins, cached):
-  1. `PI_UNIFIED_EXEC_BASH` env var (explicit override)
-  2. `bash` on PATH — System32's `bash.exe` (the WSL stub) is deliberately
-     excluded: it runs commands inside a WSL distro's filesystem view, not
-     Windows'
-  3. **derived from `git.exe` on PATH** — Git for Windows' default
-     installer puts only `Git\cmd` (git.exe) on PATH, not `Git\bin`, so
-     "git works but bash doesn't" is the most common setup; the probe
-     walks up from git.exe and finds `<GitRoot>\bin\bash.exe`
-  4. well-known install roots (`%ProgramFiles%\Git`, `%ProgramW6432%\Git`,
-     `%ProgramFiles(x86)%\Git`, `%LocalAppData%\Programs\Git`)
-  5. `powershell` fallback, with a one-time warning
-
-  When bash is found off PATH (steps 3–4), a one-time info notice shows the
-  path being used. Derived hits use `bin\bash.exe` — Git's launcher, which
-  sets up MSYS PATH so `ls`/`grep`/`sed` work in the child — never
-  `usr\bin\bash.exe`. Explicit `shell: "bash"` gets the same extended
-  probe. Explicit `shell: "cmd"` (`/d /s /c`, verbatim command line —
-  works in both pipe and tty mode) and `shell: "powershell"` / `"pwsh"`
-  (`-NoProfile -NonInteractive -NoLogo -Command`) are supported. Bare shell names are resolved to
-  an absolute path before spawning (failing closed if unresolvable), so a
-  binary planted in an untrusted workdir can't shadow the real shell.
-- **No POSIX signals.** Every kill — `kill_session`, `/unified-exec-sessions`,
-  LRU eviction, `session_shutdown` — is a force tree-kill
-  (`taskkill /pid <pid> /T /F`), regardless of the requested signal name.
-  Killed processes report `exit_code: 1` rather than `signal: SIGTERM`, and
-  escalation-to-SIGKILL never happens (the first kill is already final).
-  Tree-kill matters: killing only the shell would orphan grandchildren, which
-  also hold the stdio pipes open and delay exit detection.
-- **Log files** live in `%TEMP%` (`os.tmpdir()`), same naming scheme.
-- **Kill failures are reported, not hidden.** If `taskkill` doesn't land
-  (access denied, protected process), `kill_session` says so and the session
-  stays registered for retry — it is never silently dropped while the
-  process lives.
-- **Supply-chain note (Node PTY prebuilds).** This does not apply to Bun's
-  built-in terminal backend. Under Node, npm's lockfile integrity covers the
-  `@homebridge/node-pty-prebuilt-multiarch` JS payload, but the native ConPTY
-  binary is fetched at install time by `prebuild-install` from the package's
-  GitHub releases (TLS, homebridge org); those bytes are not covered by an npm
-  digest. The dependency takes compatible updates (`^0.14.1`) so newer Node
-  releases get their prebuilds; stricter Node deployments can vendor the
-  prebuild or build node-pty from source.
-- Ctrl-C injection (`write_stdin chars="\x03"`) works in PTY mode — ConPTY
-  translates it into a real console interrupt. In pipe mode it's just a byte,
-  as on every platform.
-- **Submit tty input with `\r`, not `\n`.** POSIX terminals map CR→NL so
-  both work there, but legacy Windows console line input only executes on
-  CR — with `\n` a REPL echoes the text without running it.
-  `write_stdin chars="print(6*7)\r"` is portable; `\n` is not.
-
-## Source map vs codex
-
-| unified-exec (TS) | codex (Rust) |
-|---|---|
-| `src/head-tail-buffer.ts` | `codex-rs/core/src/unified_exec/head_tail_buffer.rs` |
-| `src/collect.ts` | `codex-rs/core/src/unified_exec/process_manager.rs::collect_output_until_deadline` |
-| `src/notify.ts` (Notify/Gate) | tokio `Notify` + `watch::Sender<bool>` |
-| `src/session.ts` | `codex-rs/core/src/unified_exec/process.rs::UnifiedExecProcess` |
-| `src/session-store.ts` | `codex-rs/core/src/unified_exec/process_manager.rs::ProcessStore` |
-| `src/pty.ts` | `codex-rs/utils/pty` (pty.rs + pipe.rs) |
-| `truncateTail` from `@earendil-works/pi-coding-agent` | (no equivalent in codex) — pi bash's tail truncator |
-| `src/unescape.ts` | (no equivalent in codex) — C-style escape decoder for `chars` |
-| `src/render.ts` | (no equivalent in codex) — pi TUI renderCall / renderResult |
-| `src/terminal-screen.ts` | (no equivalent in codex) — headless terminal for tty output |
-| `src/index.ts` exec_command handler | `codex-rs/core/src/tools/handlers/unified_exec.rs` |
-
----
-
-## Contributing / hacking
-
-See [docs/DEV.md](docs/DEV.md) for the full maintainer guide:
-onboarding, repo layout, dev loop, test recipes, release workflow
-(npm publish via GitHub Actions Trusted Publisher), debugging aids,
-and the codex-side sources to consult before changing core behavior.
+Licensed [MIT](./LICENSE), like upstream.

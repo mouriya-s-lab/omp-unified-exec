@@ -4,6 +4,8 @@ All notable changes to this project. **Newest entries go on top.**
 
 ## Unreleased
 
+- Rewrite `README.md` for the fork: install through omp, the Tern terminal HUD and its auto-installed plugin, omp presentation, OSC 10/11 answers and the fork's layout lead; the tool reference keeps upstream's semantics in condensed form. Upstream's npm badges, install commands and maintenance notice are gone. A Chinese translation, `README.zh-CN.md`, mirrors it section for section, and each links the other. `fork-features/README.md` records both as fork-owned and how to resolve them on upstream syncs.
+
 ## 0.14.6 - 2026-10-12
 
 - Bump the package and the Tern plugin (`fork-features/tern-plugin/plugin.toml`) to 0.14.6. The plugin's stylesheet now also sets the Terminals sheet's output preview in the mono face.
