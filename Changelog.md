@@ -2,8 +2,9 @@
 
 All notable changes to this project. **Newest entries go on top.**
 
-## Unreleased
+## 0.14.7 - 2026-10-13
 
+- Bump the package, tracked npm lock metadata and bundled Tern plugin to 0.14.7, releasing the native HUD fixes and awaited normal-copy installation update below.
 - Synchronize the bundled Tern plugin inside the awaited omp extension factory, which runs during normal install/force-reinstall validation as well as ordinary loading. Use Tern's normal copy installer, automatically migrate the known old `.path` registration through official unlink/install, and remove session-start installation, developer linking and installation toasts. A current exact copy is unchanged; absent Tern leaves non-Tern usage available, while a present Tern synchronization failure rejects installation/loading instead of reporting success.
 - Installation regression gate: `npm test` passes strict types and 492 tests (0 failures, 5 individual skips; unavailable Node PTY suites separately). The opt-in real omp force-install test passes 1/1, exercising same-version asset updates, unchanged current-copy identity and package/lock rollback on Tern failure before any session; mandatory Bun real-PTY HUD/presentation tests pass 54/54.
 - Verified the full production package with real omp 18.10.3 and Tern 0.8.3 before any interactive session: missing and same-version stale copies, identical-CSS legacy-link migration, identity-preserving repeated force install, unknown-registration failure with package/lock byte rollback and no unlink, and installation without Tern. All six cases used normal `omp plugin install URL --force` in isolated state; no manual Tern update was the behavior trigger.
