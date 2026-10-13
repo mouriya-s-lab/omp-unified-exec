@@ -20,7 +20,7 @@ import type { SessionStore } from "../src/session-store.ts";
 import type { TerminalAppearance } from "../src/terminal-screen.ts";
 import { truncationMarker } from "../src/tool-result.ts";
 import { loadNativeRenderingState, mountTerminalHud } from "./tern-terminal-hud.ts";
-import { installTernPluginOnStart } from "./tern-plugin-install.ts";
+import { initializeTernPlugin } from "./tern-plugin-install.ts";
 
 // ---------------- omp bash renderer contract ----------------
 
@@ -399,9 +399,9 @@ async function loadOmpAppearance(): Promise<() => TerminalAppearance> {
  * Wraps the extension factory per host. Pi hosts activate synchronously with
  * `pi` unchanged. omp is identified by its injected `arktype` builder and
  * activates through {@link presentOnOmp} with omp's theme appearance (tty
- * sessions answer it to OSC 10/11), then mounts the Tern terminal HUD on the
- * activated session store and, inside a Tern pane, installs the package's
- * Tern plugin at the first interactive session.
+ * sessions answer it to OSC 10/11). The awaited factory initializes Tern's
+ * normal plugin copy before registering tools/HUD; omp also awaits this
+ * factory during package install/force-reinstall validation.
  */
 export function withHostPresentation(
 	activate: (pi: ExtensionAPI, appearance?: () => TerminalAppearance) => ActivatedExtension,
@@ -412,10 +412,10 @@ export function withHostPresentation(
 			return;
 		}
 		// The omp modules load before activating, so a reshaped omp fails plugin loading with nothing registered.
-		return Promise.all([presentOnOmp(host), loadNativeRenderingState(), loadOmpAppearance()]).then(([pi, native, appearance]) => {
+		return Promise.all([presentOnOmp(host), loadNativeRenderingState(), loadOmpAppearance()]).then(async ([pi, native, appearance]) => {
+			await initializeTernPlugin();
 			const activated = activate(pi, appearance);
 			mountTerminalHud(pi, activated.store, native, activated.kill);
-			installTernPluginOnStart(pi);
 		});
 	};
 }

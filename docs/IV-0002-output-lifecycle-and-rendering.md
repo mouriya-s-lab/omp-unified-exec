@@ -154,7 +154,7 @@ The initiative establishes a durable output contract across these layers:
 | Align history with an xterm marker on the observed screen's top row | Each observation registers a marker at the screen's top row; the next observation's history starts there, so positional comparison with the previous screen is exact. The marker follows the row as it scrolls and is disposed when the row is trimmed from the history, so the emulator keeps its history for the HUD. Rejected: erasing the emulator's scrollback (ED3) after each observation, which left the HUD screen nothing to scroll back through; counting scroll events into absolute line numbers, which leaving the alternate screen, DECSTBM regions, ED3 and RIS all break. |
 | Bound tty history by cells, not lines | History rows = 240000 cells / `cols`, at least one screen. `history_may_be_truncated` is reported when the marked row was evicted while the history sits at that cap (on the first observation, whenever it sits at the cap); a child's ED3 or RIS also drops the marker but erased those rows itself. |
 | HUD logic inside the omp extension; a CSS-only Tern plugin places the pill and sets the preview's output in the mono face | The sessions and their emulators live in this process; a dock widget reads them directly. A Luau plugin block would need the screen pushed to it across processes (a second copy of state) and shows as a pane, not a floating panel (owner's choice, [#17](https://github.com/mouriya-s-lab/omp-unified-exec/issues/17)). The fork's Tern plugin (`fork-features/tern-plugin/`) only injects CSS (owner's choice): a stylesheet listed in its manifest `styles`, which Tern loads with the plugin; the window entry Tern requires of every plugin is empty. |
-| omp installs the Tern plugin itself | A plugin the owner must link by hand is missed on new machines and after updates (owner's choice: install automatically). On omp, at the first interactive session start, the extension checks it runs in a Tern pane as omp itself does (`TERN_PANE_SOCKET` set and `TERN_PANE` a block id, omp's `resolveTernPane`) and asks that Tern through the `tern` CLI on PATH, which inherits omp's environment and so addresses the same daemon and plugin directory. Tern's daemon is the authority: `tern plugin list --json` tells whether it runs the package's plugin with the same version and stylesheet; only when it does not, `tern plugin link <package>/fork-features/tern-plugin` links the package's directory in place (so later package updates are picked up by the next relink), and an installed copy that blocks the link is removed first. An install or update is reported as an omp status toast, a failure as a warning naming the manual command; when Tern already runs the files nothing is shown or changed. Rejected: copying with `tern plugin install`, which would need a reinstall on every package update; writing Tern's plugin directory directly, which bypasses the daemon's reload. |
+| Synchronize a normal Tern copy in the awaited omp factory | `omp plugin install URL --force` must update the bundled Tern plugin before success, not ask the operator to unlink/install or wait for a session. omp materializes the package then awaits extension factories during validation. `withHostPresentation` therefore awaits `initializeTernPlugin` before activation, both during installation and ordinary loading. The installed package owns source assets; Tern's CLI owns its directory, registration and reload. `plugin dir --json` and `list --json`, together with the exact regular three-file normal copy, determine whether work is needed. Missing/stale files use `plugin install DIR --force --json`; an exact ready copy is untouched. Only Tern's precise linked-target collision, a matching canonical regular `.path` file and a fresh catalog identifying this plugin allow official unlink followed by copy installation. Other failures never remove a registration. No developer link, session-start installation IO, toast, argv parsing, host patch, trust change or lifecycle script is used. Missing Tern skips this integration; an available but failing Tern rejects package validation and ordinary loading with bounded sanitized command diagnostics. Each CLI operation has a 75-second timeout for the documented 60-second reload wait. Offline Tern installs for next start. omp's package rollback does not roll back an already completed external Tern update. |
 | Pill = omp's native running-work counter | The widget describes an `omp.hud` root row with `justify: "end"`, holding `omp.hud.pill` with one `omp.hud.seg`: a terminal icon and the bare stored tty count, words in its hover/aria label, and `unified-exec.terminals.open` as its click action (Tern handles built-in action names itself). The row has no plugin gap or alignment override, so Tern's native rules own its wrapping, spacing, column alignment and chat-style changes. The outer ✕ and complete dismiss lifecycle are removed; OPEN remains the only pill action. Naturally exited tty sessions still count while stored; pipes do not. `belowEditor` avoids the leading spacer of `aboveEditor`. |
 | Shared widget container above omp's pill line; native roles own appearance | An extension cannot add a segment to `HudPillsRow`, whose counter describes only agents and jobs. `html .sf-region.sf-dock > .sf-col.gap-none:last-child` selects the shared belowEditor container and retains `order: -1`, then sets only `margin: 0`, `padding: 0`, `background: none`, `box-shadow: none`. Native `omp.hud` rules match nested rows and supply general spacing, Reader's centered column, Spine's side margins/timeline inset and Console's gutter; do not copy them into plugin CSS or override pill/segment colors, fonts, dimensions, borders, radius, hover or animation. Resetting the container removes the proven Spine plate and double padding; the prefix wins over Spine's unfocused rule. Other belowEditor widgets share the move/reset. With no widgets the selector still matches a zero-size void, never the editor. No `:has()` or DOM manipulation: the current control selector parser rejects `:has()`. No theme listener, cache, reload flag or per-theme CSS is needed. |
 | Sheet = a `picker` like omp's Agents sheet | omp's Agents sheet is a `picker` (title with icon and subtitle, `lg`, rows with status dots and fact columns, the selected item as a side preview, an action bar Kill `x` … Close `esc`, Open transcript `enter`) that its component mounts as the modal sheet by answering `nativeSheet` (omp `packages/tui/src/native/backend.ts`); measured in Tern, its Kill ends the agent without confirmation and Enter replaces the sheet with a full-pane transcript page. The Terminals sheet is an extension custom overlay (`ctx.ui.custom(..., { overlay: true })`) whose component does the same: title Terminals with a `running · stored` subtitle, one row per session (command in mono, `#id · state`, dot accent while running, success after exit 0, error otherwise) with Size, PID and Time columns (elapsed while running, as the Agents roster's Time), and Kill (`x`, only while running), Close (`esc`) and Open (`enter`, also a row's `activate`). The preview follows the Agents preview (omp `agent-hub.ts` `#describePreview`): a title row with the command and a state badge, a `kv` facts grid (Session, Directory with the home directory as `~`, PID, Size, Started), the log path on its own line cut at its start so the file name stays, linked to the file, and a Recent output section. Picker `select` events and ↑/↓ pick the session. Kill runs `terminateSessionById` (SIGTERM, then SIGKILL after 2s), the path `kill_session` and `/unified-exec-sessions` use, handed to the HUD as `ActivatedExtension.kill`; a confirmed exit removes the session from the store, so its row leaves the list. Rejected: a non-modal `overlay` node with tabs, which matched no omp sheet (owner's choice); the below-list preview, whose fixed short region left the list area empty; the log path in the facts grid, where its value column wrapped it over several lines. |
@@ -178,7 +178,7 @@ The initiative establishes a durable output contract across these layers:
 | Explicit Pi renderers and shared five-line preview | `src/render.ts` |
 | omp host selection, bash-renderer delegation, result/args display adapters | `fork-features/omp-presentation.ts`, `fork-features/omp-tools.d.ts`; wired by `withHostPresentation` in `src/index.ts`; tests `tests/omp-presentation.test.ts` |
 | Tern terminal HUD: native counter pill, Terminals picker sheet, terminal page, tty/native mount gate | `fork-features/tern-terminal-hud.ts`, mounted by `withHostPresentation` with the store and kill `activate` returns; tests `tests/tern-terminal-hud.test.ts` |
-| Tern plugin placing the pill above omp's pill line and setting the sheet preview's output rows in the mono face | `fork-features/tern-plugin/` (`plugin.toml`, `terminals.css`, empty `window.luau`), shipped in the package; installed and kept current by `fork-features/tern-plugin-install.ts` (called from `withHostPresentation`); tests `tests/tern-plugin-install.test.ts` |
+| Tern plugin placing the pill above omp's pill line and setting the sheet preview's output rows in the mono face | `fork-features/tern-plugin/` (`plugin.toml`, `terminals.css`, empty `window.luau`), shipped in the package; `initializeTernPlugin` in `fork-features/tern-plugin-install.ts` awaited by `withHostPresentation` during omp factory initialization; state tests `tests/tern-plugin-install.test.ts`, real omp install-boundary regression `tests/tern-install-cli.test.ts` |
 | Native codemode factory/renderer wrapper | `src/codemode-render.ts`; registration from `src/index.ts` |
 | Codemode width/cache/schema and real-CLI parity | `tests/codemode-render.test.ts`, `tests/codemode-cli.test.ts` |
 | Real codemode TUI A/B/C, opt-out, no-warning, legacy exclusion and recovery | `tests/tui-codemode.test.mjs`, `tests/fixtures/codemode-*` |
@@ -226,8 +226,11 @@ omp --no-extensions -e /ABSOLUTE/CHECKOUT/src/index.ts --no-session --no-title
 
 Set `TERN_CONFIG_DIR` and `TERN_DAEMON_SOCKET` to the isolated config and
 daemon socket when addressing that daemon from outside its pane. The window
-control socket is separate. Confirm the existing installer reports the loaded
-plugin ready with the checkout's exact stylesheet, rather than an old copy.
+control socket is separate. Factory initialization must complete before the
+extension activates: confirm the exact normal three-file copy and Tern's ready
+catalog match the checkout, with no `.path` registration. Package-update
+qualification uses normal `omp plugin install URL --force`, not `-e`, and
+checks that copy immediately after the command returns, before any session.
 
 Use the real omp input to start tty `cat` and `sleep 600` with
 `yield_time_ms: 1000`, plus a read-only background agent. The terminal count
@@ -250,17 +253,33 @@ widget, compare composer/meter/activity/todo rectangles against a plugin-free
 baseline in every style; the selected empty container must occupy no height.
 List `x` remains Kill and is also covered by the real-session automated tests.
 
-Tern qualification of the plugin auto-install and the OSC 10/11 answer,
-2026-10-12, macOS arm64 / omp 18.10.1, isolated real window: with the plugin
-unlinked from the isolated Tern,
-starting omp showed the toast `unified-exec: installed its Tern plugin
-0.14.6`, `tern plugin list` then listed it `ready`, and a new tty session's
-pill sat above the composer. With a 0.14.5 copy installed by `tern plugin
-install` instead, starting omp removed the copy and linked the package
-(`0.14.6 … ready`). Starting omp again showed no toast and changed nothing.
-An omp started in a tty session and opened on the terminal page drew omp's
-light palette on the light page (it had drawn black message and thinking
-blocks before the emulator answered OSC 11).
+OSC 10/11 qualification, 2026-10-12, macOS arm64 / omp 18.10.1, isolated real
+window: an omp started in a tty session and opened on the terminal page drew
+omp's light palette on the light page (it had drawn black message and
+thinking blocks before the emulator answered OSC 11).
+
+Install-boundary qualification, 2026-10-13, macOS arm64 / omp 18.10.3 compiled
+binary and Tern 0.8.3: the full production package was installed from an
+isolated loopback-Git source with only `omp plugin install URL --force --json`
+as the behavior trigger. Before any interactive session, missing files became
+an exact normal three-file copy; stale CSS and window-script bytes were
+replaced without a version change; and a canonical regular legacy `.path`
+registration migrated even though its catalog version/CSS were already
+identical. Every successful case reported the exact ready catalog and no
+remaining `.path`. Repeating force installation preserved the copy's bytes,
+inodes and timestamps as well as the directory identity.
+
+A real Tern linked-target conflict backed by a noncanonical symlink
+registration made factory validation fail and the CLI exit 1, with
+`nothing was unlinked`. The previous managed dependency, package source,
+Bun lock and omp plugin lock bytes were restored; package inode preservation
+is not claimed. The unknown registration's inode and target content stayed
+unchanged. A separate PATH without Tern installed and enabled the new Git
+candidate successfully without creating a Tern copy. All six cases used
+isolated HOME, cache, temporary files and Tern configuration, with no daemon
+running and no credential copies. Commands, owner replies, byte hashes,
+before/after state and results are under
+`/tmp/tern-auto-install-check/acceptance/` (`matrix-summary.json`).
 
 Before-change reproduction, 2026-10-13, macOS arm64, Tern 0.8.3 / omp 18.10.3,
 operator fonts at 12px, light-dawn, 1280×800: the checkout extension started
@@ -317,10 +336,12 @@ editor. Its computed Spine background changed, but with no paint area.
 Evidence: `final-baseline-summary.json`, `final-plugin-*.json/png`,
 `final-pluginfree-*.json/png` and `plugin-lifecycle-comparison.json`.
 
-Automated qualification: `npm test` passed strict types and 456 tests,
-with zero failures and four individual skips (two Windows-only and two
-opt-in PTY cases); the unavailable Node PTY backend also excluded its
-real-session suites. `EXPECT_PTY=1 bun test ./tests/tern-terminal-hud.test.ts
+Automated qualification after the install-boundary change: `npm test`
+passed strict types and 492 tests, with zero failures and five individual
+skips (two Windows-only, two opt-in PTY cases and the opt-in omp install
+gate); the unavailable Node PTY backend also excluded its real-session
+suites. The mandatory real omp install gate passed 1/1 with no skips.
+`EXPECT_PTY=1 bun test ./tests/tern-terminal-hud.test.ts
 ./tests/omp-presentation.test.ts` passed all 54 with no skips, including
 list Kill/x, terminal-page echo and Kill, native resume and last-tty removal.
 
@@ -358,6 +379,21 @@ Automated gate:
 ```bash
 npm test
 ```
+
+Real omp installation gate (POSIX host, `git` and an installed omp required):
+
+```bash
+EXPECT_TERN_INSTALL_CLI=1 OMP_TEST_BINARY=/ABSOLUTE/PATH/TO/omp \
+  npx tsx --test tests/tern-install-cli.test.ts
+```
+
+Without `OMP_TEST_BINARY`, the test resolves `omp` on PATH. The isolated
+loopback-Git fixture ships the actual production initializer and bundled
+assets; only Tern's CLI is substituted with a stateful copy installer.
+It checks completion before any session, same-version asset updates,
+unchanged current-copy identity and package/lock rollback on owner failure.
+This host-contract regression complements, not replaces, real Tern/UI
+qualification.
 
 Codemode focused gates (all providers are offline fixtures; MCP is local stdio):
 

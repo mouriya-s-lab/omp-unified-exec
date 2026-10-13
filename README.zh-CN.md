@@ -15,7 +15,13 @@ omp install https://github.com/mouriya-s-lab/omp-unified-exec
 
 请先卸载已有的 `pi-unified-exec`（`omp plugin uninstall pi-unified-exec`）：两者注册的是同一组工具。本 fork 不向 npm 发布任何内容。
 
-在 Tern 里运行时，omp 会在第一个会话启动时自行安装本包的 Tern 插件（见 [Tern 终端 HUD](#tern-hud)），无需其他配置。
+当 PATH 中存在 `tern` 时，omp 也会把附带的 Tern 插件正常安装为副本。更新时执行同一安装命令并加上 `--force`：
+
+```bash
+omp plugin install https://github.com/mouriya-s-lab/omp-unified-exec --force
+```
+
+Tern 更新会在这条命令成功返回前完成，无需单独执行 Tern 命令，也不使用开发链接。
 
 本包在 Pi 上照常加载（使用 Pi 的渲染器，没有 HUD）。PTY 模式在 Bun 1.4+ 下使用 Bun 原生的 `Bun.Terminal`（omp 是编译后的 Bun 可执行文件），在 Node 下使用可选依赖 `@homebridge/node-pty-prebuilt-multiarch`。两者都没有时，管道模式（`tty: false`）仍可用，`tty: true` 会报告缺少该能力。
 
@@ -40,7 +46,11 @@ omp install https://github.com/mouriya-s-lab/omp-unified-exec
 
 HUD 直接读取会话，不保存任何副本。它只在 omp 原生渲染时存在，因此 omp 的 ANSI TUI 不会多出一行。模型看到的结果仍是纯文本。
 
-**Tern 插件。** omp 扩展无法往 omp 的计数器那一行里加东西，所以本包附带一个只含 CSS 的 Tern 插件（`fork-features/tern-plugin/`）。它把共享的 `belowEditor` widget 容器移到 omp 计数器上方，清除容器的间距、背景和阴影，避免与原生 HUD 边距重复叠加。同一容器中的其他 widget 也共享这个位置和重置；插件不重设药丸外观或 omp 的输入框，并让面板的输出预览使用等宽字体。插件由 omp 负责保持安装：在 Tern pane 里的第一个交互会话启动时（与 omp 自己的判断方式相同，看 `TERN_PANE_SOCKET` 和 `TERN_PANE`），它用 `tern plugin list --json` 询问 Tern；除非 Tern 已在运行相同版本和样式表的插件，否则用 `tern plugin link` 链接本包的插件目录。安装或更新时弹出提示，失败时给出附带手动命令的警告。link 会让 Tern 重新加载插件，已打开的窗口也会用上新样式。没有插件时，计数按钮显示在输入框下方。
+**Tern 插件。** omp 扩展无法往 omp 的计数器那一行里加东西，所以本包附带一个只含 CSS 的 Tern 插件（`fork-features/tern-plugin/`）。它把共享的 `belowEditor` widget 容器移到 omp 计数器上方，清除容器的间距、背景和阴影，避免与原生 HUD 边距重复叠加。同一容器中的其他 widget 也共享这个位置和重置；插件不重设药丸外观或 omp 的输入框，并让面板的输出预览使用等宽字体。
+
+omp 等待扩展 factory 完成，因此插件在包安装校验（包括 `install --force`）和普通扩展加载期间同步。它向 Tern 查询插件目录及 catalog；只有三个文件完全一致的正常副本，且版本、样式表和 ready 状态都匹配时，才不改动。缺失或旧文件通过 `tern plugin install <包内目录> --force` 更新。已确认的旧 `.path` 注册由 Tern 自己的 unlink 和正常副本安装自动迁移，不创建开发链接。
+
+CLI 继承 omp 的环境，由 Tern 决定目标目录并负责重新加载。daemon 未运行时，Tern 安装副本供下次启动使用。没有 `tern` 可执行文件不影响非 Tern 使用；如果 Tern 存在但同步失败，包校验或普通扩展加载会失败并报告命令诊断，不延迟到 session-start 重试，也不显示成功 toast。如果 omp 随后保存包配置失败，已经完成的外部 Tern 更新不会一起回滚。没有插件时，计数按钮显示在输入框下方。
 
 设计、决策和 Tern 实测记录：
 [docs/IV-0002-output-lifecycle-and-rendering.md](docs/IV-0002-output-lifecycle-and-rendering.md)。

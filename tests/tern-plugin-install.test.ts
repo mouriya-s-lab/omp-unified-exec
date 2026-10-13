@@ -1,17 +1,21 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+	chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync,
+	rmSync, symlinkSync, utimesSync, writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { describe, it, type TestContext } from "node:test";
 import {
 	ensureTernPlugin,
-	inTernPane,
-	outcomeNotice,
+	initializeTernPlugin,
 	parsePluginList,
 	parsePluginVersion,
 	planPluginAction,
 	readPluginFiles,
-	TERN_PLUGIN_DIR,
 	TERN_PLUGIN_ID,
+	TernPluginInitializationError,
+	type CopyState,
+	type InstallOutcome,
 	type ListedPlugin,
 	type PluginFiles,
 } from "../fork-features/tern-plugin-install.ts";
@@ -20,248 +24,496 @@ function listedPlugin(files: PluginFiles, overrides: Partial<ListedPlugin> = {})
 	return { id: TERN_PLUGIN_ID, version: files.version, css: files.css, status: "ready", ...overrides };
 }
 
-function makeTern(t: TestContext, loaded: readonly ListedPlugin[] = [], failure: "none" | "list" | "first-link" = "none") {
-	const dir = mkdtempSync(join("/tmp", "tern-plugin-install-"));
-	t.after(() => { rmSync(dir, { recursive: true, force: true }); });
-	const logPath = join(dir, "argv.log");
-	const listPath = join(dir, "plugins.json");
-	const firstLinkPath = join(dir, "first-link-refused");
-	const emptyPath = join(dir, "empty-bin");
+function writeBundle(dir: string, files: PluginFiles): void {
+	mkdirSync(dir, { recursive: true });
+	writeFileSync(join(dir, "plugin.toml"), files.manifest);
+	writeFileSync(join(dir, "terminals.css"), files.css);
+	writeFileSync(join(dir, "window.luau"), files.windowScript);
+}
+
+type CopyFault = "no-copy" | "css" | "manifest" | "windowScript" | "extra-file" | "missing-file" | "symlink";
+type ReplyFault = "malformed" | "missing-fields" | "wrong-id" | "wrong-version" | "wrong-dir" | "relative-dir";
+interface SimulatorOptions {
+	readonly initialCatalog?: readonly ListedPlugin[];
+	readonly installedCatalog?: readonly ListedPlugin[];
+	readonly conflictCatalog?: readonly ListedPlugin[];
+	readonly failure?: "dir" | "list" | "install" | "unlink";
+	readonly installError?: string;
+	readonly ownerConflict?: string;
+	readonly copyFault?: CopyFault;
+	readonly replyFault?: ReplyFault;
+	readonly directoryReply?: string;
+	readonly catalogReply?: string;
+}
+
+interface Harness {
+	readonly env: NodeJS.ProcessEnv;
+	readonly root: string;
+	readonly files: PluginFiles;
+	readonly sourceDir: string;
+	readonly legacyDir: string;
+	readonly destination: string;
+	readonly registration: string;
+	readonly emptyPath: string;
+	readonly calls: string[][];
+}
+
+/** Independent CLI simulator: catalog entries are derived from the registered on-disk bundle. */
+function makeTern(t: TestContext, options: SimulatorOptions = {}): Harness {
+	const root = mkdtempSync(join("/tmp", "tern-plugin-install-"));
+	t.after(() => { rmSync(root, { recursive: true, force: true }); });
+	const pluginRoot = join(root, "Tern plugins with spaces");
+	const sourceDir = join(root, "package source ; $not-expanded");
+	const legacyDir = join(root, "legacy checkout with spaces");
+	const destination = join(pluginRoot, TERN_PLUGIN_ID);
+	const registration = join(pluginRoot, `${TERN_PLUGIN_ID}.path`);
+	const logPath = join(root, "argv.jsonl");
+	const emptyPath = join(root, "empty-bin");
+	const optionsPath = join(root, "options.json");
+	const installedPath = join(root, "installed");
+	const conflictPath = join(root, "conflict");
+	const files = readPluginFiles();
+	mkdirSync(pluginRoot);
 	mkdirSync(emptyPath);
+	writeBundle(sourceDir, files);
+	writeBundle(legacyDir, files);
 	writeFileSync(logPath, "");
-	writeFileSync(listPath, JSON.stringify({ plugins: loaded }));
-	const executable = join(dir, "tern");
-	writeFileSync(executable, `#!/bin/sh
-first=1
-for arg in "$@"; do
-  if [ "$first" = 0 ]; then printf '\\t' >> "$TERN_TEST_LOG"; fi
-  printf '%s' "$arg" >> "$TERN_TEST_LOG"
-  first=0
-done
-printf '\\n' >> "$TERN_TEST_LOG"
-case "$1:$2" in
-  plugin:list)
-    if [ "$TERN_TEST_FAILURE" = list ]; then
-      printf 'list unavailable\\n' >&2
-      exit 1
-    fi
-    /bin/cat "$TERN_TEST_LIST"
-    ;;
-  plugin:link)
-    if [ "$TERN_TEST_FAILURE" = first-link ] && [ ! -f "$TERN_TEST_FIRST_LINK" ]; then
-      : > "$TERN_TEST_FIRST_LINK"
-      printf 'already installed\\n' >&2
-      exit 1
-    fi
-    printf '{"ok":true}\\n'
-    ;;
-  plugin:remove)
-    printf '{"ok":true}\\n'
-    ;;
-  *)
-    printf 'unexpected fake tern command\\n' >&2
-    exit 64
-    ;;
-esac
+	writeFileSync(optionsPath, JSON.stringify(options));
+	const executable = join(root, "tern");
+	assert.doesNotMatch(process.execPath, /\s/, "fixture needs an executable path representable in a shebang");
+	writeFileSync(executable, `#!${process.execPath}
+const fs = require("node:fs");
+const path = require("node:path");
+const args = process.argv.slice(2);
+const env = process.env;
+const config = JSON.parse(fs.readFileSync(env.TERN_TEST_OPTIONS, "utf8"));
+const root = env.TERN_TEST_ROOT;
+const id = "omp-unified-exec";
+const destination = path.join(root, id);
+const registration = path.join(root, id + ".path");
+fs.appendFileSync(env.TERN_TEST_LOG, JSON.stringify(args) + "\\n");
+function reply(value) { process.stdout.write(JSON.stringify(value) + "\\n"); }
+function fail(message, code = 23) {
+  process.stdout.write("owner diagnostic\\n");
+  process.stderr.write(message + "\\n");
+  process.exit(code);
+}
+function version(dir) {
+  const manifest = fs.readFileSync(path.join(dir, "plugin.toml"), "utf8");
+  return /^\\s*version\\s*=\\s*"([^"]*)"\\s*$/m.exec(manifest)[1];
+}
+function catalog() {
+  if (fs.existsSync(env.TERN_TEST_CONFLICT) && config.conflictCatalog !== undefined) return config.conflictCatalog;
+  const installed = fs.existsSync(env.TERN_TEST_INSTALLED);
+  const override = installed ? config.installedCatalog : config.initialCatalog;
+  if (override !== undefined) return override;
+  let dir = destination;
+  if (fs.existsSync(registration)) dir = fs.readFileSync(registration, "utf8").trim();
+  if (!fs.existsSync(dir)) return [];
+  return [{ id, version: version(dir), css: fs.readFileSync(path.join(dir, "terminals.css"), "utf8"),
+    status: "ready" }];
+}
+if (args[0] !== "plugin") fail("unexpected command", 64);
+const operation = args[1];
+if (config.failure === operation) fail(config.installError ?? operation + " unavailable");
+if (operation === "dir" && args.length === 3 && args[2] === "--json") {
+  if (config.directoryReply !== undefined) process.stdout.write(config.directoryReply);
+  else reply({ dir: root });
+} else if (operation === "list" && args.length === 3 && args[2] === "--json") {
+  if (config.catalogReply !== undefined) process.stdout.write(config.catalogReply);
+  else reply({ plugins: catalog() });
+} else if (operation === "install" && args.length === 5 && args[3] === "--force" && args[4] === "--json") {
+  const target = config.ownerConflict ?? (fs.existsSync(registration) ? fs.readFileSync(registration, "utf8").trim() : undefined);
+  if (target !== undefined) {
+    fs.writeFileSync(env.TERN_TEST_CONFLICT, "conflict");
+    fail("tern plugin: " + id + " is linked (" + target + "); use unlink first");
+  }
+  const source = args[2];
+  if (config.copyFault !== "no-copy") {
+    fs.rmSync(destination, { recursive: true, force: true });
+    if (config.copyFault === "symlink") fs.symlinkSync(source, destination);
+    else {
+      fs.cpSync(source, destination, { recursive: true });
+      const changedFile = { css: "terminals.css", manifest: "plugin.toml", windowScript: "window.luau" }[config.copyFault];
+      if (changedFile) fs.appendFileSync(path.join(destination, changedFile), "\\n/* incomplete copy */\\n");
+      if (config.copyFault === "extra-file") fs.writeFileSync(path.join(destination, "unexpected.txt"), "extra");
+      if (config.copyFault === "missing-file") fs.rmSync(path.join(destination, "window.luau"));
+    }
+  }
+  fs.writeFileSync(env.TERN_TEST_INSTALLED, "installed");
+  const result = { id, version: version(source), dir: destination };
+  switch (config.replyFault) {
+    case "malformed": process.stdout.write("not JSON\\n"); break;
+    case "missing-fields": reply({ ok: true }); break;
+    case "wrong-id": reply({ ...result, id: "another-plugin" }); break;
+    case "wrong-version": reply({ ...result, version: "wrong-version" }); break;
+    case "wrong-dir": reply({ ...result, dir: source }); break;
+    case "relative-dir": reply({ ...result, dir: id }); break;
+    default: reply(result);
+  }
+} else if (operation === "unlink" && args.length === 4 && args[2] === id && args[3] === "--json") {
+  if (!fs.existsSync(registration)) fail("no linked registration");
+  fs.unlinkSync(registration);
+  reply({ id });
+} else fail("unexpected arguments", 64);
 `);
 	chmodSync(executable, 0o755);
 	const env: NodeJS.ProcessEnv = {
-		...process.env,
-		// No ambient executable is needed: the script uses shell builtins and /bin/cat.
-		PATH: dir,
-		TERN_PANE_SOCKET: "/x",
-		TERN_PANE: "1",
+		// No ambient Tern or pane environment: the fixture is the only executable on PATH.
+		PATH: root,
+		TERN_TEST_OPTIONS: optionsPath,
+		TERN_TEST_ROOT: pluginRoot,
 		TERN_TEST_LOG: logPath,
-		TERN_TEST_LIST: listPath,
-		TERN_TEST_FIRST_LINK: firstLinkPath,
-		TERN_TEST_FAILURE: failure,
+		TERN_TEST_INSTALLED: installedPath,
+		TERN_TEST_CONFLICT: conflictPath,
 	};
 	return {
-		env,
-		emptyPath,
+		env, root, files, sourceDir, legacyDir, destination, registration, emptyPath,
 		get calls(): string[][] {
-			return readFileSync(logPath, "utf8").split("\n").filter((line) => line !== "").map((line) => line.split("\t"));
+			return readFileSync(logPath, "utf8").split("\n").filter(Boolean).map((line: string) => JSON.parse(line) as string[]);
 		},
 	};
 }
 
-describe("Tern pane detection", () => {
-	it("accepts a nonempty socket and all-digit pane ids, including zero and leading zeros", () => {
-		for (const pane of ["0", "1", "007", "123456789"]) {
-			assert.equal(inTernPane({ TERN_PANE_SOCKET: "/x", TERN_PANE: pane }), true);
-		}
-		assert.equal(inTernPane({ TERN_PANE_SOCKET: " /x ", TERN_PANE: " 12 " }), true);
-	});
+function assertExactCopy(h: Harness): void {
+	assert.equal(existsSync(h.registration), false, "developer registration must not remain");
+	assert.equal(lstatSync(h.destination).isSymbolicLink(), false);
+	assert.equal(lstatSync(h.destination).isDirectory(), true);
+	assert.deepEqual(readdirSync(h.destination).sort(), ["plugin.toml", "terminals.css", "window.luau"]);
+	for (const name of ["plugin.toml", "terminals.css", "window.luau"]) {
+		assert.equal(lstatSync(join(h.destination, name)).isFile(), true);
+		assert.equal(readFileSync(join(h.destination, name), "utf8"), readFileSync(join(h.sourceDir, name), "utf8"));
+	}
+}
 
-	it("rejects missing or empty socket and pane values", () => {
-		for (const env of [
-			{}, { TERN_PANE: "1" }, { TERN_PANE_SOCKET: "/x" },
-			{ TERN_PANE_SOCKET: "", TERN_PANE: "1" },
-			{ TERN_PANE_SOCKET: "  ", TERN_PANE: "1" },
-			{ TERN_PANE_SOCKET: "/x", TERN_PANE: "" },
-			{ TERN_PANE_SOCKET: "/x", TERN_PANE: "  " },
-		]) {
-			assert.equal(inTernPane(env), false);
-		}
-	});
+function assertNoDestructiveCall(h: Harness): void {
+	assert.equal(h.calls.some((args) => args[1] === "unlink" || args[1] === "remove" || args[1] === "link"), false);
+}
 
-	it("rejects signed, fractional, whitespace-separated, and nonnumeric pane ids", () => {
-		for (const pane of ["-1", "+1", "1.5", "1 2", "1e2", "pane-1"]) {
-			assert.equal(inTernPane({ TERN_PANE_SOCKET: "/x", TERN_PANE: pane }), false);
-		}
+function assertFailed(outcome: InstallOutcome, kind: "command" | "inspection" | "verification") {
+	assert.equal(outcome.kind, "failed");
+	assert.ok(outcome.kind === "failed");
+	assert.equal(outcome.failure.kind, kind);
+	return outcome.failure;
+}
+
+function bundleSnapshot(dir: string) {
+	return ["", ...readdirSync(dir).sort()].map((name) => {
+		const file = join(dir, name);
+		const stat = lstatSync(file);
+		return { name, ino: stat.ino, mtimeMs: stat.mtimeMs, content: stat.isFile() ? readFileSync(file, "utf8") : null };
 	});
-});
+}
 
 describe("Tern plugin file and CLI parsers", () => {
-	it("reads the quoted version from a multiline plugin manifest", () => {
+	it("reads the quoted version from a multiline manifest", () => {
 		assert.equal(parsePluginVersion('schema = 1\nid = "plugin"\nversion = "test-version"\n'), "test-version");
 		assert.equal(parsePluginVersion('  version  =  "release candidate"  \n'), "release candidate");
 	});
 
-	it("throws when a plugin manifest has no quoted version assignment", () => {
+	it("rejects manifests without a quoted version assignment", () => {
 		for (const toml of ["", 'name = "plugin"', "version = 7", "version = 'test-version'"]) {
-			assert.throws(() => parsePluginVersion(toml), /plugin\.toml has no version/);
+			assert.throws(() => parsePluginVersion(toml), Error);
 		}
 	});
 
-	it("parses loaded plugin fields from the plugins array", () => {
-		const plugin = listedPlugin({ version: "test-version", css: ".terminal {}" });
+	it("parses catalog entries and accepts an empty plugins array", () => {
+		const plugin = listedPlugin(readPluginFiles());
 		assert.deepEqual(parsePluginList(JSON.stringify({ plugins: [plugin] })), [plugin]);
 		assert.deepEqual(parsePluginList('{"plugins":[]}'), []);
 	});
 
-	it("throws for malformed JSON and roots without a plugins array", () => {
+	it("rejects malformed JSON and roots without a plugins array", () => {
 		assert.throws(() => parsePluginList("not JSON"), SyntaxError);
 		for (const value of [null, 7, "plugins", [], {}, { plugins: null }, { plugins: {} }, { plugins: "[]" }]) {
-			assert.throws(() => parsePluginList(JSON.stringify(value)), /no plugins array/);
+			assert.throws(() => parsePluginList(JSON.stringify(value)), Error);
 		}
 	});
 
-	it("drops entries without a string id and defaults nonstring optional fields to empty strings", () => {
+	it("ignores unusable ids and defaults nonstring optional catalog fields", () => {
 		assert.deepEqual(parsePluginList(JSON.stringify({ plugins: [
 			null, 7, "plugin", {}, { id: 42 }, { id: "" },
-			{ id: TERN_PLUGIN_ID, version: 7, css: false, status: null },
-			{ id: "another-plugin" },
+			{ id: TERN_PLUGIN_ID, version: 7, css: false, status: null }, { id: "another-plugin" },
 		] })), [
 			{ id: TERN_PLUGIN_ID, version: "", css: "", status: "" },
 			{ id: "another-plugin", version: "", css: "", status: "" },
 		]);
 	});
 
-	it("reads the actual package manifest version and exact plugin stylesheet", () => {
-		const files = readPluginFiles();
-		const manifest = readFileSync(join(TERN_PLUGIN_DIR, "plugin.toml"), "utf8");
-		assert.equal(manifest.split("\n").find((line) => line.startsWith("version = ")), `version = "${files.version}"`);
-		assert.equal(files.css, readFileSync(join(TERN_PLUGIN_DIR, "terminals.css"), "utf8"));
-		assert.ok(files.version.length > 0 && files.css.length > 0);
+
+	it("rejects a source bundle with a different plugin identity or missing required file", (t) => {
+		const h = makeTern(t);
+		writeFileSync(join(h.sourceDir, "plugin.toml"), h.files.manifest.replace(TERN_PLUGIN_ID, "another-plugin"));
+		assert.throws(() => readPluginFiles(h.sourceDir), Error);
+		writeFileSync(join(h.sourceDir, "plugin.toml"), h.files.manifest);
+		rmSync(join(h.sourceDir, "window.luau"));
+		assert.throws(() => readPluginFiles(h.sourceDir), { code: "ENOENT" });
 	});
 });
 
-describe("Tern plugin action planning", () => {
-	const files: PluginFiles = { version: "package-version", css: ".terminal {}" };
+describe("Tern plugin copy action planning", () => {
+	const files = readPluginFiles();
 
-	it("links when the package plugin is missing, even if other plugins are installed", () => {
-		assert.deepEqual(planPluginAction([], files), { kind: "link" });
-		assert.deepEqual(planPluginAction([listedPlugin(files, { id: "another-plugin" })], files), { kind: "link" });
+	it("requires both an exact normal copy and a matching ready catalog", () => {
+		assert.deepEqual(planPluginAction([listedPlugin(files)], files, "current"), { kind: "current" });
+		for (const copy of ["current", "stale"] satisfies CopyState[]) {
+			for (const catalog of [[], [listedPlugin(files, { id: "another-plugin" })]]) {
+				assert.deepEqual(planPluginAction(catalog, files, copy), { kind: "install" });
+			}
+		}
+		assert.deepEqual(planPluginAction([listedPlugin(files)], files, "stale"), { kind: "install" });
 	});
 
-	it("keeps a ready plugin current only when its version and CSS both match", () => {
-		assert.deepEqual(planPluginAction([listedPlugin(files)], files), { kind: "current" });
-	});
-
-	it("relinks a different version, different CSS, or non-ready status and reports the loaded version", () => {
+	it("installs for mismatched catalog version, CSS, or readiness even with a current copy", () => {
 		for (const plugin of [
-			listedPlugin(files, { version: "old-version" }),
-			listedPlugin(files, { css: ".old-terminal {}" }),
-			listedPlugin(files, { status: "error" }),
+			listedPlugin(files, { version: "old-version" }), listedPlugin(files, { version: "" }),
+			listedPlugin(files, { css: ".old-terminal {}" }), listedPlugin(files, { status: "error" }),
+			listedPlugin(files, { status: "" }),
 		]) {
-			assert.deepEqual(planPluginAction([plugin], files), { kind: "relink", loaded: plugin.version });
+			assert.deepEqual(planPluginAction([plugin], files, "current"), { kind: "install" });
 		}
 	});
-
-	it("reports an unknown loaded version when a stale plugin lacks one", () => {
-		assert.deepEqual(planPluginAction([listedPlugin(files, { version: "" })], files), { kind: "relink", loaded: "unknown" });
-	});
 });
 
-describe("Tern plugin installation through the CLI", () => {
-	it("does nothing outside a Tern pane and never launches the executable", async (t) => {
+describe("Tern normal-copy installation through an executable CLI", () => {
+	it("installs a missing plugin as the exact normal copy, with spaces and shell metacharacters safe", async (t) => {
 		const h = makeTern(t);
-		assert.deepEqual(await ensureTernPlugin({ ...h.env, TERN_PANE: "" }, readPluginFiles()), { kind: "not-tern" });
-		assert.deepEqual(h.calls, []);
+		assert.deepEqual(await ensureTernPlugin(h.env, h.sourceDir), { kind: "installed", version: h.files.version });
+		assertExactCopy(h);
+		assertNoDestructiveCall(h);
+		assert.deepEqual(await ensureTernPlugin(h.env, h.sourceDir), { kind: "current" });
+		assert.equal(h.calls.filter((args) => args[1] === "install").length, 1);
 	});
 
-	it("fails when no tern executable is on the supplied PATH", async (t) => {
+	it("leaves an identical three-file normal directory and ready catalog untouched", async (t) => {
 		const h = makeTern(t);
-		assert.deepEqual(await ensureTernPlugin({ ...h.env, PATH: h.emptyPath }, readPluginFiles()), {
-			kind: "failed", reason: "the `tern` command is not on PATH",
-		});
-		assert.deepEqual(h.calls, []);
+		writeBundle(h.destination, h.files);
+		const old = new Date("2001-01-01T00:00:00Z");
+		for (const name of ["plugin.toml", "terminals.css", "window.luau"]) utimesSync(join(h.destination, name), old, old);
+		utimesSync(h.destination, old, old);
+		const before = bundleSnapshot(h.destination);
+		assert.deepEqual(await ensureTernPlugin(h.env, h.sourceDir), { kind: "current" });
+		assertExactCopy(h);
+		assert.deepEqual(bundleSnapshot(h.destination), before);
+		assert.equal(h.calls.some((args) => args[1] === "install"), false);
+		assertNoDestructiveCall(h);
 	});
 
-	it("only lists a current ready plugin with matching package version and CSS", async (t) => {
-		const files = readPluginFiles();
-		const h = makeTern(t, [listedPlugin(files)]);
-		assert.deepEqual(await ensureTernPlugin(h.env, files), { kind: "current" });
-		assert.deepEqual(h.calls, [["plugin", "list", "--json"]]);
-	});
-
-	it("lists then links the real package directory when the plugin is missing", async (t) => {
-		const files = readPluginFiles();
-		const h = makeTern(t);
-		assert.deepEqual(await ensureTernPlugin(h.env, files), { kind: "linked", version: files.version, replaced: undefined });
-		assert.deepEqual(h.calls, [["plugin", "list", "--json"], ["plugin", "link", TERN_PLUGIN_DIR, "--json"]]);
-	});
-
-	for (const stale of ["version", "css", "status"] as const) {
-		it(`relinks a stale ${stale} through the CLI and reports the replaced version`, async (t) => {
-			const files = readPluginFiles();
-			const plugin = listedPlugin(files, stale === "version" ? { version: "old-version" }
-				: stale === "css" ? { css: `${files.css}\n/* stale */` } : { status: "error" });
-			const h = makeTern(t, [plugin]);
-			assert.deepEqual(await ensureTernPlugin(h.env, files), { kind: "linked", version: files.version, replaced: plugin.version });
-			assert.deepEqual(h.calls, [["plugin", "list", "--json"], ["plugin", "link", TERN_PLUGIN_DIR, "--json"]]);
+	for (const stale of ["css", "windowScript", "manifest", "extra-file", "missing-file", "directory-entry", "file-symlink", "directory-symlink"] as const) {
+		it(`replaces stale same-version ${stale} with exactly the shipped inventory`, async (t) => {
+			const h = makeTern(t);
+			writeBundle(h.destination, h.files);
+			switch (stale) {
+				case "css": writeFileSync(join(h.destination, "terminals.css"), `${h.files.css}\n/* stale */`); break;
+				case "windowScript": writeFileSync(join(h.destination, "window.luau"), `${h.files.windowScript}\n-- stale`); break;
+				case "manifest": writeFileSync(join(h.destination, "plugin.toml"), `${h.files.manifest}\n# stale`); break;
+				case "extra-file": writeFileSync(join(h.destination, "obsolete.txt"), "obsolete"); break;
+				case "missing-file": rmSync(join(h.destination, "window.luau")); break;
+				case "directory-entry": rmSync(join(h.destination, "window.luau")); mkdirSync(join(h.destination, "window.luau")); break;
+				case "file-symlink": rmSync(join(h.destination, "window.luau")); symlinkSync(join(h.sourceDir, "window.luau"), join(h.destination, "window.luau")); break;
+				case "directory-symlink": rmSync(h.destination, { recursive: true }); symlinkSync(h.sourceDir, h.destination); break;
+			}
+			assert.deepEqual(await ensureTernPlugin(h.env, h.sourceDir), { kind: "installed", version: h.files.version });
+			assertExactCopy(h);
+			assertNoDestructiveCall(h);
 		});
 	}
 
-	it("removes an installed stale plugin and retries link only after the first link refuses", async (t) => {
-		const files = readPluginFiles();
-		const h = makeTern(t, [listedPlugin(files, { version: "old-version" })], "first-link");
-		assert.deepEqual(await ensureTernPlugin(h.env, files), { kind: "linked", version: files.version, replaced: "old-version" });
-		assert.deepEqual(h.calls, [
-			["plugin", "list", "--json"],
-			["plugin", "link", TERN_PLUGIN_DIR, "--json"],
-			["plugin", "remove", TERN_PLUGIN_ID, "--json"],
-			["plugin", "link", TERN_PLUGIN_DIR, "--json"],
-		]);
+	for (const stale of ["status", "version", "css", "missing"] as const) {
+		it(`reinstalls an exact copy whose catalog has stale ${stale}`, async (t) => {
+			const files = readPluginFiles();
+			const initialCatalog = stale === "missing" ? [] : [listedPlugin(files, stale === "status" ? { status: "error" }
+				: stale === "version" ? { version: "old-version" } : { css: ".old {}" })];
+			const h = makeTern(t, { initialCatalog });
+			writeBundle(h.destination, h.files);
+			assert.deepEqual(await ensureTernPlugin(h.env, h.sourceDir), { kind: "installed", version: h.files.version });
+			assertExactCopy(h);
+			assert.ok(h.calls.some((args) => args[1] === "install"));
+			assertNoDestructiveCall(h);
+		});
+	}
+
+	it("migrates the canonical legacy .path even when its loaded CSS and version are identical", async (t) => {
+		const h = makeTern(t);
+		writeFileSync(h.registration, `${h.legacyDir}\n`);
+		const legacy = bundleSnapshot(h.legacyDir);
+		assert.deepEqual(await ensureTernPlugin(h.env, h.sourceDir), { kind: "installed", version: h.files.version });
+		assertExactCopy(h);
+		assert.deepEqual(bundleSnapshot(h.legacyDir), legacy, "unlink must not delete the legacy source");
+		assert.equal(h.calls.some((args) => args[1] === "link" || args[1] === "remove"), false);
 	});
 
-	it("reports the controlled list failure and does not attempt link or removal", async (t) => {
-		const h = makeTern(t, [], "list");
-		assert.deepEqual(await ensureTernPlugin(h.env, readPluginFiles()), { kind: "failed", reason: "tern plugin list: list unavailable" });
-		assert.deepEqual(h.calls, [["plugin", "list", "--json"]]);
+	it("returns unavailable without launching any command when Tern is missing", async (t) => {
+		const h = makeTern(t);
+		const env = { ...h.env, PATH: h.emptyPath };
+		assert.deepEqual(await ensureTernPlugin(env, h.sourceDir), { kind: "unavailable" });
+		await initializeTernPlugin(env, h.sourceDir);
+		assert.deepEqual(h.calls, []);
 	});
 });
 
-describe("Tern plugin installation notices", () => {
-	it("has no notice outside Tern or when the plugin is already current", () => {
-		assert.equal(outcomeNotice({ kind: "not-tern" }), undefined);
-		assert.equal(outcomeNotice({ kind: "current" }), undefined);
+describe("Tern installation failure safety and verification", () => {
+	it("does not unlink a legacy registration after an arbitrary install failure", async (t) => {
+		const h = makeTern(t, { failure: "install", installError: "permission denied; unrelated plugin is linked" });
+		writeFileSync(h.registration, `${h.legacyDir}\n`);
+		const legacy = bundleSnapshot(h.legacyDir);
+		const failure = assertFailed(await ensureTernPlugin(h.env, h.sourceDir), "command");
+		assert.ok(failure.kind === "command");
+		assert.equal(failure.stage, "install");
+		assert.equal(failure.details.exitCode, 23);
+		assert.equal(failure.details.stdout, "owner diagnostic\n");
+		assert.match(failure.details.stderr, /permission denied/);
+		assert.equal(readFileSync(h.registration, "utf8"), `${h.legacyDir}\n`);
+		assert.deepEqual(bundleSnapshot(h.legacyDir), legacy);
+		assertNoDestructiveCall(h);
 	});
 
-	it("reports installs and replaced versions at info level", () => {
-		assert.deepEqual(outcomeNotice({ kind: "linked", version: "new-version", replaced: undefined }), {
-			level: "info", text: "unified-exec: installed its Tern plugin new-version",
+	for (const conflict of ["target-mismatch", "no-registration", "symlink-registration", "directory-registration", "relative-owner-target", "catalog-owner-disappeared"] as const) {
+		it(`does not unlink an unsafe ${conflict} conflict`, async (t) => {
+			const options: SimulatorOptions = conflict === "target-mismatch" || conflict === "no-registration" || conflict === "directory-registration"
+				? { ownerConflict: "/different owner target", initialCatalog: [listedPlugin(readPluginFiles())] }
+				: conflict === "relative-owner-target" ? { ownerConflict: "relative target" }
+				: conflict === "catalog-owner-disappeared" ? { conflictCatalog: [] } : {};
+			const h = makeTern(t, options);
+			if (conflict === "symlink-registration") {
+				const externalRegistration = join(h.root, "other.path");
+				writeFileSync(externalRegistration, `${h.legacyDir}\n`);
+				symlinkSync(externalRegistration, h.registration);
+			} else if (conflict === "directory-registration") mkdirSync(h.registration);
+			else if (conflict !== "no-registration") writeFileSync(h.registration, `${h.legacyDir}\n`);
+			const legacy = bundleSnapshot(h.legacyDir);
+			const registrationBefore = existsSync(h.registration) ? lstatSync(h.registration) : undefined;
+			assertFailed(await ensureTernPlugin(h.env, h.sourceDir), "verification");
+			assertNoDestructiveCall(h);
+			assert.deepEqual(bundleSnapshot(h.legacyDir), legacy);
+			assert.equal(existsSync(h.destination), false);
+			assert.equal(existsSync(h.registration), registrationBefore !== undefined);
+			if (registrationBefore) {
+				assert.equal(lstatSync(h.registration).ino, registrationBefore.ino);
+				if (!registrationBefore.isDirectory()) assert.equal(readFileSync(h.registration, "utf8"), `${h.legacyDir}\n`);
+			}
 		});
-		assert.deepEqual(outcomeNotice({ kind: "linked", version: "new-version", replaced: "old-version" }), {
-			level: "info", text: "unified-exec: updated its Tern plugin old-version → new-version",
+	}
+
+	for (const installError of [
+		`unrelated: tern plugin: ${TERN_PLUGIN_ID} is linked (/target); use unlink first`,
+		`tern plugin: another-plugin is linked (/target); use unlink first`,
+		`tern plugin: ${TERN_PLUGIN_ID} is linked (/target); use unlink first; retry advised`,
+	]) {
+		it(`rejects a noncanonical link diagnostic: ${installError}`, async (t) => {
+			const h = makeTern(t, { failure: "install", installError });
+			writeFileSync(h.registration, `${h.legacyDir}\n`);
+			assertFailed(await ensureTernPlugin(h.env, h.sourceDir), "command");
+			assert.equal(readFileSync(h.registration, "utf8"), `${h.legacyDir}\n`);
+			assertNoDestructiveCall(h);
 		});
+	}
+
+	it("preserves the canonical link when Tern refuses unlink", async (t) => {
+		const h = makeTern(t, { failure: "unlink" });
+		writeFileSync(h.registration, `${h.legacyDir}\n`);
+		const failure = assertFailed(await ensureTernPlugin(h.env, h.sourceDir), "command");
+		assert.ok(failure.kind === "command");
+		assert.equal(failure.stage, "unlink");
+		assert.equal(readFileSync(h.registration, "utf8"), `${h.legacyDir}\n`);
+		assert.equal(existsSync(h.destination), false);
 	});
 
-	it("warns with the failure reason and the real manual link command", () => {
-		assert.deepEqual(outcomeNotice({ kind: "failed", reason: "list unavailable" }), {
-			level: "warning",
-			text: `unified-exec: could not install its Tern plugin (list unavailable); run \`tern plugin link ${TERN_PLUGIN_DIR}\``,
+	for (const replyFault of ["malformed", "missing-fields", "wrong-id", "wrong-version", "wrong-dir", "relative-dir"] satisfies ReplyFault[]) {
+		it(`does not accept a ${replyFault} installation reply even after copying`, async (t) => {
+			const h = makeTern(t, { replyFault });
+			assertFailed(await ensureTernPlugin(h.env, h.sourceDir), replyFault === "malformed" || replyFault === "missing-fields" || replyFault === "relative-dir" ? "inspection" : "verification");
+			assertExactCopy(h);
+			assertNoDestructiveCall(h);
 		});
+	}
+
+	for (const copyFault of ["no-copy", "css", "manifest", "windowScript", "extra-file", "missing-file", "symlink"] satisfies CopyFault[]) {
+		it(`rejects ${copyFault} despite a success reply and matching ready catalog`, async (t) => {
+			const h = makeTern(t, { copyFault, installedCatalog: [listedPlugin(readPluginFiles())] });
+			assertFailed(await ensureTernPlugin(h.env, h.sourceDir), "verification");
+			if (copyFault === "no-copy") assert.equal(existsSync(h.destination), false);
+			else if (copyFault === "symlink") assert.equal(lstatSync(h.destination).isSymbolicLink(), true);
+			else if (copyFault === "extra-file") assert.equal(existsSync(join(h.destination, "unexpected.txt")), true);
+			else if (copyFault === "missing-file") assert.equal(existsSync(join(h.destination, "window.luau")), false);
+			else {
+				const name = copyFault === "css" ? "terminals.css" : copyFault === "manifest" ? "plugin.toml" : "window.luau";
+				assert.notEqual(readFileSync(join(h.destination, name), "utf8"), readFileSync(join(h.sourceDir, name), "utf8"));
+			}
+			assertNoDestructiveCall(h);
+		});
+	}
+
+	for (const installedCatalog of [[], [listedPlugin(readPluginFiles(), { status: "error" })], [listedPlugin(readPluginFiles(), { css: ".stale {}" })]]) {
+		it(`rejects an exact copy with an unconfirmed ready catalog: ${JSON.stringify(installedCatalog.map((plugin) => plugin.status))}`, async (t) => {
+			const h = makeTern(t, { installedCatalog });
+			assertFailed(await ensureTernPlugin(h.env, h.sourceDir), "verification");
+			assertExactCopy(h);
+		});
+	}
+
+	for (const failure of ["dir", "list"] as const) {
+		it(`reports typed ${failure} command failure without changing installed files`, async (t) => {
+			const h = makeTern(t, { failure });
+			writeBundle(h.destination, h.files);
+			const before = bundleSnapshot(h.destination);
+			const result = assertFailed(await ensureTernPlugin(h.env, h.sourceDir), "command");
+			assert.ok(result.kind === "command");
+			assert.equal(result.stage, "inspect");
+			assert.deepEqual(bundleSnapshot(h.destination), before);
+			assert.equal(h.calls.some((args) => args[1] === "install"), false);
+			assertNoDestructiveCall(h);
+		});
+	}
+
+	for (const directoryReply of ["not JSON", '{"dir":"relative"}', '{"dir":7}', '{}']) {
+		it(`rejects an invalid owner directory response: ${directoryReply}`, async (t) => {
+			const h = makeTern(t, { directoryReply });
+			const failure = assertFailed(await ensureTernPlugin(h.env, h.sourceDir), "inspection");
+			assert.ok(failure.kind === "inspection");
+			assert.equal(failure.stage, "inspect");
+			assert.equal(existsSync(h.destination), false);
+			assertNoDestructiveCall(h);
+		});
+	}
+
+	it("rejects an invalid catalog response without attempting install", async (t) => {
+		const h = makeTern(t, { catalogReply: '{"plugins":null}' });
+		assertFailed(await ensureTernPlugin(h.env, h.sourceDir), "inspection");
+		assert.equal(h.calls.some((args) => args[1] === "install"), false);
+		assertNoDestructiveCall(h);
+	});
+
+	it("initialization awaits a real copied installation and returns with exact files", async (t) => {
+		const h = makeTern(t);
+		await initializeTernPlugin(h.env, h.sourceDir);
+		assertExactCopy(h);
+	});
+
+	it("initialization throws its structured command failure when Tern exists but install fails", async (t) => {
+		const h = makeTern(t, { failure: "install", installError: "copy denied" });
+		await assert.rejects(initializeTernPlugin(h.env, h.sourceDir), (error: unknown) => {
+			assert.ok(error instanceof TernPluginInitializationError);
+			assert.equal(error.name, "TernPluginInitializationError");
+			assert.equal(error.failure.kind, "command");
+			assert.ok(error.failure.kind === "command");
+			assert.equal(error.failure.stage, "install");
+			assert.equal(error.failure.details.exitCode, 23);
+			assert.ok(error.failure.details.command.includes(h.sourceDir));
+			assert.match(error.message, /copy denied/);
+			return true;
+		});
+		assert.equal(existsSync(h.destination), false);
+		assertNoDestructiveCall(h);
+	});
+
+	it("initialization throws a structured verification failure when the copy was not made", async (t) => {
+		const h = makeTern(t, { copyFault: "no-copy", installedCatalog: [listedPlugin(readPluginFiles())] });
+		await assert.rejects(initializeTernPlugin(h.env, h.sourceDir), (error: unknown) => {
+			assert.ok(error instanceof TernPluginInitializationError);
+			assert.equal(error.failure.kind, "verification");
+			return true;
+		});
+		assert.equal(existsSync(h.destination), false);
 	});
 });

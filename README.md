@@ -26,9 +26,15 @@ Remove an existing `pi-unified-exec` first (`omp plugin uninstall
 pi-unified-exec`): both register the same tools. The fork publishes nothing to
 npm.
 
-Run inside Tern, omp installs the package's Tern plugin itself at the first
-session (see [Tern terminal HUD](#tern-terminal-hud)). Nothing else is
-configured.
+omp also installs the bundled Tern plugin as a normal copy when `tern` is on
+PATH. Updates use the same command with `--force`:
+
+```bash
+omp plugin install https://github.com/mouriya-s-lab/omp-unified-exec --force
+```
+
+The Tern update finishes before this command succeeds; no separate Tern
+command or developer link is needed.
 
 The package still loads on Pi unchanged (Pi's renderers, no HUD). PTY mode uses
 Bun's native `Bun.Terminal` under Bun 1.4+ (omp is a compiled Bun executable),
@@ -90,13 +96,22 @@ the shared `belowEditor` widget container above omp's pill line and clears
 its container spacing, background and shadow so native HUD margins are not
 applied twice. Other widgets in that container share this placement and reset;
 the plugin does not restyle the pills or omp's editor. It also sets the sheet's
-output preview in the monospace face. omp keeps it installed: at the first
-interactive session inside a Tern pane (detected as omp does, from
-`TERN_PANE_SOCKET` and `TERN_PANE`) it asks Tern with `tern plugin list --json`
-and, unless Tern already runs the same version and stylesheet, links the
-package's plugin directory with `tern plugin link`. An install or update shows
-a toast; a failure shows a warning with the manual command.
-The link reloads Tern's plugins, so the open window picks the stylesheet up. Without the plugin the pill sits below
+output preview in the monospace face. The awaited omp extension factory
+synchronizes this plugin during package-install validation, including
+`install --force`, and during ordinary extension loading. It asks Tern for
+its plugin directory and catalog; an exact three-file normal copy with the
+current ready version and stylesheet is left unchanged. Missing or stale
+files are updated with `tern plugin install <bundled-directory> --force`.
+Known legacy `.path` registrations are migrated automatically through Tern's
+own unlink and copy-install operations; no developer link is created.
+
+The CLI inherits omp's environment, so Tern owns the destination and reload.
+With no daemon running, Tern installs the copy for its next start. A missing
+`tern` executable does not prevent non-Tern use. If Tern is present but
+synchronization fails, package validation or ordinary extension loading
+fails with command diagnostics; there is no deferred session-start retry or
+success toast. Tern's external update is not rolled back if omp later fails
+to save its package configuration. Without the plugin the pill sits below
 the composer.
 
 Design, decisions and Tern qualification evidence:
