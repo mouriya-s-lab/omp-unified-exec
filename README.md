@@ -64,9 +64,10 @@ capability.
 
 When omp renders natively in Tern and a tty session exists:
 
-- **Counter pill.** A terminal icon and the session count, copied from omp's
-  running-work counter, sit on their own line just above omp's counter. Its ✕
-  hides the HUD until a new tty session starts.
+- **Counter pill.** A terminal icon and the stored tty session count sit on
+  their own line just above omp's counter. The row, pill and segment use
+  Tern's native HUD styling across Reader, Spine, Console and color themes.
+  There is no outer hide button; removing the last tty unmounts the pill.
 - **Terminals sheet.** Clicking the pill opens a sheet built like omp's Agents
   sheet: one row per tty session with a status dot, size, PID and running
   time; the selected session's command, state, directory, PID, size, start
@@ -85,14 +86,17 @@ results stay plain text.
 
 **The Tern plugin.** An omp extension cannot add to omp's pill line, so the
 package ships a CSS-only Tern plugin (`fork-features/tern-plugin/`). It moves
-the HUD's row above omp's pill line and sets the sheet's output preview in the
-monospace face; omp's own rows are untouched. omp keeps it installed: at the
-first interactive session inside a Tern pane (detected as omp does, from
+the shared `belowEditor` widget container above omp's pill line and clears
+its container spacing, background and shadow so native HUD margins are not
+applied twice. Other widgets in that container share this placement and reset;
+the plugin does not restyle the pills or omp's editor. It also sets the sheet's
+output preview in the monospace face. omp keeps it installed: at the first
+interactive session inside a Tern pane (detected as omp does, from
 `TERN_PANE_SOCKET` and `TERN_PANE`) it asks Tern with `tern plugin list --json`
-and, unless Tern already runs the plugin's current version, links the
+and, unless Tern already runs the same version and stylesheet, links the
 package's plugin directory with `tern plugin link`. An install or update shows
-a toast; a failure shows a warning with the manual command. The link reloads
-Tern's plugins, so the open window picks the stylesheet up. Without the plugin the pill sits below
+a toast; a failure shows a warning with the manual command.
+The link reloads Tern's plugins, so the open window picks the stylesheet up. Without the plugin the pill sits below
 the composer.
 
 Design, decisions and Tern qualification evidence:

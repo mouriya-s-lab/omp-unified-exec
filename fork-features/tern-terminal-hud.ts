@@ -2,14 +2,14 @@
  * Tern terminal HUD (fork): live view of every tty session for omp's native
  * (Tern Surface Protocol) frontend.
  *
- * A counter pill built like omp's running-work counter (`omp.hud.pill` with
- * one `omp.hud.seg`: a tinted icon and the bare count, the words in the hover
+ * A counter pill on omp's native `omp.hud` row (`omp.hud.pill` with one
+ * `omp.hud.seg`: a tinted icon and the bare count, the words in the hover
  * label) counts the stored tty sessions. Clicking it opens the Terminals
  * sheet, built like omp's Agents sheet: a `picker` listing the sessions with
- * a status dot, and the selected session's retained history and current
- * screen as its preview, colored, scrolling back inside itself and following
- * new output without any tool call. The HUD is read-only; input still goes
- * through write_stdin.
+ * a status dot, and the selected session's facts and newest output rows as
+ * its preview. Open shows its retained history and current screen in a
+ * full-pane terminal page, with typed keys sent through ExecSession.write.
+ * Kill in the sheet or page uses the same termination path as kill_session.
  *
  * Authority: each session's TerminalScreen (src/terminal-screen.ts) and the
  * SessionStore. The HUD keeps no copy of either: every description re-reads
@@ -63,8 +63,6 @@ export interface HudNode {
 
 /** The action a pill click sends (not a Tern built-in action name, which Tern handles itself). */
 export const OPEN_ACTION = "unified-exec.terminals.open";
-/** The action of the pill's ✕: hide the HUD until a new tty session starts. */
-export const DISMISS_ACTION = "unified-exec.terminals.dismiss";
 /** Picker action: open the selected session's full-pane terminal page. */
 export const OPEN_TERMINAL_ACTION = "open";
 /** Picker / page action: kill the session, as `kill_session` does. */
@@ -74,8 +72,6 @@ export const CLOSE_ACTION = "close";
 /** The terminal page's way back to the list (Tern's backdrop and head `esc` send `close` too). */
 export const BACK_ACTION = "back";
 const WIDGET_KEY = "unified-exec-terminals";
-/** Role of the widget's root row: the hook the fork's Tern plugin styles. */
-export const ROOT_ROLE = "unified-exec.terminals";
 /** Role of the sheet preview's Recent output block, which the fork's Tern plugin sets in the mono face. */
 export const TAIL_ROLE = "unified-exec.terminals.tail";
 const COMMAND_MAX = 120;
@@ -154,9 +150,9 @@ function parseItemId(item: unknown): number | undefined {
 /**
  * Pure: the dock row for `count` stored tty sessions (at least one: the
  * widget is unmounted otherwise). omp's running-work counter, copied: a row
- * right-aligned like `omp.hud`, holding an `omp.hud.pill` with one
- * `omp.hud.seg` segment, a tinted icon and the bare count; the words live in
- * the hover label. The ✕ beside it hides the HUD until a new tty session.
+ * with role `omp.hud`, holding an `omp.hud.pill` with one `omp.hud.seg`
+ * segment, a tinted icon and the bare count; the words live in the hover
+ * label. Tern owns the row, pill and segment styling in every chat style.
  */
 export function describeTerminalPill(count: number): HudNode {
 	const label = `${count} terminal${count === 1 ? "" : "s"}`;
@@ -171,15 +167,9 @@ export function describeTerminalPill(count: number): HudNode {
 	};
 	return {
 		k: "row",
-		p: { role: ROOT_ROLE, justify: "end", gap: "xs", align: "center" },
+		p: { role: "omp.hud", justify: "end" },
 		c: [
 			{ k: "row", key: "running", p: { role: "omp.hud.pill", align: "center" }, c: [segment] },
-			{
-				k: "row",
-				key: "dismiss",
-				p: { role: "omp.btn", align: "center", title: "Hide until a new terminal starts", actions: { click: DISMISS_ACTION } },
-				c: [{ k: "text", key: "x", p: { text: "✕", wrap: "none" } }],
-			},
 		],
 	};
 }
@@ -439,7 +429,7 @@ export type KillSession = (id: number) => Promise<boolean>;
 export type SheetResult = { readonly kind: "closed" } | { readonly kind: "open"; readonly id: number };
 
 /**
- * The dock widget: the counter pill and its ✕. omp calls `describe` instead
+ * The dock widget: the counter pill. omp calls `describe` instead
  * of `render` while Tern renders natively; it is only mounted then, so
  * `render` draws nothing.
  */
@@ -449,7 +439,6 @@ class TerminalPill implements Component {
 	constructor(
 		private readonly store: SessionStore,
 		private readonly open: () => void,
-		private readonly dismiss: () => void,
 		private readonly requestRender: () => void,
 	) {}
 
@@ -469,7 +458,6 @@ class TerminalPill implements Component {
 		const parsed = parseHudEvent(event);
 		if (parsed?.kind !== "action") return;
 		if (parsed.act === OPEN_ACTION) this.open();
-		else if (parsed.act === DISMISS_ACTION) this.dismiss();
 	}
 
 	render(): string[] {
@@ -714,19 +702,16 @@ export async function loadNativeRenderingState(): Promise<NativeRenderingState> 
 
 /**
  * Keep the pill mounted in omp's dock exactly while omp renders natively and
- * the store holds a tty session the user has not dismissed; the ANSI TUI
- * never gets a widget (and so no spacer row). Dismissing hides the HUD until
- * a tty session with a higher id than any dismissed one is stored. A pill
- * click opens the Terminals sheet; Open replaces it with the session's
- * terminal page, whose Back reopens the sheet on the same session. At most
+ * the store holds a tty session; the ANSI TUI never gets a widget (and so no
+ * spacer row). A pill click opens the Terminals sheet; Open replaces it with
+ * the session's terminal page, whose Back reopens the sheet on the same
+ * session. At most
  * one of them is open.
  */
 export function mountTerminalHud(pi: ExtensionAPI, store: SessionStore, native: NativeRenderingState, kill: KillSession): void {
 	let ui: ExtensionContext["ui"] | undefined;
 	let pill: TerminalPill | undefined;
 	let sheetOpen = false;
-	/** Highest tty session id present when the user dismissed the HUD. */
-	let dismissedThrough = 0;
 
 	const openSheet = async (): Promise<void> => {
 		const host = ui;
@@ -761,8 +746,7 @@ export function mountTerminalHud(pi: ExtensionAPI, store: SessionStore, native: 
 	};
 
 	const sync = (): void => {
-		const wanted =
-			ui !== undefined && native.isNativeRendering() && ttySessions(store).some((session) => session.id > dismissedThrough);
+		const wanted = ui !== undefined && native.isNativeRendering() && ttySessions(store).length > 0;
 		if (!wanted) {
 			unmount();
 			return;
@@ -777,10 +761,6 @@ export function mountTerminalHud(pi: ExtensionAPI, store: SessionStore, native: 
 				pill = new TerminalPill(
 					store,
 					() => void openSheet(),
-					() => {
-						dismissedThrough = Math.max(dismissedThrough, ...ttySessions(store).map((session) => session.id));
-						sync();
-					},
 					() => tui.requestRender(),
 				);
 				return pill;
@@ -795,7 +775,6 @@ export function mountTerminalHud(pi: ExtensionAPI, store: SessionStore, native: 
 	native.onNativeRenderingChange(sync);
 	pi.on("session_start", async (_event, eventCtx) => {
 		unmount();
-		dismissedThrough = 0;
 		ui = eventCtx.hasUI ? eventCtx.ui : undefined;
 		sync();
 	});

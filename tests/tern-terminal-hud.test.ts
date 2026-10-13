@@ -8,12 +8,10 @@ import {
 	describeTerminalPill,
 	describeTerminalPage,
 	describeTerminalsSheet,
-	DISMISS_ACTION,
 	KILL_ACTION,
 	mountTerminalHud,
 	OPEN_ACTION,
 	OPEN_TERMINAL_ACTION,
-	ROOT_ROLE,
 	TAIL_ROLE,
 	terminalPageFrame,
 	type HudNode,
@@ -65,12 +63,6 @@ function styledEntry(id: number, cols: number, lines = 3): TerminalEntry {
 
 function exited(exitCode: number | null): TerminalState {
 	return { kind: "exited", exitCode, signal: null, failure: null };
-}
-
-function pillOf(node: HudNode): HudNode {
-	const pills = nodesOfKind(node, "row").filter((child) => child.p?.role === "omp.hud.pill");
-	assert.equal(pills.length, 1, "counter contains exactly one pill");
-	return pills[0]!;
 }
 
 function segmentOf(node: HudNode): HudNode {
@@ -143,27 +135,6 @@ function pickerItems(node: HudNode): { readonly id: string; readonly dot: string
 }
 
 describe("terminal HUD pill description", () => {
-	it("describes one counter pill segment and a dismiss button in a right-aligned root row", () => {
-		const view = describeTerminalPill(1);
-		assert.equal(view.k, "row");
-		assert.equal(view.p?.role, ROOT_ROLE, "the fork's Tern plugin styles the root row by this role");
-		assert.equal(view.p?.justify, "end");
-		const pill = pillOf(view);
-		const segment = segmentOf(view);
-		const dismiss = view.c?.[1];
-		assert.ok(dismiss);
-		assert.deepEqual(view.c, [pill, dismiss]);
-		assert.deepEqual(pill.c, [segment]);
-		assert.deepEqual(segment.p?.actions, { click: OPEN_ACTION });
-		assert.deepEqual(segment.c?.map((child) => child.k), ["icon", "text"]);
-		assert.equal(onlyNode(segment, "icon").p?.name, "terminal");
-		assert.equal(dismiss.k, "row");
-		assert.equal(dismiss.key, "dismiss");
-		assert.equal(dismiss.p?.role, "omp.btn");
-		assert.deepEqual(dismiss.p?.actions, { click: DISMISS_ACTION });
-		assert.equal(onlyNode(dismiss, "text").p?.text, "✕");
-	});
-
 	it("shows the stored terminal count as bare text with singular or plural hover titles", () => {
 		for (const count of [1, 2, 7]) {
 			const view = describeTerminalPill(count);
@@ -593,7 +564,6 @@ describe("terminal HUD lifecycle with real sessions", { skip: !isPtyAvailable() 
 		assert.equal(typeof h.calls[0]?.content, "function");
 		assert.deepEqual(h.calls[0]?.options, { placement: "belowEditor" });
 		const view = h.component.describe();
-		assert.equal(view.p?.role, ROOT_ROLE);
 		assert.equal(terminalCount(view), 1, "pipe sessions are excluded from the pill");
 		assert.deepEqual(segmentOf(view).p?.actions, { click: OPEN_ACTION });
 	});
@@ -799,32 +769,6 @@ describe("terminal HUD lifecycle with real sessions", { skip: !isPtyAvailable() 
 		assert.doesNotThrow(() => h.component.describe());
 		assert.doesNotThrow(() => h.sheet.describe());
 		assert.equal(forbiddenRead.mock.callCount(), 0);
-	});
-
-	it("dismisses until a higher-id tty is stored, ignoring old sessions and newer pipes", async (t) => {
-		const h = makeHarness(t, true);
-		await h.emit("session_start");
-		const first = h.spawn(true);
-		const lastDismissed = h.spawn(true);
-		const component = h.component;
-		component.handleNativeEvent({ type: "action", act: DISMISS_ACTION });
-		assert.equal(h.mounted, false);
-		assert.equal(h.calls.at(-1)?.content, undefined);
-		const hiddenCalls = h.calls.length;
-		h.setNative(false);
-		h.setNative(true);
-		const pipe = h.spawn(false);
-		assert.ok(pipe.id > lastDismissed.id);
-		h.store.remove(lastDismissed.id);
-		assert.equal(h.mounted, false);
-		assert.equal(h.calls.length, hiddenCalls, "old tty membership and newer pipes do not undo dismissal");
-		const newer = h.spawn(true);
-		assert.ok(newer.id > lastDismissed.id);
-		assert.equal(h.mounted, true);
-		assert.equal(h.calls.length, hiddenCalls + 1);
-		assert.notEqual(h.component, component);
-		assert.equal(terminalCount(h.component.describe()), 2);
-		assert.ok(h.store.get(first.id), "remount includes retained old tty sessions");
 	});
 
 	for (const [openWith, backWith] of [["activate", "esc"], ["enter", "back"], ["open", "close"]] as const) {

@@ -4,6 +4,9 @@ All notable changes to this project. **Newest entries go on top.**
 
 ## Unreleased
 
+- Make the Tern terminal counter use native `omp.hud` row styling across Reader, Spine and Console and color themes. The CSS-only plugin keeps the shared belowEditor container above omp's counter, but removes its extra margin, padding, background and shadow so Spine does not add a second inset or plate; co-located widgets share this move/reset, while native roles own the pills' appearance. Remove the outer ✕ and its dismiss-until-new-tty state; stored tty sessions remain counted until removed, and the Terminals sheet/page retain Kill.
+- Verified in real Tern 0.8.3 / omp 18.10.3: light/dark themes, Reader/Spine/Console at 1280×800 and 700×800, genuine Spine pane blur, hover, Close/Esc, list Kill and terminal-page echo/Kill, immediate new-tty remount, and eight no-tty/plugin-free comparisons with real working/todo HUD rows. Counter row/pill right-edge differences were 0px; composer/meter/working/todo geometry was unchanged with no tty. `npm test`: 456 pass, 0 fail, 4 individual skips (Node PTY suites unavailable separately); mandatory Bun real-PTY tests: 54 pass, 0 fail, no skips.
+
 - Rewrite `README.md` for the fork: install through omp, the Tern terminal HUD and its auto-installed plugin, omp presentation, OSC 10/11 answers and the fork's layout lead; the tool reference keeps upstream's semantics in condensed form. Upstream's npm badges, install commands and maintenance notice are gone. A Chinese translation, `README.zh-CN.md`, mirrors it section for section, and each links the other. `fork-features/README.md` records both as fork-owned and how to resolve them on upstream syncs.
 
 ## 0.14.6 - 2026-10-12

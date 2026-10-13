@@ -34,13 +34,13 @@ omp install https://github.com/mouriya-s-lab/omp-unified-exec
 
 当 omp 在 Tern 里原生渲染、并且存在 tty 会话时：
 
-- **计数按钮。** 一个终端图标加会话数，仿照 omp 的运行任务计数器，单独一行放在 omp 计数器正上方。它的 ✕ 会隐藏 HUD，直到有新的 tty 会话启动。
+- **计数按钮。** 一个终端图标加存储中的 tty 会话数，单独一行放在 omp 计数器正上方。整行、药丸和分段使用 Tern 原生 HUD 样式，跟随 Reader、Spine、Console 和配色主题。没有外层隐藏按钮；最后一个 tty 被移除后，计数按钮自动卸载。
 - **Terminals 面板。** 点击计数按钮打开一个仿照 omp Agents 面板的面板：每个 tty 会话一行，带状态点、尺寸、PID 和运行时长；选中会话的命令、状态、目录、PID、尺寸、启动时间、可点击的日志路径和最新几行输出作为预览。↑/↓ 或点击选择会话，`x` / Kill 按 `kill_session` 的方式结束它，Esc / Close 关闭面板。
 - **终端页。** Enter / Open 把会话打开成一个仿照 omp Console 的全屏页：显示保留的历史和当前屏幕，带颜色、按会话自身宽度显示，跟随新输出，并可向上回滚。键入的按键会发给会话（与 `write_stdin` 的写法相同，模型能看到效果）；Esc / Back 返回面板；Kill 结束会话。
 
 HUD 直接读取会话，不保存任何副本。它只在 omp 原生渲染时存在，因此 omp 的 ANSI TUI 不会多出一行。模型看到的结果仍是纯文本。
 
-**Tern 插件。** omp 扩展无法往 omp 的计数器那一行里加东西，所以本包附带一个只含 CSS 的 Tern 插件（`fork-features/tern-plugin/`）。它把 HUD 那一行移到 omp 计数器上方，并让面板的输出预览使用等宽字体；omp 自己的各行不受影响。插件由 omp 负责保持安装：在 Tern pane 里的第一个交互会话启动时（与 omp 自己的判断方式相同，看 `TERN_PANE_SOCKET` 和 `TERN_PANE`），它用 `tern plugin list --json` 询问 Tern；除非 Tern 已在运行当前版本的插件，否则用 `tern plugin link` 链接本包的插件目录。安装或更新时弹出提示，失败时给出附带手动命令的警告。link 会让 Tern 重新加载插件，已打开的窗口也会用上新样式。没有插件时，计数按钮显示在输入框下方。
+**Tern 插件。** omp 扩展无法往 omp 的计数器那一行里加东西，所以本包附带一个只含 CSS 的 Tern 插件（`fork-features/tern-plugin/`）。它把共享的 `belowEditor` widget 容器移到 omp 计数器上方，清除容器的间距、背景和阴影，避免与原生 HUD 边距重复叠加。同一容器中的其他 widget 也共享这个位置和重置；插件不重设药丸外观或 omp 的输入框，并让面板的输出预览使用等宽字体。插件由 omp 负责保持安装：在 Tern pane 里的第一个交互会话启动时（与 omp 自己的判断方式相同，看 `TERN_PANE_SOCKET` 和 `TERN_PANE`），它用 `tern plugin list --json` 询问 Tern；除非 Tern 已在运行相同版本和样式表的插件，否则用 `tern plugin link` 链接本包的插件目录。安装或更新时弹出提示，失败时给出附带手动命令的警告。link 会让 Tern 重新加载插件，已打开的窗口也会用上新样式。没有插件时，计数按钮显示在输入框下方。
 
 设计、决策和 Tern 实测记录：
 [docs/IV-0002-output-lifecycle-and-rendering.md](docs/IV-0002-output-lifecycle-and-rendering.md)。

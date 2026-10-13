@@ -1,22 +1,21 @@
 /*
  * omp-unified-exec's terminals pill sits above omp's pill line.
  *
- * omp's dock (`.sf-dock`) starts with its pill line (`omp.hud`) and ends with
- * the `belowEditor` widget container, where omp-unified-exec describes its
- * row (`unified-exec.terminals`). Tern's Reader style already lays that row
- * on omp's 720px line (`.sf-chat-reader.sf-dock > .sf-col:not([data-role]) >
- * *`: centred, `calc(100% - 32px)` wide, at most 720px), and the row is
- * right-aligned like omp's pills, so only its place in the dock changes:
- * `order: -1` puts the container first, a line of its own above omp's pill
- * line. omp's own rows keep their flow and geometry: rearranging them broke
- * the activity row during a running turn. The container keeps the 6px omp's
- * pill line keeps below itself, so the pill clears the meter's labels as
- * omp's counter does. While no tty session is stored the widget is
- * unmounted and nothing here matches.
+ * omp's dock ends with the shared `belowEditor` widget container. Move that
+ * container above omp's counter line; each terminal row uses native `omp.hud`
+ * styling for its margins and Reader, Spine or Console geometry.
+ *
+ * Clear only the container spacing, background and inset shadow that Spine
+ * otherwise adds around the native HUD row. Other belowEditor widgets share
+ * this placement and reset. With no widgets the selector still matches the
+ * empty, zero-size container, not the editor.
  */
-.sf-dock > .sf-col.gap-none:last-child {
+html .sf-region.sf-dock > .sf-col.gap-none:last-child {
 	order: -1;
-	margin-bottom: 6px;
+	margin: 0;
+	padding: 0;
+	background: none;
+	box-shadow: none;
 }
 
 /*
