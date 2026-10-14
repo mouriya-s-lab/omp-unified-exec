@@ -19,7 +19,7 @@ upgrades is in [fork-features/README.md](fork-features/README.md).
 ## Install
 
 ```bash
-omp install https://github.com/mouriya-s-lab/omp-unified-exec
+omp install https://github.com/oh-my-omp/omp-unified-exec
 ```
 
 Remove an existing `pi-unified-exec` first (`omp plugin uninstall
@@ -30,7 +30,7 @@ omp also installs the bundled Tern plugin as a normal copy when `tern` is on
 PATH. Updates use the same command with `--force`:
 
 ```bash
-omp plugin install https://github.com/mouriya-s-lab/omp-unified-exec --force
+omp plugin install https://github.com/oh-my-omp/omp-unified-exec --force
 ```
 
 The Tern update finishes before this command succeeds; no separate Tern

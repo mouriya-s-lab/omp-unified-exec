@@ -5,12 +5,12 @@
 为 [oh-my-pi](https://github.com/can1357/oh-my-pi)（omp）提供长时间运行的 shell
 会话，并在 Tern 里带一个终端 HUD。模型执行的每条命令都会成为一个会话，由模型通过写入和轮询来驱动，而不是一次阻塞到底的调用：开发服务器、REPL、`ssh`、`sudo`、全屏程序和长时间任务在多轮对话之间持续运行，人也可以在 Tern 里查看它们、向它们输入。
 
-本仓库 fork 自 [iamwrm/pi-unified-exec](https://github.com/iamwrm/pi-unified-exec)，后者是 codex `unified_exec` 的 Pi 移植。工具接口（`exec_command`、`write_stdin`、`set_on_exit`、`kill_session`、`list_sessions`）及其语义来自上游；fork 补上了 omp 和 Tern 需要的部分。fork 的全部改动、每项改动的原因，以及 omp/Tern 升级后如何重新验证，见 [fork-features/README.md](fork-features/README.md)。
+本仓库 fork 自 [iamwrm/pi-unified-exec](https://github.com/iamwrm/pi-unified-exec)，后者是 codex `unified_exec` 的 Pi 移植。工具接口（`exec_command`、`write_stdin`、`set_on_exit`、`kill_session`、`list_sessions`）及其语义来自上游；fork 补上了 omp 和 Tern 需要的部分。fork 的全部改动、每项改动的原因，以及 omp/Tern 升级后如何重新验证，见 [fork-features/README.zh-CN.md](fork-features/README.zh-CN.md)。
 
 ## 安装
 
 ```bash
-omp install https://github.com/mouriya-s-lab/omp-unified-exec
+omp install https://github.com/oh-my-omp/omp-unified-exec
 ```
 
 请先卸载已有的 `pi-unified-exec`（`omp plugin uninstall pi-unified-exec`）：两者注册的是同一组工具。本 fork 不向 npm 发布任何内容。
@@ -18,7 +18,7 @@ omp install https://github.com/mouriya-s-lab/omp-unified-exec
 当 PATH 中存在 `tern` 时，omp 也会把附带的 Tern 插件正常安装为副本。更新时执行同一安装命令并加上 `--force`：
 
 ```bash
-omp plugin install https://github.com/mouriya-s-lab/omp-unified-exec --force
+omp plugin install https://github.com/oh-my-omp/omp-unified-exec --force
 ```
 
 Tern 更新会在这条命令成功返回前完成，无需单独执行 Tern 命令，也不使用开发链接。
@@ -376,10 +376,10 @@ EXPECT_PTY=1 bun test ./tests/tern-terminal-hud.test.ts ./tests/omp-presentation
 npm run test:tui                           # Pi tmux acceptance (skips without tmux)
 ```
 
-在 Node 下加载不到预编译包时，Node PTY 测试会跳过；Bun 那条命令会用真实的 PTY 会话跑 HUD 生命周期测试。Tern 上的行为在真实的 Tern 窗口里验证，做法见 [fork-features/README.md](fork-features/README.md)。
+在 Node 下加载不到预编译包时，Node PTY 测试会跳过；Bun 那条命令会用真实的 PTY 会话跑 HUD 生命周期测试。Tern 上的行为在真实的 Tern 窗口里验证，做法见 [fork-features/README.zh-CN.md](fork-features/README.zh-CN.md)。
 
 ## 开发与上游
 
-[docs/DEV.md](docs/DEV.md) 是上游的维护者指南（开发流程、测试方法、codex 源码对照）；其中的 npm 发布部分不适用于本 fork，因为 fork 的发布 workflow 已停用。上游改动通过每日的 `Sync upstream` workflow 合入；fork 改动如何与上游隔离、同步冲突如何处理，见 [fork-features/README.md](fork-features/README.md)。
+[docs/DEV.md](docs/DEV.md) 是上游的维护者指南（开发流程、测试方法、codex 源码对照）；其中的 npm 发布部分不适用于本 fork，因为 fork 的发布 workflow 已停用。上游改动通过每日的 `Sync upstream` workflow 合入；fork 改动如何与上游隔离、同步冲突如何处理，见 [fork-features/README.zh-CN.md](fork-features/README.zh-CN.md)。
 
 与上游一样采用 [MIT](./LICENSE) 许可。

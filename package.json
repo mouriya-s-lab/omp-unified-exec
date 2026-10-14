@@ -14,9 +14,9 @@
 	"author": "Ren Wang <iamwrm@gmail.com>",
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/mouriya-s-lab/omp-unified-exec.git"
+		"url": "git+https://github.com/oh-my-omp/omp-unified-exec.git"
 	},
-	"homepage": "https://github.com/mouriya-s-lab/omp-unified-exec#readme",
+	"homepage": "https://github.com/oh-my-omp/omp-unified-exec#readme",
 	"type": "module",
 	"scripts": {
 		"check": "tsc --noEmit",
