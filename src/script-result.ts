@@ -54,6 +54,7 @@ const outputFields = {
 	signal: Type.Optional(Type.String({ description: "Signal that terminated the process, if any." })),
 	failure_message: Type.Optional(Type.String()),
 	log_path: Type.Optional(Type.String({ description: "File containing the complete output stream." })),
+	terminal_url: Type.Optional(Type.String({ description: "Non-consuming term:// terminal projection; readable after exit." })),
 	wall_time_seconds: Type.Number(),
 	terminal: Type.Optional(terminalSchema),
 };
@@ -88,6 +89,7 @@ export function processScriptResult(shape: ProcessResultDetails): ProcessScriptR
 		signal: optionalMeta(shape.signal),
 		failure_message: optionalMeta(shape.failure_message),
 		log_path: optionalMeta(shape.log_path),
+		terminal_url: shape.terminal_url,
 		wall_time_seconds: shape.wall_time_seconds,
 		terminal: shape.terminal,
 		note: optionalMeta(shape.note),
@@ -123,6 +125,7 @@ export function killScriptResult(shape: KillResultDetails): KillScriptResult {
 		signal: optionalMeta(shape.signal),
 		failure_message: optionalMeta(shape.failure_message),
 		log_path: optionalMeta(shape.log_path),
+		terminal_url: shape.terminal_url,
 		wall_time_seconds: shape.wall_time_seconds,
 		terminal: shape.terminal,
 	});
@@ -177,6 +180,7 @@ export const listSessionsScriptResultSchema = Type.Object({
 			exit_code: Type.Optional(Type.Number()),
 			signal: Type.Optional(Type.String()),
 			log_path: Type.Optional(Type.String()),
+			terminal_url: Type.Optional(Type.String()),
 		}),
 	),
 	active_count: Type.Number(),
@@ -198,6 +202,7 @@ export function listSessionsScriptResult(value: {
 		exit_code?: number | null;
 		signal?: string;
 		log_path?: string;
+		terminal_url?: string;
 	}>;
 	active_count: number;
 	just_exited_count: number;
@@ -217,6 +222,7 @@ export function listSessionsScriptResult(value: {
 				exit_code: s.exit_code ?? undefined,
 				signal: optionalMeta(s.signal),
 				log_path: optionalMeta(s.log_path),
+				terminal_url: s.terminal_url,
 			}),
 		),
 		active_count: value.active_count,

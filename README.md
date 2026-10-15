@@ -205,6 +205,31 @@ history_lines: 2                   (optional: lines scrolled off above the scree
   divided by `cols` rows). Lines scrolled past it before a call reports them
   set `history_may_be_truncated: true`; they are only in the log.
 
+#### Reading retained terminals on omp
+
+TTY results and `list_sessions` include a process-unique `terminal_url`, such as
+`term://3-9f2c1a7e-…`. The normal screen's retained history and screen remain
+readable independently of result consumption:
+
+| Read path | Content |
+|---|---|
+| `term://<key>` | All retained normal-screen physical rows, without trailing spaces or trailing empty rows. |
+| `term://<key>/screen` | The active screen, including an active alternate screen. |
+| `term://<key>/page/2` | The second page of retained rows; each page has the session's `rows` rows. |
+| `term://<key>/page/-1` | The last page; negative page numbers count from the end. |
+| `term://<key>:raw:1-2` / `term://<key>:raw:-3` | The existing `read` head/tail selectors, with no context rows in raw mode. |
+
+Reads do not consume output, advance observation markers or remove sessions.
+An out-of-range page reports the total page count; an unknown key reports
+`unknown_terminal`. Pipe sessions have no terminal resource.
+
+After output closes and every accepted byte is parsed, the session freezes its
+physical rows, active styled cells, geometry, cursor and current appearance.
+The same URL remains readable after short-command completion, normal exit,
+confirmed kill or LRU removal, until the omp process ends. Frozen resources
+are not deleted; unfinished live projections need not survive plugin shutdown.
+Keys remain distinct across child agents and extension reloads.
+
 ### `write_stdin`
 
 Drives or polls an existing session.
@@ -403,8 +428,9 @@ DEFAULT_MAX_LINES            = 2000
 - **Shutdown** sends SIGTERM to every session and SIGKILLs survivors after 1s.
 - **LRU eviction** at 64 sessions takes the oldest non-protected one, preferring
   exited sessions; the 8 most recent are never evicted.
-- **tty observations** are serialized per session; streaming updates and the
-  Tern HUD read the screen without consuming it.
+- **tty observations** are serialized per session; streaming updates, `read term://`
+  and the Tern HUD read the screen without consuming it. Frozen terminal resources
+  outlive session-store membership.
 - **Logs** live in the temp directory (`/tmp` or `%TEMP%`) and are never
   deleted by the package. Inspect raw PTY logs with a non-executing viewer, not
   `cat`.

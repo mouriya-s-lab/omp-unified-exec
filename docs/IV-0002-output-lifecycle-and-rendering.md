@@ -88,11 +88,24 @@ The initiative establishes a durable output contract across these layers:
   rendering legacy/fallback details. The one styled projection, the Tern HUD
   screen, is re-encoded from the emulator's cell attributes as SGR only; no
   child byte reaches it.
-- tty observations are consuming and serialized per session; a cancelled empty
-  poll does not observe. Streaming snapshots and HUD screens never consume. The
-  emulator is read only after every written chunk is parsed (HUD screens may lag
-  unparsed output), and released after the session leaves ownership and its
-  pending writes are parsed; the HUD reads only sessions still in the store.
+- Consuming tty observations, non-consuming projections and emulator disposal
+  are serialized per session. A cancelled empty poll does not observe.
+  Reads use an ordered parser barrier covering bytes accepted before the read,
+  rather than waiting for continuous output to become idle. Streaming snapshots
+  and HUD screens may lag unparsed output and never consume; the HUD reads only
+  sessions still in the store.
+- On omp, `read term://<session-id>-<unique-suffix>` reads normal-screen retained
+  physical rows, `/screen` reads the active screen, and `/page/N` reads `rows`
+  physical rows per page (negative pages count from the end). Existing `read`
+  selectors provide head/tail. Reads never advance observation markers or remove
+  sessions. Unknown keys report `unknown_terminal`; out-of-range pages report
+  total pages. Pipe sessions do not register terminal resources.
+- The session freezes one immutable terminal projection only after output
+  closure and parser completion, including normal retained rows, active styled
+  cells, geometry, cursor and appearance. Normal removal, LRU termination and
+  short-command release await that freeze before disposing the emulator.
+  Frozen projections remain addressable until process exit, even across plugin
+  activations; shutdown may discard only its own unfinished live resources.
 - Represent operation and state explicitly (`operation`, `status`, `running`),
   rather than inferring liveness from the presence of `session_id`.
 - Preserve failed-kill ownership: an unconfirmed kill remains registered and is
@@ -153,6 +166,9 @@ The initiative establishes a durable output contract across these layers:
 | tty result = unseen history + full current screen + cursor | A self-contained screen matches what a human sees and does not ask the model to splice earlier results. Rejected: a first-changed-row delta, which leaves full-screen redraws without context. Lines scrolled off since the last observation that equal the previous screen's rows at the same position were already reported and are skipped; an unchanged screen reports `screen_changed: false`. Results represent only plain text and the cursor (owner's choice); styling stays in the log and, on Tern, in the HUD. |
 | Align history with an xterm marker on the observed screen's top row | Each observation registers a marker at the screen's top row; the next observation's history starts there, so positional comparison with the previous screen is exact. The marker follows the row as it scrolls and is disposed when the row is trimmed from the history, so the emulator keeps its history for the HUD. Rejected: erasing the emulator's scrollback (ED3) after each observation, which left the HUD screen nothing to scroll back through; counting scroll events into absolute line numbers, which leaving the alternate screen, DECSTBM regions, ED3 and RIS all break. |
 | Bound tty history by cells, not lines | History rows = 240000 cells / `cols`, at least one screen. `history_may_be_truncated` is reported when the marked row was evicted while the history sits at that cap (on the first observation, whenever it sits at the cap); a child's ED3 or RIS also drops the marker but erased those rows itself. |
+| One process-global terminal index and `term` handler | Child activations and reloads may reuse numeric session ids. A UUID suffix and a `Symbol.for` process registry keep keys distinct and old resources readable; one scheme handler resolves the shared index at request time and is never unregistered. |
+| Freeze at output closure plus ordered parser completion | A process-exit event may precede trailing output. The session owns the freeze promise; the registry stores only the derived live/frozen projection, not a second process state. The emulator remains available for consuming exit observations until release. Rejected: log replay and retaining live emulators as final resources. |
+| Retain frozen resources for the omp process lifetime | Frozen data keeps normal physical rows and only the active styled grid, never xterm cell references or the live session graph. Memory accumulates with completed tty sessions, as logs do. LRU still sends only its existing SIGTERM: a child that ignores it retains its live emulator until actual output closure; no new escalation mechanism is introduced. |
 | HUD logic inside the omp extension; a CSS-only Tern plugin places the pill and sets the preview's output in the mono face | The sessions and their emulators live in this process; a dock widget reads them directly. A Luau plugin block would need the screen pushed to it across processes (a second copy of state) and shows as a pane, not a floating panel (owner's choice, [#17](https://github.com/mouriya-s-lab/omp-unified-exec/issues/17)). The fork's Tern plugin (`fork-features/tern-plugin/`) only injects CSS (owner's choice): a stylesheet listed in its manifest `styles`, which Tern loads with the plugin; the window entry Tern requires of every plugin is empty. |
 | Synchronize a normal Tern copy in the awaited omp factory | `omp plugin install URL --force` must update the bundled Tern plugin before success, not ask the operator to unlink/install or wait for a session. omp materializes the package then awaits extension factories during validation. `withHostPresentation` therefore awaits `initializeTernPlugin` before activation, both during installation and ordinary loading. The installed package owns source assets; Tern's CLI owns its directory, registration and reload. `plugin dir --json` and `list --json`, together with the exact regular three-file normal copy, determine whether work is needed. Missing/stale files use `plugin install DIR --force --json`; an exact ready copy is untouched. Only Tern's precise linked-target collision, a matching canonical regular `.path` file and a fresh catalog identifying this plugin allow official unlink followed by copy installation. Other failures never remove a registration. No developer link, session-start installation IO, toast, argv parsing, host patch, trust change or lifecycle script is used. Missing Tern skips this integration; an available but failing Tern rejects package validation and ordinary loading with bounded sanitized command diagnostics. Each CLI operation has a 75-second timeout for the documented 60-second reload wait. Offline Tern installs for next start. omp's package rollback does not roll back an already completed external Tern update. |
 | Pill = omp's native running-work counter | The widget describes an `omp.hud` root row with `justify: "end"`, holding `omp.hud.pill` with one `omp.hud.seg`: a terminal icon and the bare stored tty count, words in its hover/aria label, and `unified-exec.terminals.open` as its click action (Tern handles built-in action names itself). The row has no plugin gap or alignment override, so Tern's native rules own its wrapping, spacing, column alignment and chat-style changes. The outer ✕ and complete dismiss lifecycle are removed; OPEN remains the only pill action. Naturally exited tty sessions still count while stored; pipes do not. `belowEditor` avoids the leading spacer of `aboveEditor`. |
@@ -170,7 +186,8 @@ The initiative establishes a durable output contract across these layers:
 | Area | Location |
 |---|---|
 | Terminal-control scanner | `src/output-safety.ts` |
-| tty terminal emulator, observations, snapshots, styled screens, parse notifications | `src/terminal-screen.ts`, owned by `ExecSession` (`src/session.ts`); released by `src/session-store.ts`; tests `tests/terminal-screen.test.ts` |
+| tty terminal emulator, serialized observations/projections/disposal, snapshots, styled screens, parse notifications | `src/terminal-screen.ts`, owned by `ExecSession` (`src/session.ts`); session-owned freeze after output closure, release from `src/session-store.ts` |
+| Process-global terminal keys, live/frozen projections, physical paging and omp internal URL handler | `fork-features/terminal-resource.ts`, `fork-features/terminal-url.ts`; initialized by `withHostPresentation` before activation |
 | Session membership notifications | `SessionStore.subscribe` in `src/session-store.ts` |
 | Shared output envelope, truncation, process/kill text | `src/tool-result.ts` |
 | Codemode script schemas and projections | `src/script-result.ts`, `tests/script-result.test.ts` |

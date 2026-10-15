@@ -991,6 +991,7 @@ function activate(pi: ExtensionAPI, appearance: () => TerminalAppearance = () =>
 		ctx.coordinator.shutdown();
 		const drained = ctx.store.terminateAll();
 		for (const s of ctx.pendingSessions) {
+			void s.releaseForShutdown();
 			if (!s.hasExited) {
 				s.terminate();
 				drained.push(s);
@@ -1376,6 +1377,7 @@ function activate(pi: ExtensionAPI, appearance: () => TerminalAppearance = () =>
 					failure_message: s.failureMessage ?? undefined,
 					output_bytes_total: s.totalBytesSeen,
 					log_path: s.logPath,
+					terminal_url: s.terminalUrl,
 				}));
 			const toolTimeUtc = nowUtcIso();
 			const lines = sessions.length
@@ -1386,7 +1388,7 @@ function activate(pi: ExtensionAPI, appearance: () => TerminalAppearance = () =>
 						const wake = s.wake_armed ? " [wake]" : "";
 						return `  ${String(s.session_id).padStart(3)}  pid=${String(s.pid ?? "?").padStart(6)}  ${
 							s.tty ? "tty" : "pipe"
-						}  ${((s.elapsed_ms / 1000).toFixed(1) + "s").padStart(8)}${wake}  ${oneLineCommand(s.command, 60)}${exitedSuffix}\n        log: ${s.log_path}`;
+						}  ${((s.elapsed_ms / 1000).toFixed(1) + "s").padStart(8)}${wake}  ${oneLineCommand(s.command, 60)}${exitedSuffix}\n        log: ${s.log_path}${s.terminal_url ? `\n        terminal_url: ${s.terminal_url}` : ""}`;
 					})
 				: ["  (no live sessions)"];
 			const header = reaped.length
