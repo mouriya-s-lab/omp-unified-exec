@@ -130,7 +130,7 @@ Runs a command in a persistent session.
 | `shell` | string | `bash` | Shell binary. On Windows: `bash` if found, else `powershell`. `cmd` / `powershell` / `pwsh` get shell-appropriate flags. |
 | `tty` | boolean | `false` | Allocate a PTY. Output is then the rendered terminal screen; see [PTY sessions](#pty-sessions-tty-true). |
 | `cols` | number | `120` | PTY width (`tty: true` only). Clamped to [20, 500]. |
-| `rows` | number | `30` | PTY height (`tty: true` only). Clamped to [5, 300]. |
+| `rows` | number | `80` | PTY height (`tty: true` only). Clamped to [5, 300]. |
 | `yield_time_ms` | number | `10_000` | How long this call stays attached waiting for output (not the command's lifetime), clamped to [250, 30_000]. |
 | `on_exit` | `"none"` \| `"wake"` | `"none"` | Policy for exits nobody is observing. `"wake"`: one follow-up prompt resumes the agent — only when the human explicitly wants auto-resume. Change later with `set_on_exit`. |
 
@@ -181,7 +181,7 @@ shows rather than the raw stream:
 session_id: 3
 …
 tty: true
-terminal: normal screen 120x30, cursor row 4 col 5
+terminal: normal screen 120x80, cursor row 4 col 5
 history_lines: 2                   (optional: lines scrolled off above the screen since the last call)
 ---
 <history lines not yet reported>
@@ -434,13 +434,13 @@ session_id: 1
 > exec_command(cmd="python3 -q", tty=true, yield_time_ms=1500)
 [still running]
 session_id: 1
-terminal: normal screen 120x30, cursor row 1 col 5
+terminal: normal screen 120x80, cursor row 1 col 5
 ---
 >>>
 
 > write_stdin(session_id=1, chars="print(7*6)\r", yield_time_ms=1000)
 [still running]
-terminal: normal screen 120x30, cursor row 3 col 5
+terminal: normal screen 120x80, cursor row 3 col 5
 ---
 >>> print(7*6)
 42

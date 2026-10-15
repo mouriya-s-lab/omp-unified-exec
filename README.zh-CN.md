@@ -68,7 +68,7 @@ CLI 继承 omp 的环境，由 Tern 决定目标目录并负责重新加载。da
 | `shell` | string | `bash` | Shell 程序。Windows 上找得到 `bash` 就用它，否则用 `powershell`。`cmd` / `powershell` / `pwsh` 会带上各自对应的参数。 |
 | `tty` | boolean | `false` | 分配 PTY。此时输出是渲染后的终端屏幕；见 [PTY 会话](#pty-sessions)。 |
 | `cols` | number | `120` | PTY 宽度（仅 `tty: true`）。限制在 [20, 500]。 |
-| `rows` | number | `30` | PTY 高度（仅 `tty: true`）。限制在 [5, 300]。 |
+| `rows` | number | `80` | PTY 高度（仅 `tty: true`）。限制在 [5, 300]。 |
 | `yield_time_ms` | number | `10_000` | 本次调用保持连接、等待输出的时长（不是命令的生命期），限制在 [250, 30_000]。 |
 | `on_exit` | `"none"` \| `"wake"` | `"none"` | 无人观察时进程退出的处理策略。`"wake"`：发一条后续提示唤醒 agent——仅在人明确希望自动恢复时使用。之后可用 `set_on_exit` 修改。 |
 
@@ -116,7 +116,7 @@ tty 会话把子进程写出的每个字节按顺序送进一个尺寸为会话 
 session_id: 3
 …
 tty: true
-terminal: normal screen 120x30, cursor row 4 col 5
+terminal: normal screen 120x80, cursor row 4 col 5
 history_lines: 2                   (optional: lines scrolled off above the screen since the last call)
 ---
 <history lines not yet reported>
@@ -297,13 +297,13 @@ session_id: 1
 > exec_command(cmd="python3 -q", tty=true, yield_time_ms=1500)
 [still running]
 session_id: 1
-terminal: normal screen 120x30, cursor row 1 col 5
+terminal: normal screen 120x80, cursor row 1 col 5
 ---
 >>>
 
 > write_stdin(session_id=1, chars="print(7*6)\r", yield_time_ms=1000)
 [still running]
-terminal: normal screen 120x30, cursor row 3 col 5
+terminal: normal screen 120x80, cursor row 3 col 5
 ---
 >>> print(7*6)
 42

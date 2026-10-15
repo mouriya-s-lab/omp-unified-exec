@@ -14,7 +14,7 @@ import { IS_WINDOWS, resolveBinary } from "./shell.ts";
 
 /** PTY geometry used when the caller does not choose one. */
 export const DEFAULT_PTY_COLS = 120;
-export const DEFAULT_PTY_ROWS = 30;
+export const DEFAULT_PTY_ROWS = 80;
 
 export interface SpawnOptions {
 	command: string[];
