@@ -9,6 +9,7 @@ import {
 	renderProcessResultText,
 } from "../src/tool-result.ts";
 import type { TerminalObservation } from "../src/terminal-screen.ts";
+import { TerminalScreen } from "../src/terminal-screen.ts";
 
 const encoder = new TextEncoder();
 
@@ -161,41 +162,29 @@ describe("bounded tool results", () => {
 		assert.doesNotMatch(text, /history_lines:|history_may_be_truncated:|omitted_bytes:/);
 	});
 
-	it("describes normal-screen history and its capacity warning in process and kill headers", () => {
-		const observation: TerminalObservation = {
-			kind: "rendered",
-			view: { screen: "normal", cols: 80, rows: 24, cursor: { row: 24, col: 1 } },
-			text: "old-1\nold-2\ncurrent",
-			historyLines: 2,
-			historyMayBeTruncated: true,
-		};
-		const process = screenResult(observation);
-		const kill = finalizeKillResult({
+	it("returns the final active screen even after an unchanged observation, without incremental metadata", async (t) => {
+		const screen = new TerminalScreen(20, 5, () => {});
+		t.after(() => screen.release());
+		screen.write(encoder.encode(Array.from({ length: 12 }, (_, i) => String(i + 1)).join("\r\n") + "\r\n"));
+		await screen.observe();
+		assert.equal((await screen.observe()).kind, "unchanged");
+		const projection = await screen.project();
+		const details = finalizeProcessResult({
+			operation: "exec_command",
 			wallTimeSec: 0.1,
-			collected: { kind: "screen", observation },
-			sessionId: 5,
-			requestedSignal: "SIGTERM",
-			exitCode: undefined,
-			signal: "SIGTERM",
+			collected: { kind: "final-screen", projection, terminalUrl: "term://unit" },
+			sessionId: undefined,
+			exitCode: 0,
+			signal: null,
 			failure: null,
 			tty: true,
-			escalated: false,
-			killed: true,
 		});
-		for (const details of [process, kill]) {
-			assert.equal(details.output, observation.text);
-			assert.deepEqual(details.terminal, {
-				screen: "normal", cols: 80, rows: 24, cursor_row: 24, cursor_col: 1, screen_changed: true,
-				history_lines: 2, history_may_be_truncated: true,
-			});
-			assert.equal(Object.hasOwn(details, "omitted_bytes"), false);
-		}
-		for (const text of [renderProcessResultText(process), renderKillResultText(kill)]) {
-			assert.match(text, /^terminal: normal screen 80x24, cursor row 24 col 1$/m);
-			assert.match(text, /^history_lines: 2$/m);
-			assert.match(text, /^history_may_be_truncated: true$/m);
-			assert.doesNotMatch(text, /omitted_bytes:/);
-		}
+		assert.equal(details.output, "9\n10\n11\n12");
+		assert.deepEqual(details.terminal, {
+			screen: "normal", cols: 20, rows: 5, cursor_row: 5, cursor_col: 1,
+			retained_rows: 12, history_may_be_truncated: false,
+		});
+		assert.doesNotMatch(renderProcessResultText(details), /screen_changed:|history_lines:/);
 	});
 
 	it("represents a failed kill as a live, retained session", () => {

@@ -18,7 +18,7 @@
 
 import type { HeadTailBuffer } from "./head-tail-buffer.ts";
 import type { Gate, Notify } from "./notify.ts";
-import type { TerminalObservation } from "./terminal-screen.ts";
+import type { TerminalObservation, TerminalProjection } from "./terminal-screen.ts";
 
 const POST_EXIT_CLOSE_WAIT_MS = 50;
 
@@ -68,7 +68,14 @@ export interface ScreenOutput {
 	readonly terminalUrl?: string;
 }
 
-export type CollectResult = StreamOutput | ScreenOutput;
+/** Completed tty output comes from the same immutable projection as term://. */
+export interface FinalScreenOutput {
+	readonly kind: "final-screen";
+	readonly projection: TerminalProjection;
+	readonly terminalUrl: string;
+}
+
+export type CollectResult = StreamOutput | ScreenOutput | FinalScreenOutput;
 
 /** Nothing observed (spawn failure, cancelled wait). */
 export const NO_OUTPUT: StreamOutput = { kind: "stream", bytes: new Uint8Array(0), omittedBytes: 0 };

@@ -16,8 +16,8 @@ import { closeSync, createWriteStream, openSync, type WriteStream } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { discardLiveTerminal, freezeTerminal, registerTerminal } from "../fork-features/terminal-resource.ts";
-import { type CollectResult, collectOutputUntilDeadline } from "./collect.ts";
+import { discardLiveTerminal, freezeTerminal, readTerminal, registerTerminal } from "../fork-features/terminal-resource.ts";
+import { type CollectResult, collectOutputUntilDeadline, type FinalScreenOutput } from "./collect.ts";
 import { HeadTailBuffer } from "./head-tail-buffer.ts";
 import { Gate, Notify } from "./notify.ts";
 import { DEFAULT_PTY_COLS, DEFAULT_PTY_ROWS, type SpawnedChild, spawnChild } from "./pty.ts";
@@ -321,9 +321,9 @@ export class ExecSession {
 	}
 
 	/**
-	 * Wait until `deadlineMs` (or exit/abort), then consume this session's
-	 * output: pipe sessions drain their retained bytes; tty sessions observe
-	 * their terminal screen (see terminal-screen.ts).
+	 * Wait until `deadlineMs` (or exit/abort). Pipe sessions drain retained
+	 * bytes; running tty sessions consume an observation, and completed tty
+	 * sessions return their immutable final active screen.
 	 */
 	async collect(opts: { deadlineMs: number; externalAbort?: AbortSignal; postExitCloseWaitMs?: number }): Promise<CollectResult> {
 		const drained = await collectOutputUntilDeadline({
@@ -336,7 +336,18 @@ export class ExecSession {
 			postExitCloseWaitMs: opts.postExitCloseWaitMs,
 		});
 		if (!this.screen) return drained;
-		return { kind: "screen", observation: await this.screen.observe(), terminalUrl: this.terminalUrl };
+		if (this.hasExited) return this.finalScreenOutput();
+		const observation = await this.screen.observe();
+		// Exit may land while the observation's parser barrier is pending.
+		if (this.hasExited) return this.finalScreenOutput();
+		return { kind: "screen", observation, terminalUrl: this.terminalUrl };
+	}
+
+	private async finalScreenOutput(): Promise<FinalScreenOutput> {
+		const key = this.terminalKey;
+		if (key === undefined) throw new Error("tty session has no terminal resource");
+		await this.terminalFinalized;
+		return { kind: "final-screen", projection: await readTerminal(key), terminalUrl: `term://${key}` };
 	}
 
 	get terminalUrl(): string | undefined {

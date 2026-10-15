@@ -50,8 +50,9 @@ capability.
   turns. Cancelling a call never kills the process.
 - **PTY output is what a terminal shows.** `tty: true` sessions run through a
   headless terminal emulator, so progress bars, redraws and full-screen
-  programs come back as the current screen (plus lines scrolled off since the
-  last call and the cursor), not every redraw appended. The emulator answers
+  programs return the current screen plus unseen history while running, not
+  every redraw appended. Exited tty results contain only the final active screen;
+  `terminal_url` recovers earlier retained rows. The emulator answers
   the terminal queries a real terminal would (cursor position, device
   attributes, default colours), so programs that wait for them, or pick a light
   or dark palette from them, behave as in a real terminal.
@@ -188,11 +189,18 @@ history_lines: 2                   (optional: lines scrolled off above the scree
 <the full current screen, trailing blank rows removed>
 ```
 
-- **History plus screen.** Lines that scrolled off the top since the previous
-  call and were not already reported come first, then the whole current screen.
-  Carriage-return progress bars and redraws show their final state.
-- **Unchanged screen.** When neither the screen, the cursor nor the history
-  changed, the result has `screen_changed: false` and `(no output)`.
+- **Running history plus screen.** Lines that scrolled off the top since the
+  previous call and were not already reported come first, then the whole current
+  screen. Carriage-return progress bars and redraws show their final state.
+- **Unchanged running screen.** When neither the screen, the cursor nor the
+  history changed, the result has `screen_changed: false` and `(no output)`.
+- **Exit screen only.** Every completed tty result, including short commands and
+  confirmed kills, returns the frozen final active screen even when unchanged.
+  `terminal_url` stays at the result root; `terminal.retained_rows`,
+  `terminal.rows` and `terminal.history_may_be_truncated` describe the retained
+  normal-screen projection. Final metadata has no `screen_changed` or
+  `history_lines`. The 50 KiB / 2000-line result cap still applies; read the URL's
+  `/screen` for the complete screen and `/page/N` for earlier retained rows.
 - **Full-screen programs** (alternate screen, e.g. `top`, editors) are reported
   as `terminal: alternate screen …`; leaving it restores the normal screen.
 - **Plain text and cursor only.** Colours are not in model results; the raw
