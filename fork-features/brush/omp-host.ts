@@ -68,6 +68,7 @@ export interface OmpHost {
 	readonly rewriteGitWorktreeAdd: (command: string, cli: readonly string[]) => string;
 	readonly resolveCliEntryCmd: () => Promise<readonly string[]>;
 	readonly extractFlatShellCommandSegments: (command: string) => readonly FlatShellSegment[];
+	readonly invalidateGithubCacheForBashCommand: (command: string) => void;
 }
 
 type Fn = (...args: never[]) => unknown;
@@ -150,7 +151,7 @@ function parseDirenvDiff(value: unknown): DirenvDiff | null {
 
 /** Load and parse the host services; rejects when omp lacks any of them. */
 export async function loadOmpHost(): Promise<OmpHost> {
-	const [root, nonInteractive, snapshot, direnvModule, settings, tokenizer, approvalModule, internalUrls, pathUtils, worktree, taskSettings, utils] = await Promise.all([
+	const [root, nonInteractive, snapshot, direnvModule, settings, tokenizer, approvalModule, internalUrls, pathUtils, worktree, taskSettings, utils, githubCache] = await Promise.all([
 		import("@oh-my-pi/pi-coding-agent"),
 		import("@oh-my-pi/pi-coding-agent/exec/non-interactive-env"),
 		import("@oh-my-pi/pi-coding-agent/utils/shell-snapshot"),
@@ -163,6 +164,7 @@ export async function loadOmpHost(): Promise<OmpHost> {
 		import("@oh-my-pi/pi-coding-agent/tools/bash-worktree-rewrite"),
 		import("@oh-my-pi/pi-coding-agent/task/settings"),
 		import("@oh-my-pi/pi-utils"),
+		import("@oh-my-pi/pi-coding-agent/tools/gh-cache-invalidation"),
 	]);
 	const registryClass: unknown = root.AgentRegistry;
 	const global = typeof registryClass === "function" && "global" in registryClass ? registryClass.global : undefined;
@@ -266,5 +268,6 @@ export async function loadOmpHost(): Promise<OmpHost> {
 		rewriteGitWorktreeAdd: (command, cli) => expect("rewriteGitWorktreeAdd()", rewrite(command, cli), string),
 		resolveCliEntryCmd: () => resolveCliEntryCmd(cliHelpers),
 		extractFlatShellCommandSegments: exportedFunction(tokenizer, "extractFlatShellCommandSegments", "tools/shell-tokenize") as OmpHost["extractFlatShellCommandSegments"],
+		invalidateGithubCacheForBashCommand: exportedFunction(githubCache, "invalidateGithubCacheForBashCommand", "tools/gh-cache-invalidation") as OmpHost["invalidateGithubCacheForBashCommand"],
 	};
 }
