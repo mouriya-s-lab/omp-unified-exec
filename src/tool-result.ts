@@ -304,7 +304,7 @@ function appendOutputSection(lines: string[], shape: OutputResultDetails): strin
 	return `${header}\n---\n${body}${footer}`;
 }
 
-export function renderProcessResultText(shape: ProcessResultDetails): string {
+export function renderProcessResultText(shape: ProcessResultDetails, command?: string): string {
 	const lines: string[] = [shape.running ? "[still running]" : "[exited]"];
 	if (shape.session_id !== undefined) lines.push(`session_id: ${shape.session_id}`);
 	if (shape.exit_code !== undefined) lines.push(`exit_code: ${shape.exit_code}`);
@@ -322,6 +322,7 @@ export function renderProcessResultText(shape: ProcessResultDetails): string {
 	if (shape.tool_time_utc) lines.push(`tool_time_utc: ${safeMeta(shape.tool_time_utc)}`);
 	if (shape.log_path) lines.push(`log_path: ${safeMeta(shape.log_path)}`);
 	if (shape.cwd) lines.push(`cwd: ${safeMeta(shape.cwd)}`);
+	if (command !== undefined) lines.push(`command: ${safeMeta(command)}`);
 	lines.push(`wall_time_seconds: ${shape.wall_time_seconds.toFixed(3)}`);
 	lines.push(`chunk_id: ${shape.chunk_id}`);
 	if (shape.original_token_count !== undefined) lines.push(`original_token_count: ${shape.original_token_count}`);

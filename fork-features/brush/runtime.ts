@@ -5,6 +5,7 @@
  * the Brush engine needs.
  */
 import type { TerminalAppearance } from "../../src/terminal-screen.ts";
+import type { ProcessShell } from "../../src/shell.ts";
 import type { HostBindingState } from "./binding.ts";
 import type { BrushShells } from "./execution.ts";
 import type { NativeLoad } from "./native.ts";
@@ -31,10 +32,16 @@ interface OmpExecutionContext {
 
 type ProcessHost = { readonly host: "pi" } | OmpExecutionContext;
 
-export type EngineVariant =
+/** C1-checked backend selection, before cwd validation and shell resolution. */
+export type EngineSelection =
 	| ({ readonly kind: "brush" } & OmpExecutionContext)
 	| ({ readonly kind: "pipe-process" } & ProcessHost)
 	| ({ readonly kind: "pty-process" } & ProcessHost);
+
+export type EngineVariant =
+	| Extract<EngineSelection, { readonly kind: "brush" } | { readonly host: "pi" }>
+	| (Extract<EngineSelection, { readonly host: "omp"; readonly kind: "pipe-process" | "pty-process" }> &
+		{ readonly shell: ProcessShell });
 
 export type HostRuntime =
 	| { readonly kind: "pi" }

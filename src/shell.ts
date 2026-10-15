@@ -53,16 +53,26 @@ function shellBase(shellBin: string): string {
 	return base.replace(/\.(exe|cmd|bat)$/i, "").toLowerCase();
 }
 
+export type ShellSyntax = "cmd" | "powershell" | "command-c";
+
+/** The same shell dialect controls argv delivery and generated invocation text. */
+export function shellSyntax(shellBin: string, isWindows: boolean = IS_WINDOWS): ShellSyntax {
+	const base = shellBase(shellBin);
+	if (isWindows && base === "cmd") return "cmd";
+	if (base === "powershell" || base === "pwsh") return "powershell";
+	return "command-c";
+}
+
 /**
  * Build the argv for running `cmd` under the given shell binary.
  * `isWindows` is a parameter (defaulting to the real platform) so tests can
  * exercise both branches anywhere.
  */
 export function buildShellCommand(shellBin: string, cmd: string, isWindows: boolean = IS_WINDOWS): ShellCommand {
-	const base = shellBase(shellBin);
+	const syntax = shellSyntax(shellBin, isWindows);
 	// cmd.exe specialization only applies on Windows — a POSIX binary that
 	// happens to be named `cmd` must get the uniform `-c` treatment.
-	if (isWindows && base === "cmd") {
+	if (syntax === "cmd") {
 		if (/[\r\n]/.test(cmd)) {
 			// cmd.exe /c silently stops at the first newline, executing only
 			// the first line — fail closed rather than silently truncate.
@@ -75,7 +85,7 @@ export function buildShellCommand(shellBin: string, cmd: string, isWindows: bool
 		return { command: [shellBin, "/d", "/s", "/c", `"${cmd}"`], windowsVerbatimArguments: true };
 	}
 	// powershell/pwsh take -Command on every platform (pwsh is cross-platform).
-	if (base === "powershell" || base === "pwsh") {
+	if (syntax === "powershell") {
 		// -NonInteractive/-NoLogo: with stdin kept open as a pipe (for write_stdin),
 		// bare -Command can hang waiting for interactive input on some hosts
 		// (observed: Node 24 windows-latest CI). -NoProfile alone is not enough.
@@ -124,6 +134,20 @@ export interface DefaultShell {
 	fellBack: boolean;
 	/** How bash was located (absent when fellBack or on POSIX). */
 	bashSource?: BashSource;
+}
+
+/** A process backend's selected shell, retained through planning and dispatch. */
+export type ProcessShell =
+	| { readonly kind: "explicit"; readonly bin: string }
+	| { readonly kind: "default"; readonly selection: DefaultShell };
+
+export function selectProcessShell(shell: string | undefined): ProcessShell {
+	if (!shell) return { kind: "default", selection: resolveDefaultShell() };
+	return { kind: "explicit", bin: IS_WINDOWS ? resolveWindowsShell(shell) : shell };
+}
+
+export function processShellPath(shell: ProcessShell): string {
+	return shell.kind === "explicit" ? shell.bin : shell.selection.shell;
 }
 
 /** System32's bash.exe is the WSL stub — a different OS view entirely. */

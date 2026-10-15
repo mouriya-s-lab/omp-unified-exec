@@ -7,7 +7,9 @@
  */
 import type { Stats } from "node:fs";
 import { stat } from "node:fs/promises";
-import type { EngineVariant } from "./runtime.ts";
+import { processShellPath, selectProcessShell, shellSyntax } from "../../src/shell.ts";
+import type { EngineSelection, EngineVariant } from "./runtime.ts";
+import { rewriteForShell } from "./worktree.ts";
 
 export interface CwdServices {
 	readonly extractLeadingCdTarget: (command: string) => { readonly path: string; readonly rest: string } | null;
@@ -15,10 +17,18 @@ export interface CwdServices {
 	readonly canHandleInternalUrl: (path: string) => boolean;
 }
 
-export interface ExecPlan {
+interface CommandPlan {
 	readonly rawCommand: string;
 	readonly command: string;
 	readonly cwd: string;
+}
+
+/** Cwd is validated before any process-shell lookup. */
+export interface CwdPlan extends CommandPlan {
+	readonly variant: EngineSelection;
+}
+
+export interface ExecPlan extends CommandPlan {
 	readonly variant: EngineVariant;
 }
 
@@ -31,8 +41,8 @@ interface CommandInput {
 export async function createExecPlan(
 	args: CommandInput,
 	sessionCwd: string,
-	variant: EngineVariant & { readonly host: "omp" },
-): Promise<ExecPlan> {
+	variant: EngineSelection & { readonly host: "omp" },
+): Promise<CwdPlan> {
 
 	const paths = variant.engine.services.paths;
 	let command = args.cmd;
@@ -59,4 +69,22 @@ export async function createExecPlan(
 	}
 	if (!info.isDirectory()) throw new Error(`Working directory is not a directory: ${cwd}`);
 	return { rawCommand: args.cmd, command, cwd, variant };
+}
+
+/** Resolve once after cwd validation; dispatch and rewriting share this selection. */
+export function resolveExecutionPlan(plan: CwdPlan, shell: string | undefined): ExecPlan {
+	const variant = plan.variant;
+	if (variant.host === "pi" || variant.kind === "brush") return { ...plan, variant };
+	return { ...plan, variant: { ...variant, shell: selectProcessShell(shell) } };
+}
+
+/** The host owns both the recognized syntax and the bound session's clone policy. */
+export async function rewriteWorktreePlan(plan: ExecPlan): Promise<ExecPlan> {
+	const variant = plan.variant;
+	if (variant.host === "pi") return plan;
+	const services = variant.engine.services;
+	if (!services.worktreeClone(variant.settings)) return plan;
+	const cli = await services.resolveCliEntryCmd();
+	const syntax = variant.kind === "brush" ? "command-c" : shellSyntax(processShellPath(variant.shell));
+	return { ...plan, command: rewriteForShell(plan.command, cli, syntax, services) };
 }

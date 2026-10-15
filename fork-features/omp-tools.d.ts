@@ -47,6 +47,7 @@ declare module "@oh-my-pi/pi-coding-agent/tools/shell-tokenize" {
 	export const tokenizeShellSegments: unknown;
 	export const extractLiteralAndChainSegments: unknown;
 	export const extractLeadingCdTarget: unknown;
+	export const extractFlatShellCommandSegments: unknown;
 }
 
 declare module "@oh-my-pi/pi-coding-agent/tools/approval" {
@@ -59,4 +60,25 @@ declare module "@oh-my-pi/pi-coding-agent/internal-urls" {
 
 declare module "@oh-my-pi/pi-coding-agent/tools/path-utils" {
 	export const resolveToCwd: unknown;
+}
+
+declare module "@oh-my-pi/pi-coding-agent/tools/bash-worktree-rewrite" {
+	export const rewriteGitWorktreeAdd: unknown;
+}
+
+declare module "@oh-my-pi/pi-coding-agent/task/settings" {
+	export const cfgWorktreeClone: unknown;
+}
+
+declare module "@oh-my-pi/pi-coding-agent/subprocess/worker-client" {
+	export const resolveCliEntryCmd: unknown;
+}
+
+declare module "@oh-my-pi/pi-utils" {
+	export const isCompiledBinary: unknown;
+	export const stripWindowsExtendedLengthPathPrefix: unknown;
+	export const isExecutable: unknown;
+	export const isFullyQualifiedPath: unknown;
+	export const $which: unknown;
+	export const WhichCachePolicy: unknown;
 }
