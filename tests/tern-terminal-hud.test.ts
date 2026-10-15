@@ -759,6 +759,7 @@ describe("terminal HUD lifecycle with real sessions", { skip: !isPtyAvailable() 
 		const remaining = h.spawn(true);
 		h.component.handleNativeEvent({ type: "action", act: OPEN_ACTION });
 		assert.equal(h.sheet.describe().p?.selected, `s${removed.id}`);
+		removed.terminate();
 		h.store.remove(removed.id);
 		await removed.release();
 		const forbiddenRead = t.mock.method(removed, "styledScreen", () => { throw new Error("removed screen read after release"); });
