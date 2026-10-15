@@ -7,6 +7,8 @@
  * reshaped export fails plugin loading instead of degrading later. None of
  * them loads the host's own shell (`exec/bash-executor`, `pi-natives`).
  */
+import { getBashApprovalPatternRules } from "./approval.ts";
+import type { ApprovalHelpers, BashApprovalPatternRule } from "./approval.ts";
 
 /** omp's `Settings` for one session. Read only through the readers below. */
 export interface HostSettings {
@@ -54,6 +56,9 @@ export interface OmpHost {
 	readonly direnv: (settings: HostSettings) => "auto" | "off";
 	readonly direnvLoadTimeoutMs: (settings: HostSettings) => number;
 	readonly shellMinimizer: (settings: HostSettings) => ShellMinimizerSettings;
+	readonly approvalRules: (settings: HostSettings) => readonly BashApprovalPatternRule[];
+	readonly allowCompoundCommands: (settings: HostSettings) => boolean;
+	readonly approval: ApprovalHelpers;
 }
 
 type Fn = (...args: never[]) => unknown;
@@ -136,12 +141,14 @@ function parseDirenvDiff(value: unknown): DirenvDiff | null {
 
 /** Load and parse the host services; rejects when omp lacks any of them. */
 export async function loadOmpHost(): Promise<OmpHost> {
-	const [root, nonInteractive, snapshot, direnvModule, settings] = await Promise.all([
+	const [root, nonInteractive, snapshot, direnvModule, settings, tokenizer, approvalModule] = await Promise.all([
 		import("@oh-my-pi/pi-coding-agent"),
 		import("@oh-my-pi/pi-coding-agent/exec/non-interactive-env"),
 		import("@oh-my-pi/pi-coding-agent/utils/shell-snapshot"),
 		import("@oh-my-pi/pi-coding-agent/exec/direnv"),
 		import("@oh-my-pi/pi-coding-agent/exec/settings"),
+		import("@oh-my-pi/pi-coding-agent/tools/shell-tokenize"),
+		import("@oh-my-pi/pi-coding-agent/tools/approval"),
 	]);
 	const registryClass: unknown = root.AgentRegistry;
 	const global = typeof registryClass === "function" && "global" in registryClass ? registryClass.global : undefined;
@@ -161,6 +168,15 @@ export async function loadOmpHost(): Promise<OmpHost> {
 	const direnv = settingReader(settings, "cfgBashDirenv");
 	const direnvLoadTimeoutMs = settingReader(settings, "cfgBashDirenvLoadTimeoutMs");
 	const shellMinimizer = settingReader(settings, "cfgShellMinimizer");
+	const approvalPatterns = settingReader(settings, "cfgBashPatterns");
+	const allowCompoundCommands = settingReader(settings, "cfgBashAllowCompoundCommands");
+	const approval: ApprovalHelpers = {
+		criticalPatterns: expect("CRITICAL_BASH_PATTERNS", root.CRITICAL_BASH_PATTERNS,
+			(x): x is RegExp[] => Array.isArray(x) && x.every((pattern: unknown) => pattern instanceof RegExp)),
+		tokenizeShellSegments: exportedFunction(tokenizer, "tokenizeShellSegments", "tools/shell-tokenize") as ApprovalHelpers["tokenizeShellSegments"],
+		extractLiteralAndChainSegments: exportedFunction(tokenizer, "extractLiteralAndChainSegments", "tools/shell-tokenize") as ApprovalHelpers["extractLiteralAndChainSegments"],
+		truncateForPrompt: exportedFunction(approvalModule, "truncateForPrompt", "tools/approval") as ApprovalHelpers["truncateForPrompt"],
+	};
 	return {
 		registeredSession: (agentId) => {
 			const registry: unknown = global.call(registryClass);
@@ -186,5 +202,8 @@ export async function loadOmpHost(): Promise<OmpHost> {
 		direnvLoadTimeoutMs: (s) =>
 			expect("bash.direnvLoadTimeoutMs", direnvLoadTimeoutMs(s), (x): x is number => typeof x === "number"),
 		shellMinimizer: (s) => parseMinimizer(shellMinimizer(s)),
+		approvalRules: (s) => getBashApprovalPatternRules(approvalPatterns(s)),
+		allowCompoundCommands: (s) => expect("bash.allowCompoundCommands", allowCompoundCommands(s), (x): x is boolean => typeof x === "boolean"),
+		approval,
 	};
 }

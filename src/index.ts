@@ -27,6 +27,8 @@ import { constants as osConstants } from "node:os";
 import { type AgentToolResult, type AgentToolUpdateCallback, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type, type TUnsafe } from "typebox";
 
+import { approvalCommand, approveCommand } from "../fork-features/brush/approval.ts";
+import type { CommandApproval } from "../fork-features/brush/approval.ts";
 import { bindingContext, bindSession, type HostBindingState, recheckBinding } from "../fork-features/brush/binding.ts";
 import { planBrushRun } from "../fork-features/brush/environment.ts";
 import { BrushExecution, BrushShells, persistentLease } from "../fork-features/brush/execution.ts";
@@ -1342,6 +1344,20 @@ function activate(pi: ExtensionAPI, host: HostRuntime = { kind: "pi" }): Activat
 	pi.registerTool({
 		name: "exec_command",
 		label: "exec_command",
+		...(engine.kind === "omp" ? {
+			approval: (args: unknown): CommandApproval => {
+				if (engine.binding.kind !== "bound") return "exec";
+				const settings = engine.binding.session.settings;
+				return approveCommand(
+					approvalCommand(args, ""),
+					engine.services.approvalRules(settings),
+					engine.services.allowCompoundCommands(settings) ? engine.services.shellConfig(settings).shell : undefined,
+					engine.services.approval,
+				);
+			},
+			formatApprovalDetails: (args: unknown): string[] =>
+				[`Command: ${engine.services.approval.truncateForPrompt(approvalCommand(args, "(missing)"))}`],
+		} : {}),
 		description:
 			'Run a command in a persistent session. Returns `session_id` if still running (drive with write_stdin) or `exit_code` if it finished within yield_time_ms. on_exit defaults to "none". Only pass on_exit: "wake" when the human explicitly wants auto-resume on unobserved exit — stale wakes interrupt later work. Use set_on_exit to disarm or re-arm a running session.',
 		promptSnippet: "Run a shell command; long-running ones yield a session_id",

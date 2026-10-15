@@ -10,6 +10,7 @@ All notable changes to this project. **Newest entries go on top.**
 - Make backpressured Brush stdin writes cancellable per call without closing stdin or stopping the command; incomplete writes no longer claim that zero bytes were delivered. Prevent a pending omp execution from reinserting its session after shutdown, and reject new omp session observations once shutdown begins.
 - On Windows, acknowledge Brush stdin only after the overlapped pipe write completes. Cancellation reaps that exact serialized write before returning, instead of Mio acknowledging a heap-buffered request early; later writes keep the same live pipe.
 - Complete stdin close after a concurrent write releases its guard, on every platform, so a close racing write completion cannot leave the command waiting indefinitely for EOF.
+- On omp, apply built-in bash's ordered command approval to raw `exec_command.cmd`: session-local allow/deny/prompt patterns, compound-command policy and critical-command confirmation. Confirmation details include the command; unbound approval returns the host default `exec`, and Pi and stdin/session-control tools remain unchanged ([#29](https://github.com/oh-my-omp/omp-unified-exec/issues/29)).
 
 ## 0.14.7 - 2026-10-13
 
