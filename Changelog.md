@@ -9,6 +9,7 @@ All notable changes to this project. **Newest entries go on top.**
 - Keep the bound host `AgentSession` itself, rather than snapshots of its settings, skills, job manager or identity; session-switch identity checks and subsequent consumers read the host-owned values.
 - Make backpressured Brush stdin writes cancellable per call without closing stdin or stopping the command; incomplete writes no longer claim that zero bytes were delivered. Prevent a pending omp execution from reinserting its session after shutdown, and reject new omp session observations once shutdown begins.
 - On Windows, acknowledge Brush stdin only after the overlapped pipe write completes. Cancellation reaps that exact serialized write before returning, instead of Mio acknowledging a heap-buffered request early; later writes keep the same live pipe.
+- Complete stdin close after a concurrent write releases its guard, on every platform, so a close racing write completion cannot leave the command waiting indefinitely for EOF.
 
 ## 0.14.7 - 2026-10-13
 

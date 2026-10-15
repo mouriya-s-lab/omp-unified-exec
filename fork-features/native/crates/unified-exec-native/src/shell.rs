@@ -221,7 +221,7 @@ struct StdinWriter {
 impl StdinWriter {
 	/// Close the write end once: later writes reject, an in-flight write stops
 	/// waiting for the pipe. The descriptor is dropped here when no write
-	/// holds it, otherwise by that write as it observes the close.
+	/// holds it, otherwise by that write after it releases its guard.
 	fn close(&self) {
 		self.closed.cancel();
 		if let Ok(mut sender) = self.sender.try_lock() {
@@ -230,6 +230,17 @@ impl StdinWriter {
 	}
 
 	async fn write(&self, data: Vec<u8>, cancel: task::CancelToken) -> Result<()> {
+		let result = self.write_open(data, cancel).await;
+		// write_open has dropped its guard. If close() failed to acquire it,
+		// complete that close now; a later close acquires the unlocked mutex
+		// itself. Checking before unlock would leave a lost-EOF race.
+		if self.closed.is_cancelled() {
+			self.close();
+		}
+		result
+	}
+
+	async fn write_open(&self, data: Vec<u8>, cancel: task::CancelToken) -> Result<()> {
 		if self.closed.is_cancelled() {
 			return Err(Error::from_reason(STDIN_CLOSED));
 		}
@@ -269,11 +280,7 @@ impl StdinWriter {
 		{
 			// Do not race/drop this future: it joins the cancelled overlapped
 			// operation before the serialized writer can be used again.
-			let result = sender.write(data, self.closed.clone(), cancel).await;
-			if self.closed.is_cancelled() {
-				guard.take();
-			}
-			result
+			sender.write(data, self.closed.clone(), cancel).await
 		}
 	}
 }
