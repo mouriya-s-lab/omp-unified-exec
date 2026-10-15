@@ -35,7 +35,7 @@ import { formatElapsed } from "./format-time.ts";
 import { type LongWaitOutcome, startRateLimitedStream, waitForExitOrDeadline } from "./long-wait.ts";
 import { sleep } from "./notify.ts";
 import { sanitizeOutputText } from "./output-safety.ts";
-import { getPtyLoadError, isPtyAvailable } from "./pty.ts";
+import { DEFAULT_PTY_ROWS, getPtyLoadError, isPtyAvailable } from "./pty.ts";
 import {
 	renderExecCommandCall,
 	renderKillSessionCall,
@@ -1105,7 +1105,7 @@ function activate(pi: ExtensionAPI, appearance: () => TerminalAppearance = () =>
 			),
 			rows: Type.Optional(
 				Type.Number({
-					description: `PTY height in rows (tty: true only; ignored for pipes). Default 30, clamped to [${MIN_PTY_ROWS}, ${MAX_PTY_ROWS}].`,
+					description: `PTY height in rows (tty: true only; ignored for pipes). Default ${DEFAULT_PTY_ROWS}, clamped to [${MIN_PTY_ROWS}, ${MAX_PTY_ROWS}].`,
 				}),
 			),
 			yield_time_ms: Type.Optional(

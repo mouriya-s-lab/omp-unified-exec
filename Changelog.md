@@ -129,6 +129,7 @@ All notable changes to this project. **Newest entries go on top.**
 
 ### Changed
 
+- tty 会话的默认终端尺寸从 120×30 改为 120×80。仅默认行数改变；显式 `cols`/`rows`、`[20,500]` / `[5,300]` 限制以及 240000 单元格历史预算保持不变，并同步更新工具说明与 README 示例。
 - Updated the exact Pi/TUI development baseline from 0.83.0 to 0.84.1,
   TypeBox from 1.1.24 to 1.3.7, and the test runner to `tsx` 4.23.12.
   Synchronized the lockfile root metadata with package version 0.9.1. Runtime
