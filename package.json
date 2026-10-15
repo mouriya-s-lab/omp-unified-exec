@@ -49,12 +49,12 @@
 	},
 	"optionalDependencies": {
 		"@homebridge/node-pty-prebuilt-multiarch": "^0.14.1",
-		"omp-unified-exec-native-darwin-arm64": "https://github.com/oh-my-omp/omp-unified-exec/releases/download/native-f48184fab3b86329/omp-unified-exec-native-darwin-arm64.tgz",
-		"omp-unified-exec-native-darwin-x64": "https://github.com/oh-my-omp/omp-unified-exec/releases/download/native-f48184fab3b86329/omp-unified-exec-native-darwin-x64.tgz",
-		"omp-unified-exec-native-linux-arm64": "https://github.com/oh-my-omp/omp-unified-exec/releases/download/native-f48184fab3b86329/omp-unified-exec-native-linux-arm64.tgz",
-		"omp-unified-exec-native-linux-x64": "https://github.com/oh-my-omp/omp-unified-exec/releases/download/native-f48184fab3b86329/omp-unified-exec-native-linux-x64.tgz",
-		"omp-unified-exec-native-win32-arm64": "https://github.com/oh-my-omp/omp-unified-exec/releases/download/native-f48184fab3b86329/omp-unified-exec-native-win32-arm64.tgz",
-		"omp-unified-exec-native-win32-x64": "https://github.com/oh-my-omp/omp-unified-exec/releases/download/native-f48184fab3b86329/omp-unified-exec-native-win32-x64.tgz"
+		"omp-unified-exec-native-darwin-arm64": "https://github.com/oh-my-omp/omp-unified-exec/releases/download/native-b3bc2a71832c2084/omp-unified-exec-native-darwin-arm64.tgz",
+		"omp-unified-exec-native-darwin-x64": "https://github.com/oh-my-omp/omp-unified-exec/releases/download/native-b3bc2a71832c2084/omp-unified-exec-native-darwin-x64.tgz",
+		"omp-unified-exec-native-linux-arm64": "https://github.com/oh-my-omp/omp-unified-exec/releases/download/native-b3bc2a71832c2084/omp-unified-exec-native-linux-arm64.tgz",
+		"omp-unified-exec-native-linux-x64": "https://github.com/oh-my-omp/omp-unified-exec/releases/download/native-b3bc2a71832c2084/omp-unified-exec-native-linux-x64.tgz",
+		"omp-unified-exec-native-win32-arm64": "https://github.com/oh-my-omp/omp-unified-exec/releases/download/native-b3bc2a71832c2084/omp-unified-exec-native-win32-arm64.tgz",
+		"omp-unified-exec-native-win32-x64": "https://github.com/oh-my-omp/omp-unified-exec/releases/download/native-b3bc2a71832c2084/omp-unified-exec-native-win32-x64.tgz"
 	},
 	"devDependencies": {
 		"@earendil-works/pi-coding-agent": "1.0.0",
