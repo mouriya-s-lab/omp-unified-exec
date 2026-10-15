@@ -2,6 +2,10 @@
 
 All notable changes to this project. **Newest entries go on top.**
 
+## Unreleased
+
+- Add the embedded brush shell's native addon ([#28](https://github.com/oh-my-omp/omp-unified-exec/issues/28)): `fork-features/native` is a Cargo workspace copied from can1357/oh-my-pi@c2cb79e (`pi-shell`, `pi-builtins`, `pi-vfs`, `pi-vcs`, `pi-iso`, `pi-walker`, vendored `brush-core`, `brush-parser` and `napi`, its `Cargo.lock`) plus `unified-exec-native`, the N-API subset of `pi-natives`' shell binding. Differences from upstream: a run's stdin is a caller-owned pipe (`ShellStdin`) instead of the null device, `Shell.dispose` ends a session and its background jobs, and `task.rs` drops profiling and the crash handler. `.github/workflows/native.yml` builds upstream's six platforms, probes builtins, Git Guard and stdin, and publishes one npm leaf-package tarball per platform as the Release `native-<tree hash>`.
+
 ## 0.14.7 - 2026-10-13
 
 - Bump the package, tracked npm lock metadata and bundled Tern plugin to 0.14.7, releasing the native HUD fixes and awaited normal-copy installation update below.

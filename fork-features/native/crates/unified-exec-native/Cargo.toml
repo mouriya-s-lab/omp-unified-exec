@@ -1,0 +1,34 @@
+[package]
+name = "unified-exec-native"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = false
+description = "N-API subset of oh-my-pi's pi-natives shell binding, for omp-unified-exec"
+
+[lib]
+crate-type = ["cdylib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait.workspace = true
+flume.workspace = true
+napi.workspace = true
+napi-derive.workspace = true
+os_pipe.workspace = true
+parking_lot.workspace = true
+pi-shell.workspace = true
+pi-vfs.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[build-dependencies]
+napi-build.workspace = true

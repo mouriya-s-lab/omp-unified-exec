@@ -1,0 +1,113 @@
+name: Native shell
+
+# Builds the embedded brush shell addon (fork-features/native) for upstream
+# omp's platform set and publishes the leaf-package tarballs as the GitHub
+# Release `native-<content hash>`, where the hash is the git tree id of
+# fork-features/native. A tree already released is not rebuilt. Commits that
+# point package.json's optionalDependencies at a release land only after it
+# exists (fork-features/README.md, "Embedded brush shell").
+
+on:
+  push:
+    paths:
+      - "fork-features/native/**"
+      - ".github/workflows/native.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tag:
+    name: Release tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      released: ${{ steps.tag.outputs.released }}
+    steps:
+      - uses: actions/checkout@v6
+      - id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="native-$(git rev-parse HEAD:fork-features/native | cut -c1-16)"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "released=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "released=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "$tag"
+
+  build:
+    name: Build ${{ matrix.platform }}
+    needs: tag
+    if: needs.tag.outputs.released != 'true'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: darwin-arm64, runner: macos-latest, triple: aarch64-apple-darwin, lib: libunified_exec_native.dylib, smoke: true }
+          - { platform: darwin-x64, runner: macos-latest, triple: x86_64-apple-darwin, lib: libunified_exec_native.dylib, smoke: false }
+          - { platform: linux-x64, runner: ubuntu-22.04, triple: x86_64-unknown-linux-gnu, lib: libunified_exec_native.so, smoke: true }
+          - { platform: linux-arm64, runner: ubuntu-22.04-arm, triple: aarch64-unknown-linux-gnu, lib: libunified_exec_native.so, smoke: true }
+          - { platform: win32-x64, runner: windows-latest, triple: x86_64-pc-windows-msvc, lib: unified_exec_native.dll, smoke: true }
+          - { platform: win32-arm64, runner: windows-11-arm, triple: aarch64-pc-windows-msvc, lib: unified_exec_native.dll, smoke: true }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+
+      - name: Build
+        working-directory: fork-features/native
+        run: |
+          rustup toolchain install nightly --profile minimal
+          rustup target add --toolchain nightly ${{ matrix.triple }}
+          cargo build --profile ci -p unified-exec-native --target ${{ matrix.triple }}
+          mkdir -p ../../dist
+          cp target/${{ matrix.triple }}/ci/${{ matrix.lib }} ../../dist/unified-exec-native.node
+
+      # darwin-x64 is cross-built on an arm64 runner whose Node cannot load it.
+      - name: Probe (builtins, Git Guard, stdin)
+        if: ${{ matrix.smoke }}
+        run: node fork-features/native/smoke.mjs dist/unified-exec-native.node
+
+      - name: Pack
+        run: node fork-features/native/pack.mjs ${{ matrix.platform }} dist/unified-exec-native.node ${{ needs.tag.outputs.tag }} packages
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.platform }}
+          path: packages/omp-unified-exec-native-${{ matrix.platform }}.tgz
+          if-no-files-found: error
+
+  release:
+    name: Publish ${{ needs.tag.outputs.tag }}
+    needs: [tag, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: native-release-${{ needs.tag.outputs.tag }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: packages
+          merge-multiple: true
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.tag.outputs.tag }}
+        run: |
+          ls -l packages
+          gh release create "$TAG" packages/*.tgz \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "Native shell $TAG" \
+            --notes "Embedded brush shell addon for omp-unified-exec, built from fork-features/native at $GITHUB_SHA (tree ${TAG#native-}). One npm leaf-package tarball per platform; package.json references them from optionalDependencies."
