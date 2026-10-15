@@ -8,7 +8,6 @@ export type TerminalResource =
 
 interface TerminalRegistry {
 	readonly resources: Map<string, TerminalResource>;
-	registration: "unregistered" | "registered";
 }
 
 // A child agent and an extension reload may load another copy of this module.
@@ -17,7 +16,6 @@ const registrySymbol = Symbol.for("omp-unified-exec.terminal-resources");
 const processGlobal = globalThis as typeof globalThis & { [registrySymbol]?: TerminalRegistry };
 export const terminalRegistry: TerminalRegistry = processGlobal[registrySymbol] ??= {
 	resources: new Map(),
-	registration: "unregistered",
 };
 
 export class TerminalResourceError extends Error {
@@ -33,9 +31,14 @@ export function registerTerminal(id: number, screen: TerminalScreen): string {
 	return key;
 }
 
-export async function readTerminal(key: string): Promise<TerminalProjection> {
+export function getTerminalResource(key: string): TerminalResource {
 	const resource = terminalRegistry.resources.get(key);
 	if (!resource) throw new TerminalResourceError("unknown_terminal", `No retained terminal exists for ${key}.`);
+	return resource;
+}
+
+export async function readTerminal(key: string): Promise<TerminalProjection> {
+	const resource = getTerminalResource(key);
 	switch (resource.kind) {
 		case "live": return resource.screen.project();
 		case "frozen": return resource.projection;
