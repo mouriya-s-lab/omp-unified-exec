@@ -284,7 +284,7 @@ Pipe 条件接收清洗后的完整后续行与最后一个不完整行。TTY �
 
 **在 omp 上，**`exec_command`、`write_stdin` 和 `kill_session` 通过 omp 导出的 bash 渲染器渲染，ANSI TUI 和 Tern 都一样：`$ cmd`，可用 omp 的展开快捷键展开的折叠输出，失败时的退出码标签和错误配色，运行中会话显示 `Backgrounded: session N`，最后一行是带日志路径的截断标记。`write_stdin` 和 `kill_session` 以 bash 注释的形式显示所做的动作（`# poll session N`、`# stdin → session N: "…"`、`# kill session N (SIGTERM)`）。`monitor`、`set_on_exit` 和 `list_sessions` 使用 omp 的默认卡片。如果 omp 的 bash 渲染器缺失或接口变了，插件会直接加载失败，而不是显示原始的结果包装。
 
-**在 Pi 上，**原有五个工具都有各自的渲染器；`monitor` 使用默认卡片。原有渲染器提供命令标题、默认显示五个可视行的输出尾部（用 `app.tools.expand` 展开）、实时计时、`⟳ poll` / `» input` 标题，以及 kill/list 摘要。有进程存活时，底栏显示 `unified-exec: N sessions running`。
+**在 Pi 上，**原有五个工具都有各自的渲染器，提供命令标题、默认显示五个可视行的输出尾部（用 `app.tools.expand` 展开）、实时计时、`⟳ poll` / `» input` 标题，以及 kill/list 摘要。有进程存活时，底栏显示 `unified-exec: N sessions running`。
 
 两种宿主下，模型可见的内容和持久化的 details 相同。
 

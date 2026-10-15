@@ -424,8 +424,7 @@ action as a bash comment (`# poll session N`, `# stdin → session N: "…"`,
 use omp's default card. If omp's bash renderer is missing or reshaped, plugin loading
 fails rather than showing raw envelopes.
 
-**On Pi,** the five original tools have their own renderers; `monitor` uses the
-default card. The original renderers provide command banners,
+**On Pi,** the five original tools have their own renderers, providing command banners,
 five-visual-line output tails expanded with `app.tools.expand`, live elapsed
 counters, `⟳ poll` / `» input` banners and kill/list summaries. While a process
 is alive the footer shows `unified-exec: N sessions running`.

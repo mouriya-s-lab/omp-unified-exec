@@ -129,10 +129,10 @@ The initiative establishes a durable output contract across these layers:
 - Preserve failed-kill ownership: an unconfirmed kill remains registered and is
   reported as running.
 - On Pi, the five original tools keep explicit call/result renderers and use
-  `keyHint("app.tools.expand", ...)`, not a hard-coded Ctrl+O label; monitor
-  uses the default card. On omp, never register Pi-signature renderers:
-  exec/write/kill delegate render and describe hooks to omp's bash renderer;
-  monitor, set_on_exit and list_sessions use omp's bounded default card.
+  `keyHint("app.tools.expand", ...)`, not a hard-coded Ctrl+O label. On omp,
+  never register Pi-signature renderers: exec/write/kill delegate render and
+  describe hooks to omp's bash renderer; monitor, set_on_exit and list_sessions
+  use omp's bounded default card.
 - On omp, mount the terminal HUD only while omp renders natively and the store
   holds a tty session, so the ANSI TUI gains no row. In Tern the pill takes a
   line of its own above omp's pill line. The stylesheet moves and resets the
