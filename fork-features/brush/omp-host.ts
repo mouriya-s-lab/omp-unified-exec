@@ -10,6 +10,9 @@
 import { getBashApprovalPatternRules } from "./approval.ts";
 import type { ApprovalHelpers, BashApprovalPatternRule } from "./approval.ts";
 import type { CwdServices } from "./plan.ts";
+import type { CliResolutionHelpers } from "./cli.ts";
+import { resolveCliEntryCmd } from "./cli.ts";
+import type { FlatShellSegment } from "./worktree.ts";
 
 /** omp's `Settings` for one session. Read only through the readers below. */
 export interface HostSettings {
@@ -61,6 +64,10 @@ export interface OmpHost {
 	readonly allowCompoundCommands: (settings: HostSettings) => boolean;
 	readonly approval: ApprovalHelpers;
 	readonly paths: CwdServices;
+	readonly worktreeClone: (settings: HostSettings) => boolean;
+	readonly rewriteGitWorktreeAdd: (command: string, cli: readonly string[]) => string;
+	readonly resolveCliEntryCmd: () => Promise<readonly string[]>;
+	readonly extractFlatShellCommandSegments: (command: string) => readonly FlatShellSegment[];
 }
 
 type Fn = (...args: never[]) => unknown;
@@ -143,7 +150,7 @@ function parseDirenvDiff(value: unknown): DirenvDiff | null {
 
 /** Load and parse the host services; rejects when omp lacks any of them. */
 export async function loadOmpHost(): Promise<OmpHost> {
-	const [root, nonInteractive, snapshot, direnvModule, settings, tokenizer, approvalModule, internalUrls, pathUtils] = await Promise.all([
+	const [root, nonInteractive, snapshot, direnvModule, settings, tokenizer, approvalModule, internalUrls, pathUtils, worktree, taskSettings, utils] = await Promise.all([
 		import("@oh-my-pi/pi-coding-agent"),
 		import("@oh-my-pi/pi-coding-agent/exec/non-interactive-env"),
 		import("@oh-my-pi/pi-coding-agent/utils/shell-snapshot"),
@@ -153,6 +160,9 @@ export async function loadOmpHost(): Promise<OmpHost> {
 		import("@oh-my-pi/pi-coding-agent/tools/approval"),
 		import("@oh-my-pi/pi-coding-agent/internal-urls"),
 		import("@oh-my-pi/pi-coding-agent/tools/path-utils"),
+		import("@oh-my-pi/pi-coding-agent/tools/bash-worktree-rewrite"),
+		import("@oh-my-pi/pi-coding-agent/task/settings"),
+		import("@oh-my-pi/pi-utils"),
 	]);
 	const registryClass: unknown = root.AgentRegistry;
 	const global = typeof registryClass === "function" && "global" in registryClass ? registryClass.global : undefined;
@@ -174,6 +184,36 @@ export async function loadOmpHost(): Promise<OmpHost> {
 	const shellMinimizer = settingReader(settings, "cfgShellMinimizer");
 	const approvalPatterns = settingReader(settings, "cfgBashPatterns");
 	const allowCompoundCommands = settingReader(settings, "cfgBashAllowCompoundCommands");
+	const worktreeClone = settingReader(taskSettings, "cfgWorktreeClone");
+	const isCompiledBinary = exportedFunction(utils, "isCompiledBinary", "pi-utils");
+	const stripPrefix = exportedFunction(utils, "stripWindowsExtendedLengthPathPrefix", "pi-utils") as (path: string) => unknown;
+	const isExecutable = exportedFunction(utils, "isExecutable", "pi-utils") as (path: string) => unknown;
+	const isFullyQualifiedPath = exportedFunction(utils, "isFullyQualifiedPath", "pi-utils") as (path: string) => unknown;
+	const which = exportedFunction(utils, "$which", "pi-utils") as (
+		command: string, options: { readonly requireAbsolutePaths: true; readonly cache: number },
+	) => unknown;
+	const bypass = property(property(utils, "WhichCachePolicy"), "Bypass");
+	if (typeof bypass !== "number") throw new Error("omp-unified-exec: pi-utils lacks WhichCachePolicy.Bypass");
+	const boolean = (value: unknown): value is boolean => typeof value === "boolean";
+	const string = (value: unknown): value is string => typeof value === "string";
+	const cliHelpers: CliResolutionHelpers = {
+		isCompiledBinary: () => expect("isCompiledBinary()", isCompiledBinary(), boolean),
+		stripWindowsExtendedLengthPathPrefix: (path) => expect("stripWindowsExtendedLengthPathPrefix()", stripPrefix(path), string),
+		isExecutable: (path) => expect("isExecutable()", isExecutable(path), boolean),
+		isFullyQualifiedPath: (path) => expect("isFullyQualifiedPath()", isFullyQualifiedPath(path), boolean),
+		which: (command) => expect("$which()", which(command, { requireAbsolutePaths: true, cache: bypass }),
+			(x): x is string | null => x === null || typeof x === "string"),
+		sourceCliEntryCmd: async () => {
+			// Only source hosts import this path; compiled omp does not retain it.
+			const module = await import("@oh-my-pi/pi-coding-agent/subprocess/worker-client");
+			const resolve = exportedFunction(module, "resolveCliEntryCmd", "subprocess/worker-client");
+			return expect("resolveCliEntryCmd()", resolve(),
+				(x): x is string[] => isStringArray(x) && x.length > 0 && x.every((part) => part.length > 0));
+		},
+	};
+	const rewrite = exportedFunction(worktree, "rewriteGitWorktreeAdd", "tools/bash-worktree-rewrite") as (
+		command: string, cli: readonly string[],
+	) => unknown;
 	const approval: ApprovalHelpers = {
 		criticalPatterns: expect("CRITICAL_BASH_PATTERNS", root.CRITICAL_BASH_PATTERNS,
 			(x): x is RegExp[] => Array.isArray(x) && x.every((pattern: unknown) => pattern instanceof RegExp)),
@@ -222,5 +262,9 @@ export async function loadOmpHost(): Promise<OmpHost> {
 		allowCompoundCommands: (s) => expect("bash.allowCompoundCommands", allowCompoundCommands(s), (x): x is boolean => typeof x === "boolean"),
 		approval,
 		paths,
+		worktreeClone: (s) => expect("worktree.clone", worktreeClone(s), boolean),
+		rewriteGitWorktreeAdd: (command, cli) => expect("rewriteGitWorktreeAdd()", rewrite(command, cli), string),
+		resolveCliEntryCmd: () => resolveCliEntryCmd(cliHelpers),
+		extractFlatShellCommandSegments: exportedFunction(tokenizer, "extractFlatShellCommandSegments", "tools/shell-tokenize") as OmpHost["extractFlatShellCommandSegments"],
 	};
 }

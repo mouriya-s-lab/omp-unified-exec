@@ -300,10 +300,15 @@ export function toShellResult(view: ResultView): ShellResult {
 // ---------------- argument model ----------------
 
 /** Pure: streamed exec_command args → bash command line. */
-export function execShellArgs(args: StreamedArgs<"cmd" | "workdir">): ShellArgs {
+export function execShellArgs(args: StreamedArgs<"cmd" | "workdir">, result?: HostResult): ShellArgs {
+	const details = result?.details;
+	const command = typeof details === "object" && details !== null && "command" in details
+		? optionalString(details.command) : undefined;
+	const cwd = typeof details === "object" && details !== null && "cwd" in details
+		? optionalString(details.cwd) : undefined;
 	return {
-		command: typeof args?.cmd === "string" ? args.cmd : undefined,
-		cwd: typeof args?.workdir === "string" && args.workdir.length > 0 ? args.workdir : undefined,
+		command: command ?? (typeof args?.cmd === "string" ? args.cmd : undefined),
+		cwd: cwd ?? (typeof args?.workdir === "string" && args.workdir.length > 0 ? args.workdir : undefined),
 	};
 }
 
@@ -329,18 +334,18 @@ export function killShellArgs(args: StreamedArgs<"session_id" | "signal">): Shel
 
 function delegateToShell<K extends string>(
 	bash: OmpShellRenderer,
-	adaptArgs: (args: StreamedArgs<K>) => ShellArgs,
+	adaptArgs: (args: StreamedArgs<K>, result?: HostResult) => ShellArgs,
 ): OmpToolHooks<K> {
 	const adaptResult = (result: HostResult, options: RenderOptions): ShellResult =>
 		toShellResult(parseResultView(result, options.isPartial === true));
 	return {
 		renderCall: (args, options, theme) => bash.renderCall(adaptArgs(args), options, theme),
 		renderResult: (result, options, theme, args) =>
-			bash.renderResult(adaptResult(result, options), options, theme, adaptArgs(args)),
+			bash.renderResult(adaptResult(result, options), options, theme, adaptArgs(args, result)),
 		describeCall: (args, options) => bash.describeCall(adaptArgs(args), options),
 		describeResult: (result, options, args) => {
 			const shell = adaptResult(result, options);
-			const view = bash.describeResult(shell, options, adaptArgs(args)) as { readonly tone?: unknown } | undefined;
+			const view = bash.describeResult(shell, options, adaptArgs(args, result)) as { readonly tone?: unknown } | undefined;
 			// Tern derives card status from the host result's isError, which stays false for a nonzero
 			// exit (an ordinary completion for the model); the view's tone is the display-side failure signal.
 			return shell.isError && view !== undefined ? { ...view, tone: view.tone ?? "error" } : view;

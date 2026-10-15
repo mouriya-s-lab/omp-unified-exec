@@ -32,9 +32,9 @@ import type { CommandApproval } from "../fork-features/brush/approval.ts";
 import { bindingContext, bindSession, recheckBinding } from "../fork-features/brush/binding.ts";
 import { planBrushRun } from "../fork-features/brush/environment.ts";
 import { BrushExecution, BrushShells, persistentLease } from "../fork-features/brush/execution.ts";
-import { createExecPlan } from "../fork-features/brush/plan.ts";
+import { createExecPlan, resolveExecutionPlan, rewriteWorktreePlan } from "../fork-features/brush/plan.ts";
 import type { ExecPlan } from "../fork-features/brush/plan.ts";
-import type { EngineHost, EngineVariant, HostRuntime } from "../fork-features/brush/runtime.ts";
+import type { EngineHost, EngineSelection, EngineVariant, HostRuntime } from "../fork-features/brush/runtime.ts";
 import { type ActivatedExtension, withHostPresentation } from "../fork-features/omp-presentation.ts";
 import { type CollectResult, NO_OUTPUT } from "./collect.ts";
 import { registerCompactCodemode } from "./codemode-render.ts";
@@ -68,7 +68,7 @@ import {
 } from "./script-result.ts";
 import { ExecSession } from "./session.ts";
 import { SessionStore } from "./session-store.ts";
-import { buildShellCommand, IS_WINDOWS, resolveDefaultShell, resolveWindowsShell } from "./shell.ts";
+import { buildShellCommand, IS_WINDOWS, processShellPath, selectProcessShell } from "./shell.ts";
 import type { TerminalAppearance } from "./terminal-screen.ts";
 import { MIN_EMPTY_YIELD_TIME_MS, nowUtcIso, parseYieldUntil, resolveEmptyPollYield } from "./time.ts";
 export { MAX_EMPTY_POLL_ENV_VAR, resolveMaxEmptyPollMs } from "./time.ts";
@@ -188,7 +188,7 @@ interface ExtensionCtx {
  * and every pipeline stage reading them — are unknown, so all three report
  * `host_binding_unavailable` instead of running unconfigured.
  */
-function selectEngine(engine: EngineHost, args: ExecCommandArgs): EngineVariant {
+function selectEngine(engine: EngineHost, args: ExecCommandArgs): EngineSelection {
 	switch (engine.kind) {
 		case "pi":
 			return args.tty === true ? { kind: "pty-process", host: "pi" } : { kind: "pipe-process", host: "pi" };
@@ -278,11 +278,14 @@ function heldOpenNote(session: ExecSession): string | undefined {
  * bash) as a real process with `process.env`, unchanged from before the
  * Brush engine.
  */
-function spawnProcessSession(ctx: ExtensionCtx, id: number, args: ExecCommandArgs, plan: ExecPlan): ExecSession {
-	let shellBin = args.shell;
-	if (!shellBin) {
-		const resolved = resolveDefaultShell();
-		shellBin = resolved.shell;
+function spawnProcessSession(
+	ctx: ExtensionCtx, id: number, args: ExecCommandArgs, plan: ExecPlan,
+	variant: Extract<EngineVariant, { readonly kind: "pipe-process" | "pty-process" }>,
+): ExecSession {
+	const selection = variant.host === "omp" ? variant.shell : selectProcessShell(args.shell);
+	const shellBin = processShellPath(selection);
+	if (selection.kind === "default") {
+		const resolved = selection.selection;
 		if (resolved.fellBack && !ctx.warnedShellFallback) {
 			ctx.warnedShellFallback = true;
 			ctx.ui?.notify(
@@ -301,12 +304,6 @@ function spawnProcessSession(ctx: ExtensionCtx, id: number, args: ExecCommandArg
 			ctx.notifiedBashSource = true;
 			ctx.ui?.notify(`unified-exec: using bash at ${resolved.shell} (not on PATH)`, "info");
 		}
-	} else if (IS_WINDOWS) {
-		// Resolve bare names to the absolute PATH match, failing closed —
-		// Windows' CreateProcess checks the child's cwd (the LLM-supplied
-		// workdir) before PATH for bare names, so an unresolved name must
-		// never reach spawn.
-		shellBin = resolveWindowsShell(shellBin);
 	}
 	const shellCommand = buildShellCommand(shellBin, plan.command);
 	return ExecSession.spawn(id, {
@@ -316,7 +313,7 @@ function spawnProcessSession(ctx: ExtensionCtx, id: number, args: ExecCommandArg
 		tty: plan.variant.kind === "pty-process",
 		cols: args.cols !== undefined ? clamp(Math.floor(args.cols), MIN_PTY_COLS, MAX_PTY_COLS) : undefined,
 		rows: args.rows !== undefined ? clamp(Math.floor(args.rows), MIN_PTY_ROWS, MAX_PTY_ROWS) : undefined,
-		displayCommand: plan.rawCommand,
+		displayCommand: plan.command,
 		shell: shellBin,
 		windowsVerbatimArguments: shellCommand.windowsVerbatimArguments,
 		appearance: ctx.appearance,
@@ -349,7 +346,7 @@ async function startBrushSession(
 	shells.retireOtherSessions(sessionId);
 	return ExecSession.brush(id, {
 		cwd: plan.cwd,
-		displayCommand: plan.rawCommand,
+		displayCommand: plan.command,
 		start: (onOutput) =>
 			BrushExecution.start({
 				shells,
@@ -388,7 +385,7 @@ async function runExecCommand(
 		command: args.cmd,
 		cwd: args.workdir && args.workdir.length > 0 ? args.workdir : cwd,
 		variant: selected,
-	} : await createExecPlan(args, cwd, selected);
+	} : await rewriteWorktreePlan(resolveExecutionPlan(await createExecPlan(args, cwd, selected), args.shell));
 	if (selected.host === "omp" && ctx.shuttingDown) {
 		throw new Error("unified-exec: session is shutting down; not starting new commands.");
 	}
@@ -412,7 +409,7 @@ async function runExecCommand(
 			break;
 		case "pipe-process":
 		case "pty-process":
-			session = spawnProcessSession(ctx, id, args, plan);
+			session = spawnProcessSession(ctx, id, args, plan, variant);
 			break;
 	}
 
@@ -427,7 +424,7 @@ async function runExecCommand(
 			tty,
 			logPath: undefined, // spawn failed — no log file
 			cwd: effectiveCwd,
-			command: plan.rawCommand,
+			command: plan.command,
 			yieldTimeMs,
 		});
 	}
@@ -468,7 +465,7 @@ async function runExecCommand(
 				tty,
 				logPath: session.logPath,
 				cwd: effectiveCwd,
-				command: plan.rawCommand,
+				command: plan.command,
 				yieldTimeMs,
 				extra: {
 					on_exit: args.on_exit,
@@ -529,7 +526,7 @@ async function runExecCommand(
 				tty,
 				logPath: session.logPath,
 				cwd: effectiveCwd,
-				command: plan.rawCommand,
+				command: plan.command,
 				yieldTimeMs,
 				extra: {
 					on_exit: args.on_exit,
@@ -553,7 +550,7 @@ async function runExecCommand(
 			tty,
 			logPath: session.logPath,
 			cwd: effectiveCwd,
-			command: plan.rawCommand,
+			command: plan.command,
 			yieldTimeMs,
 			extra: {
 				on_exit: args.on_exit,
@@ -1410,7 +1407,7 @@ function activate(pi: ExtensionAPI, host: HostRuntime = { kind: "pi" }): Activat
 			);
 			updateRunningSessionsUi(ctx);
 			return {
-				content: [{ type: "text", text: renderProcessResultText(shape) }],
+				content: [{ type: "text", text: renderProcessResultText(shape, ctx.engine.kind === "omp" ? shape.command : undefined) }],
 				details: shape,
 				structuredContent: processScriptResult(shape),
 			};
