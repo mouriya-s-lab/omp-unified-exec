@@ -16,7 +16,11 @@ const textDecoder = new TextDecoder("utf-8", { fatal: false });
 
 export type ProcessOperation = "exec_command" | "write_stdin";
 export type ProcessStatus = "running" | "exited";
-export type KillStatus = "killed" | "kill_failed";
+/**
+ * `already_exited`: a Brush session's execution had already ended when
+ * kill_session reached it, so nothing was terminated (#27 C2).
+ */
+export type KillStatus = "killed" | "kill_failed" | "already_exited";
 
 /** Fields shared by every result that carries child-process output. */
 export interface OutputResultDetails {
@@ -127,7 +131,7 @@ export interface FinalizeKillInput extends OutputEnvelopeInput {
 	cwd?: string;
 	command?: string;
 	escalated: boolean;
-	killed: boolean;
+	outcome: KillStatus;
 }
 
 function generateChunkId(): string {
@@ -259,12 +263,12 @@ export function finalizeKillResult(input: FinalizeKillInput): KillResultDetails 
 	const shape: KillResultDetails = {
 		...envelope,
 		operation: "kill_session",
-		status: input.killed ? "killed" : "kill_failed",
-		running: !input.killed,
+		status: input.outcome,
+		running: input.outcome === "kill_failed",
 		found: true,
 		session_id: input.sessionId,
 		requested_signal: input.requestedSignal,
-		killed: input.killed,
+		killed: input.outcome === "killed",
 		escalated: input.escalated,
 		tty: input.tty,
 	};
@@ -329,7 +333,12 @@ export function renderProcessResultText(shape: ProcessResultDetails): string {
 }
 
 export function renderKillResultText(shape: KillResultDetails): string {
-	const lines: string[] = [shape.killed ? "[killed]" : "[kill failed]"];
+	const heading: Record<KillStatus, string> = {
+		killed: "[killed]",
+		kill_failed: "[kill failed]",
+		already_exited: "[already exited]",
+	};
+	const lines: string[] = [heading[shape.status]];
 	lines.push(`session_id: ${shape.session_id}`);
 	if (shape.pid !== undefined) lines.push(`pid: ${shape.pid}`);
 	lines.push(`requested_signal: ${safeMeta(shape.requested_signal)}`);

@@ -14,3 +14,28 @@ declare module "@oh-my-pi/pi-tui/theme" {
 	export const isLightTheme: unknown;
 	export const getCurrentThemeName: unknown;
 }
+
+// Host modules the embedded brush shell reads through its session binding
+// (fork-features/brush/omp-host.ts parses them).
+declare module "@oh-my-pi/pi-coding-agent" {
+	export const AgentRegistry: unknown;
+}
+
+declare module "@oh-my-pi/pi-coding-agent/exec/non-interactive-env" {
+	export const buildNonInteractiveEnv: unknown;
+}
+
+declare module "@oh-my-pi/pi-coding-agent/utils/shell-snapshot" {
+	export const getOrCreateSnapshot: unknown;
+}
+
+declare module "@oh-my-pi/pi-coding-agent/exec/direnv" {
+	export const loadDirenvEnv: unknown;
+}
+
+declare module "@oh-my-pi/pi-coding-agent/exec/settings" {
+	export const cfgBashGitGuard: unknown;
+	export const cfgBashDirenv: unknown;
+	export const cfgBashDirenvLoadTimeoutMs: unknown;
+	export const cfgShellMinimizer: unknown;
+}

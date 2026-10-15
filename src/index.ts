@@ -27,6 +27,12 @@ import { constants as osConstants } from "node:os";
 import { type AgentToolResult, type AgentToolUpdateCallback, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type, type TUnsafe } from "typebox";
 
+import { bindingContext, bindSession, type HostBindingState, recheckBinding } from "../fork-features/brush/binding.ts";
+import { planBrushRun } from "../fork-features/brush/environment.ts";
+import { BrushExecution, BrushShells, persistentLease } from "../fork-features/brush/execution.ts";
+import type { NativeLoad } from "../fork-features/brush/native.ts";
+import type { HostSettings, OmpHost } from "../fork-features/brush/omp-host.ts";
+import type { HostRuntime } from "../fork-features/brush/runtime.ts";
 import { type ActivatedExtension, withHostPresentation } from "../fork-features/omp-presentation.ts";
 import { type CollectResult, NO_OUTPUT } from "./collect.ts";
 import { registerCompactCodemode } from "./codemode-render.ts";
@@ -71,6 +77,7 @@ import {
 	renderProcessResultText,
 	terminalViewDetails,
 	type FinalizeProcessInput,
+	type KillStatus,
 	type ProcessResultDetails,
 } from "./tool-result.ts";
 import { unescapeChars } from "./unescape.ts";
@@ -166,6 +173,61 @@ interface ExtensionCtx {
 	shuttingDown: boolean;
 	/** The host's light/dark appearance, which tty sessions answer to OSC 10/11. */
 	appearance: () => TerminalAppearance;
+	/** Which host runs the extension and, on omp, the embedded brush shell's state. */
+	engine: EngineHost;
+	/** Aborted at session_shutdown: attached waits end with it. */
+	lifetime: AbortController;
+}
+
+/**
+ * Pi runs every command as a real process, as before. omp also runs
+ * `tty: false` commands without `shell` on the embedded brush shell, which
+ * needs the session binding (#27 C1) and the native addon (C3).
+ */
+type EngineHost = { readonly kind: "pi" } | OmpEngine;
+
+interface OmpEngine {
+	readonly kind: "omp";
+	readonly services: OmpHost;
+	readonly native: NativeLoad;
+	readonly warn: (message: string) => void;
+	binding: HostBindingState;
+	/** This activation's persistent and retained shells; recreated after a shutdown re-arms the extension. */
+	shells: BrushShells | undefined;
+}
+
+/** The engine running one exec_command (#27 C2). */
+type EngineVariant =
+	| { readonly kind: "brush"; readonly engine: OmpEngine; readonly settings: HostSettings }
+	| { readonly kind: "pipe-process" }
+	| { readonly kind: "pty-process" };
+
+/**
+ * Dispatch by host, `tty` and `shell` only (#27 G1). On omp every variant
+ * first needs the bound session (C1): without it the session's settings —
+ * and every pipeline stage reading them — are unknown, so all three report
+ * `host_binding_unavailable` instead of running unconfigured.
+ */
+function selectEngine(engine: EngineHost, args: ExecCommandArgs): EngineVariant {
+	switch (engine.kind) {
+		case "pi":
+			return args.tty === true ? { kind: "pty-process" } : { kind: "pipe-process" };
+		case "omp": {
+			const binding = engine.binding;
+			if (binding.kind !== "bound") {
+				const reason = binding.kind === "unbound" ? binding.reason : "no session has started";
+				throw execError("host_binding_unavailable", `this omp session could not be bound to its host session (${reason})`);
+			}
+			if (args.tty === true) return { kind: "pty-process" };
+			if (args.shell !== undefined && args.shell.length > 0) return { kind: "pipe-process" };
+			return { kind: "brush", engine, settings: binding.session.settings };
+		}
+	}
+}
+
+/** Typed tool error: the model sees `<code>: <detail>`. */
+function execError(code: "host_binding_unavailable" | "native_shell_unavailable" | "session_not_running", detail: string): Error {
+	return new Error(`${code}: ${detail}`);
 }
 
 type ExecCommandArgs = {
@@ -229,26 +291,12 @@ function heldOpenNote(session: ExecSession): string | undefined {
 	return session.shellExited && !session.hasExited ? HELD_OPEN_NOTE : undefined;
 }
 
-async function runExecCommand(
-	ctx: ExtensionCtx,
-	args: ExecCommandArgs,
-	signal: AbortSignal | undefined,
-	onUpdate: AgentToolUpdateCallback<ProcessUpdateDetails> | undefined,
-	cwd: string,
-): Promise<ResponseShape> {
-	const finalizeResponse = (input: FinalizeInput): ResponseShape =>
-		finalizeProcessResult({ ...input, operation: "exec_command" });
-	if (ctx.shuttingDown) {
-		throw new Error("unified-exec: session is shutting down; not starting new commands.");
-	}
-	const tty = args.tty ?? false;
-	if (tty && !isPtyAvailable()) {
-		throw new Error(
-			`tty: true is unavailable: ${getPtyLoadError() ?? "no supported PTY backend"}.\n` +
-				`Upgrade Bun to a version with Bun.Terminal, install Node optional dependencies, or call with tty: false.`,
-		);
-	}
-
+/**
+ * Spawn a PipeProcess or PtyProcess session: the configured shell (default
+ * bash) as a real process with `process.env`, unchanged from before the
+ * Brush engine.
+ */
+function spawnProcessSession(ctx: ExtensionCtx, id: number, args: ExecCommandArgs, cwd: string, tty: boolean): ExecSession {
 	let shellBin = args.shell;
 	if (!shellBin) {
 		const resolved = resolveDefaultShell();
@@ -279,14 +327,9 @@ async function runExecCommand(
 		shellBin = resolveWindowsShell(shellBin);
 	}
 	const shellCommand = buildShellCommand(shellBin, args.cmd);
-	const effectiveCwd = args.workdir && args.workdir.length > 0 ? args.workdir : cwd;
-	const yieldTimeMs = clampYield(args.yield_time_ms, DEFAULT_EXEC_YIELD_MS);
-	const wantsWake = args.on_exit === "wake";
-
-	const id = ctx.store.allocateId();
-	const session = ExecSession.spawn(id, {
+	return ExecSession.spawn(id, {
 		command: shellCommand.command,
-		cwd: effectiveCwd,
+		cwd,
 		env: process.env,
 		tty,
 		cols: args.cols !== undefined ? clamp(Math.floor(args.cols), MIN_PTY_COLS, MAX_PTY_COLS) : undefined,
@@ -296,6 +339,89 @@ async function runExecCommand(
 		windowsVerbatimArguments: shellCommand.windowsVerbatimArguments,
 		appearance: ctx.appearance,
 	});
+}
+
+/**
+ * Start a Brush session: the command runs on the plugin's embedded brush
+ * shell with the bound session's shell configuration (rc snapshot, direnv,
+ * non-interactive env, Git Guard), on the session's persistent shell when the
+ * host would run it directly (#27 C2).
+ */
+async function startBrushSession(
+	ctx: ExtensionCtx,
+	variant: Extract<EngineVariant, { kind: "brush" }>,
+	id: number,
+	args: ExecCommandArgs,
+	cwd: string,
+	sessionId: string,
+	signal: AbortSignal | undefined,
+): Promise<ExecSession> {
+	const { engine, settings } = variant;
+	if (engine.native.kind === "unavailable") {
+		throw execError("native_shell_unavailable", `the embedded shell's native addon could not be loaded (${engine.native.reason})`);
+	}
+	const native = engine.native.module;
+	const plan = await planBrushRun(engine.services, settings, sessionId, args.cmd, cwd, signal);
+	if (ctx.shuttingDown) throw new Error("unified-exec: session is shutting down; not starting new commands.");
+	engine.shells ??= new BrushShells(native);
+	const shells = engine.shells;
+	shells.retireOtherSessions(sessionId);
+	return ExecSession.brush(id, {
+		cwd,
+		displayCommand: args.cmd,
+		start: (onOutput) =>
+			BrushExecution.start({
+				shells,
+				native,
+				key: plan.key,
+				shellOptions: plan.shellOptions,
+				persistent: persistentLease({ kind: "coordinator" }),
+				command: plan.command,
+				cwd,
+				env: plan.env,
+				timeoutMs: undefined,
+				onOutput,
+			}),
+	});
+}
+
+async function runExecCommand(
+	ctx: ExtensionCtx,
+	args: ExecCommandArgs,
+	signal: AbortSignal | undefined,
+	onUpdate: AgentToolUpdateCallback<ProcessUpdateDetails> | undefined,
+	cwd: string,
+	/** The host session id, read only by Brush (it keys the persistent shell). */
+	sessionId: () => string,
+): Promise<ResponseShape> {
+	const finalizeResponse = (input: FinalizeInput): ResponseShape =>
+		finalizeProcessResult({ ...input, operation: "exec_command" });
+	if (ctx.shuttingDown) {
+		throw new Error("unified-exec: session is shutting down; not starting new commands.");
+	}
+	const variant = selectEngine(ctx.engine, args);
+	const tty = variant.kind === "pty-process";
+	if (tty && !isPtyAvailable()) {
+		throw new Error(
+			`tty: true is unavailable: ${getPtyLoadError() ?? "no supported PTY backend"}.\n` +
+				`Upgrade Bun to a version with Bun.Terminal, install Node optional dependencies, or call with tty: false.`,
+		);
+	}
+	const effectiveCwd = args.workdir && args.workdir.length > 0 ? args.workdir : cwd;
+	const yieldTimeMs = clampYield(args.yield_time_ms, DEFAULT_EXEC_YIELD_MS);
+	const wantsWake = args.on_exit === "wake";
+
+	const id = ctx.store.allocateId();
+	let session: ExecSession;
+	switch (variant.kind) {
+		case "brush":
+			session = await startBrushSession(ctx, variant, id, args, effectiveCwd, sessionId(), signal);
+			break;
+		case "pipe-process":
+		case "pty-process":
+			session = spawnProcessSession(ctx, id, args, effectiveCwd, tty);
+			break;
+	}
 
 	if (session.failureMessage) {
 		return finalizeResponse({
@@ -493,12 +619,25 @@ async function runWriteStdin(
 	try {
 		let writeFailure: string | null = null;
 		if (writeBytes) {
-			const ok = session.write(writeBytes);
-			if (!ok && !session.hasExited) {
+			const written = await session.writeInput(writeBytes);
+			if (written.kind === "refused") {
 				// Still running but stdin is gone (child closed it / EPIPE earlier).
-				writeFailure = "stdin write failed: the child closed its stdin; bytes were not delivered";
+				writeFailure = `stdin write failed: ${written.reason}; bytes were not delivered`;
 			}
-			if (!ok && session.hasExited) {
+			if (written.kind === "not_running" && session.isBrush) {
+				// A Brush execution's stdin ended with it: say so, with its exit
+				// status, and drop the record — a later write is an unknown id and
+				// can never reach another execution (#27 C2).
+				const status =
+					session.exitCode !== null ? `exit_code: ${session.exitCode}` : `failure: ${session.failureMessage ?? "unknown"}`;
+				ctx.coordinator.observeViaListing(session.id);
+				removeSession(ctx, session.id);
+				throw execError(
+					"session_not_running",
+					`session_id ${session.id} has already exited (${status}); nothing was written and the session is now closed.`,
+				);
+			}
+			if (written.kind === "not_running") {
 				// Session already exited; return its final state.
 				const collected = await session.collect({ deadlineMs: Date.now() + 50, externalAbort: signal });
 				const armed = ctx.coordinator.isArmed(session.id);
@@ -695,8 +834,50 @@ interface TerminateOutcome {
 	session: ExecSession;
 	escalated: boolean;
 	collected: CollectResult;
-	/** true when the process is confirmed dead; false = kill did NOT land. */
-	killed: boolean;
+	/**
+	 * `killed`: confirmed dead; `kill_failed`: the kill did NOT land;
+	 * `already_exited`: a Brush execution had already ended, so nothing was
+	 * terminated (#27 C2).
+	 */
+	outcome: KillStatus;
+}
+
+/**
+ * How long a cancelled Brush execution may take to settle: the native
+ * shell's cancellation grace (2 s, 5 s on Windows) plus its output drain.
+ */
+const BRUSH_TERMINATE_WAIT_MS = IS_WINDOWS ? 8000 : 5000;
+
+/**
+ * Brush sessions end only through their execution's termination primitive
+ * (#27 C2), which reaps the processes the run spawned. An execution that had
+ * already ended is reported as such — observed, not killed.
+ */
+async function terminateBrushSession(ctx: ExtensionCtx, session: ExecSession): Promise<TerminateOutcome> {
+	const sid = session.id;
+	const observeEnded = async (): Promise<TerminateOutcome> => {
+		const collected = await session.collect({ deadlineMs: Date.now() + 100 });
+		ctx.coordinator.observeViaListing(sid);
+		removeSession(ctx, sid);
+		return { session, escalated: false, collected, outcome: "already_exited" };
+	};
+	if (session.hasExited) return observeEnded();
+	// Suppress the wake BEFORE cancelling so the induced exit can never race a wake enqueue.
+	ctx.coordinator.suppress(sid);
+	if (session.terminateBrush() === "already-settled") {
+		ctx.coordinator.restoreAfterFailedKill(sid);
+		await waitForExitOrDeadline({ exited: session.exited, durationMs: 1000 });
+		return observeEnded();
+	}
+	await waitForExitOrDeadline({ exited: session.exited, durationMs: BRUSH_TERMINATE_WAIT_MS });
+	const collected = await session.collect({ deadlineMs: Date.now() + 100 });
+	if (!session.hasExited) {
+		ctx.coordinator.restoreAfterFailedKill(sid);
+		return { session, escalated: false, collected, outcome: "kill_failed" };
+	}
+	ctx.coordinator.confirmKill(sid);
+	removeSession(ctx, sid);
+	return { session, escalated: false, collected, outcome: "killed" };
 }
 
 /**
@@ -704,8 +885,10 @@ interface TerminateOutcome {
  * trailing output, and remove it from the store — but ONLY on confirmed
  * exit. A kill that doesn't land (taskkill failure, access denied,
  * unkillable state) keeps the session in the store and returns
- * killed: false, so ownership of a live process is never silently dropped.
- * Shared by the kill_session tool and the /unified-exec-sessions command.
+ * `kill_failed`, so ownership of a live process is never silently dropped.
+ * Brush sessions go through their termination primitive instead.
+ * Shared by the kill_session tool, the /unified-exec-sessions command and
+ * the Tern HUD.
  */
 async function terminateSessionById(
 	ctx: ExtensionCtx,
@@ -714,6 +897,7 @@ async function terminateSessionById(
 ): Promise<TerminateOutcome | undefined> {
 	const session = ctx.store.get(sid);
 	if (!session) return undefined;
+	if (session.isBrush) return terminateBrushSession(ctx, session);
 	// Explicit kill (model tool or human slash command): suppress the wake
 	// BEFORE signaling so the induced exit can never race a wake enqueue.
 	ctx.coordinator.suppress(sid);
@@ -740,7 +924,7 @@ async function terminateSessionById(
 		// Restore its prior wake eligibility.
 		ctx.coordinator.restoreAfterFailedKill(sid);
 	}
-	return { session, escalated, collected, killed };
+	return { session, escalated, collected, outcome: killed ? "killed" : "kill_failed" };
 }
 
 function runningSessions(ctx: ExtensionCtx): ExecSession[] {
@@ -892,11 +1076,21 @@ function startStreaming(
 	};
 }
 
+/** The tool call's own abort plus the plugin's lifetime: shutdown ends every attached wait. */
+function withLifetime(ctx: ExtensionCtx, signal: AbortSignal | undefined): AbortSignal {
+	return signal ? AbortSignal.any([signal, ctx.lifetime.signal]) : ctx.lifetime.signal;
+}
+
+/** omp-only session events, absent from Pi's typings: `/new`, resume and fork; `/branch` and btw. */
+interface OmpSessionEvents {
+	on(event: "session_switch" | "session_branch", handler: (event: unknown, ctx: ExtensionContext) => Promise<void>): void;
+}
+
 /**
- * @param appearance the host's light/dark appearance; hosts that cannot tell
- *   (Pi) leave the default dark, as omp's own Console answers.
+ * @param host Pi, or omp with its appearance and the embedded brush shell's
+ *   services. Pi leaves the default dark appearance, as omp's own Console answers.
  */
-function activate(pi: ExtensionAPI, appearance: () => TerminalAppearance = () => "dark"): ActivatedExtension {
+function activate(pi: ExtensionAPI, host: HostRuntime = { kind: "pi" }): ActivatedExtension {
 	const coordinator = new CompletionCoordinator({
 		send: (message) => {
 			// If pi is idle this starts a model turn; if a run is active it is
@@ -930,8 +1124,21 @@ function activate(pi: ExtensionAPI, appearance: () => TerminalAppearance = () =>
 		notifiedBashSource: false,
 		pendingSessions: new Set(),
 		shuttingDown: false,
-		appearance,
+		appearance: host.kind === "omp" ? host.appearance : () => "dark",
+		engine:
+			host.kind === "omp"
+				? {
+						kind: "omp",
+						services: host.services,
+						native: host.native,
+						warn: host.warn,
+						binding: { kind: "pending" },
+						shells: undefined,
+					}
+				: { kind: "pi" },
+		lifetime: new AbortController(),
 	};
+	const engine = ctx.engine;
 
 	// By default, unified-exec removes pi's built-in `bash` tool so the LLM
 	// is steered toward exec_command/write_stdin. Pass --keep-builtin-bash to
@@ -952,8 +1159,17 @@ function activate(pi: ExtensionAPI, appearance: () => TerminalAppearance = () =>
 	});
 
 	pi.on("session_start", async (_event, eventCtx) => {
+		// First session_start of this activation: bind the host session once
+		// (#27 C1), before the active tool set changes.
+		if (engine.kind === "omp" && engine.binding.kind === "pending") {
+			engine.binding = bindSession(engine.services, bindingContext(eventCtx));
+			if (engine.binding.kind === "unbound") {
+				engine.warn(`omp-unified-exec: host session binding unavailable (${engine.binding.reason})`);
+			}
+		}
 		ctx.ui = eventCtx.ui;
 		ctx.shuttingDown = false; // reload/new/resume re-arms the extension
+		if (ctx.lifetime.signal.aborted) ctx.lifetime = new AbortController();
 		ctx.coordinator.reset(); // never resurrect wakes from a previous session
 		updateRunningSessionsUi(ctx);
 		// Default behavior is to remove the built-in `bash` tool. Only keep it
@@ -981,14 +1197,48 @@ function activate(pi: ExtensionAPI, appearance: () => TerminalAppearance = () =>
 		updateRunningSessionsUi(ctx, { showWidget: true, notifyTree: runningSessions(ctx).length > 0 });
 	});
 
+	if (engine.kind === "omp") {
+		// omp's `/new`, resume and fork emit session_switch; `/branch` and btw
+		// emit session_branch; neither emits session_start. Both keep this
+		// activation's AgentSession, so only its identity is re-checked (#27 C1).
+		// The session id may have changed: shells keyed by another id leave the
+		// persistent table (#27 C2).
+		const onSessionBoundary = async (_event: unknown, eventCtx: ExtensionContext): Promise<void> => {
+			const before = engine.binding.kind;
+			const next = recheckBinding(engine.binding, bindingContext(eventCtx));
+			engine.binding = next;
+			if (before === "bound" && next.kind === "unbound") {
+				engine.warn(`omp-unified-exec: host session binding lost (${next.reason})`);
+			}
+			engine.shells?.retireOtherSessions(eventCtx.sessionManager.getSessionId());
+		};
+		// These events exist only on omp; Pi's ExtensionAPI typings do not declare them.
+		const ompEvents = pi as unknown as OmpSessionEvents;
+		ompEvents.on("session_switch", onSessionBoundary);
+		ompEvents.on("session_branch", onSessionBoundary);
+	}
+
 	pi.on("session_shutdown", async () => {
-		// Reject new sessions from here on and terminate everything we own —
-		// including sessions still inside exec_command's early-exit grace
-		// window (spawned but not yet inserted into the store).
+		// Reject new executions and observations from here on and terminate
+		// everything we own — including sessions still inside exec_command's
+		// early-exit grace window (spawned but not yet inserted into the store).
 		ctx.shuttingDown = true;
 		// Cancel wake timers/listeners first: no stale prompt may ever be
 		// injected into a new or closed session.
 		ctx.coordinator.shutdown();
+		const owned = [...ctx.store.values(), ...ctx.pendingSessions];
+		// Brush executions end through their termination primitive (#27 C2),
+		// then attached waits end, then every persistent and retained shell is
+		// disposed, which ends their `&` jobs. omp gives this handler ~2 s, so
+		// the dispose is not awaited past a short budget; the native side
+		// finishes it.
+		for (const s of owned) if (s.isBrush && !s.hasExited) s.terminateBrush();
+		ctx.lifetime.abort();
+		if (engine.kind === "omp" && engine.shells) {
+			const disposing = engine.shells.disposeAll();
+			engine.shells = undefined;
+			await Promise.race([disposing, sleep(500)]);
+		}
 		const drained = ctx.store.terminateAll();
 		for (const s of ctx.pendingSessions) {
 			if (!s.hasExited) {
@@ -1004,10 +1254,11 @@ function activate(pi: ExtensionAPI, appearance: () => TerminalAppearance = () =>
 		// initial kill is already a force tree-kill and a second taskkill is
 		// byte-identical, so skip the escalation there (the grace wait above
 		// still confirms exits). Event-driven per session: each wait resolves
-		// the instant that session's exit fires.
+		// the instant that session's exit fires. A Brush session ignores the
+		// signal: its cancelled execution settles on its own.
 		await Promise.all(drained.map((s) => waitForExitOrDeadline({ exited: s.exited, durationMs: 1000 })));
 		if (!IS_WINDOWS) {
-			const survivors = drained.filter((s) => !s.hasExited);
+			const survivors = drained.filter((s) => !s.hasExited && !s.isBrush);
 			for (const s of survivors) s.kill("SIGKILL");
 			await Promise.all(survivors.map((s) => waitForExitOrDeadline({ exited: s.exited, durationMs: 500 })));
 		}
@@ -1054,8 +1305,8 @@ function activate(pi: ExtensionAPI, appearance: () => TerminalAppearance = () =>
 			let failed = 0;
 			for (const s of targets) {
 				const outcome = await terminateSessionById(ctx, s.id, "SIGTERM");
-				if (outcome?.killed) killed++;
-				else if (outcome) failed++;
+				if (outcome?.outcome === "killed") killed++;
+				else if (outcome?.outcome === "kill_failed") failed++;
 			}
 			updateRunningSessionsUi(ctx);
 			cmdCtx.ui.notify(
@@ -1122,7 +1373,14 @@ function activate(pi: ExtensionAPI, appearance: () => TerminalAppearance = () =>
 		}),
 		async execute(_toolCallId, params, signal, onUpdate, eventCtx) {
 			ctx.ui ??= eventCtx.ui;
-			const shape = await runExecCommand(ctx, params, signal, onUpdate, eventCtx.cwd);
+			const shape = await runExecCommand(
+				ctx,
+				params,
+				withLifetime(ctx, signal),
+				onUpdate,
+				eventCtx.cwd,
+				() => eventCtx.sessionManager.getSessionId(),
+			);
 			updateRunningSessionsUi(ctx);
 			return {
 				content: [{ type: "text", text: renderProcessResultText(shape) }],
@@ -1176,7 +1434,10 @@ function activate(pi: ExtensionAPI, appearance: () => TerminalAppearance = () =>
 		}),
 		async execute(toolCallId, params, signal, onUpdate, eventCtx) {
 			ctx.ui ??= eventCtx.ui;
-			const shape = await runWriteStdin(ctx, params, signal, onUpdate, toolCallId);
+			if (ctx.shuttingDown && engine.kind === "omp") {
+				throw new Error("unified-exec: session is shutting down; not observing sessions.");
+			}
+			const shape = await runWriteStdin(ctx, params, withLifetime(ctx, signal), onUpdate, toolCallId);
 			updateRunningSessionsUi(ctx);
 			return {
 				content: [{ type: "text", text: renderProcessResultText(shape) }],
@@ -1293,17 +1554,20 @@ function activate(pi: ExtensionAPI, appearance: () => TerminalAppearance = () =>
 					structuredContent: killNotFoundScriptResult(sid),
 				};
 			}
-			const { session, escalated, collected, killed } = outcome;
+			const { session, escalated, collected } = outcome;
 			updateRunningSessionsUi(ctx);
-			const killFailure = killed
-				? session.failureMessage
-				: [
-						`process still running after ${initial}${escalated ? " and SIGKILL escalation" : ""}; ` +
-							"the session remains registered — retry kill_session or check permissions",
-						session.failureMessage,
-					]
-					.filter((value): value is string => Boolean(value))
-					.join("; ");
+			const killFailure =
+				outcome.outcome === "kill_failed"
+					? [
+							session.isBrush
+								? "the command did not confirm termination; the session remains registered — retry kill_session"
+								: `process still running after ${initial}${escalated ? " and SIGKILL escalation" : ""}; ` +
+									"the session remains registered — retry kill_session or check permissions",
+							session.failureMessage,
+						]
+							.filter((value): value is string => Boolean(value))
+							.join("; ")
+					: session.failureMessage;
 			const details = finalizeKillResult({
 				wallTimeSec: (Date.now() - startedAt) / 1000,
 				collected,
@@ -1319,7 +1583,7 @@ function activate(pi: ExtensionAPI, appearance: () => TerminalAppearance = () =>
 				cwd: session.cwd,
 				command: session.displayCommand,
 				escalated,
-				killed,
+				outcome: outcome.outcome,
 			});
 			return {
 				content: [{ type: "text", text: renderKillResultText(details) }],
@@ -1367,6 +1631,8 @@ function activate(pi: ExtensionAPI, appearance: () => TerminalAppearance = () =>
 					cwd: s.cwd,
 					tty: s.tty,
 					pid: s.pid,
+					// Brush sessions have no process of their own: while running they report the pids their run spawned.
+					pids: s.isBrush && !s.hasExited ? [...(s.brushPids() ?? [])] : undefined,
 					started_at_ms: s.startedAt,
 					elapsed_ms: now - s.startedAt,
 					running: !s.hasExited,
@@ -1384,7 +1650,8 @@ function activate(pi: ExtensionAPI, appearance: () => TerminalAppearance = () =>
 							? ""
 							: `  [exited${s.exit_code !== undefined && s.exit_code !== null ? ` exit_code=${s.exit_code}` : ""}${s.signal ? ` signal=${s.signal}` : ""}; removed from store]`;
 						const wake = s.wake_armed ? " [wake]" : "";
-						return `  ${String(s.session_id).padStart(3)}  pid=${String(s.pid ?? "?").padStart(6)}  ${
+						const pidLabel = s.pids ? `pids=${s.pids.join(",") || "-"}` : `pid=${String(s.pid ?? "?").padStart(6)}`;
+						return `  ${String(s.session_id).padStart(3)}  ${pidLabel}  ${
 							s.tty ? "tty" : "pipe"
 						}  ${((s.elapsed_ms / 1000).toFixed(1) + "s").padStart(8)}${wake}  ${oneLineCommand(s.command, 60)}${exitedSuffix}\n        log: ${s.log_path}`;
 					})
@@ -1418,7 +1685,7 @@ function activate(pi: ExtensionAPI, appearance: () => TerminalAppearance = () =>
 		kill: async (id) => {
 			const outcome = await terminateSessionById(ctx, id, "SIGTERM");
 			updateRunningSessionsUi(ctx);
-			return outcome?.killed === true;
+			return outcome?.outcome === "killed";
 		},
 	};
 }

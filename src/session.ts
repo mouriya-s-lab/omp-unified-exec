@@ -1,11 +1,15 @@
 /**
- * ExecSession — wraps a SpawnedChild with:
+ * ExecSession — wraps one execution engine with:
  *   - pipe sessions: a head+tail output buffer (drained by polls) and a
  *     rolling tail window (for TUI streaming via onUpdate)
  *   - tty sessions: a TerminalScreen that renders the child's output as a
  *     terminal shows it (observed by polls, snapshotted for TUI streaming)
  *   - state transitions (has_exited / exit_code / signal / failure)
  *   - lifecycle callbacks (onData taps, onExit fan-out)
+ *
+ * The engine is a real process (`SpawnedChild`: pipes or PTY) or, on omp, an
+ * embedded brush shell execution (`BrushExecution`, fork-features/README.md
+ * "Embedded brush shell"); output, logs and exit state are handled the same.
  *
  * Mirrors codex's `UnifiedExecProcess` in `unified_exec/process.rs`, simplified
  * to the subset we need for the pi extension.
@@ -16,6 +20,7 @@ import { closeSync, createWriteStream, openSync, type WriteStream } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import type { BrushExecution, TerminateResult } from "../fork-features/brush/execution.ts";
 import { type CollectResult, collectOutputUntilDeadline } from "./collect.ts";
 import { HeadTailBuffer } from "./head-tail-buffer.ts";
 import { Gate, Notify } from "./notify.ts";
@@ -43,6 +48,29 @@ export interface SessionSpawnOptions {
 	/** tty only: the background the session's screen is shown on (default dark), answered to OSC 10/11. */
 	appearance?: () => TerminalAppearance;
 }
+
+/** A Brush session: an embedded brush shell execution instead of a spawned process. */
+export interface BrushSessionOptions {
+	cwd: string;
+	displayCommand: string;
+	headTailMaxBytes?: number;
+	streamTailBytes?: number;
+	/** Start the execution, forwarding its output to `onOutput`. */
+	start: (onOutput: (chunk: string) => void) => BrushExecution;
+}
+
+/** What a session runs: a spawned process (pipes or PTY) or an embedded brush execution. */
+type SessionEngine =
+	| { readonly kind: "process"; readonly child: SpawnedChild }
+	| { readonly kind: "brush"; readonly execution: BrushExecution };
+
+/** Outcome of writing input to a session. */
+export type InputWrite =
+	| { readonly kind: "written" }
+	/** The session already exited; nothing was written. */
+	| { readonly kind: "not_running" }
+	/** The process is running but did not take the bytes (its stdin is closed). */
+	| { readonly kind: "refused"; readonly reason: string };
 
 export interface SessionState {
 	hasExited: boolean;
@@ -96,12 +124,18 @@ export class ExecSession {
 	};
 	private readonly exitListeners = new Set<(session: ExecSession) => void>();
 	private lastUsedAt: number;
-	private child!: SpawnedChild;
+	private engine!: SessionEngine;
 
-	private constructor(id: number, opts: SessionSpawnOptions) {
+	private constructor(
+		id: number,
+		opts: Pick<SessionSpawnOptions, "cwd" | "tty" | "headTailMaxBytes" | "streamTailBytes"> & {
+			command: string[];
+			displayCommand: string;
+		},
+	) {
 		this.id = id;
 		this.command = opts.command;
-		this.displayCommand = opts.displayCommand ?? opts.command.join(" ");
+		this.displayCommand = opts.displayCommand;
 		this.cwd = opts.cwd;
 		this.tty = opts.tty;
 		this.startedAt = Date.now();
@@ -113,34 +147,14 @@ export class ExecSession {
 	}
 
 	static spawn(id: number, opts: SessionSpawnOptions): ExecSession {
-		const self = new ExecSession(id, opts);
-
-		// Touch-create the file synchronously so it exists on disk from t=0
-		// even before the child writes anything (and before the lazy stream
-		// opens the fd on its first buffered write). Then open a stream in
-		// append mode for the actual writes.
-		try {
-			closeSync(openSync(self.logPath, "w"));
-			self.logStream = createWriteStream(self.logPath, { flags: "a" });
-			self.logStream.on("error", (err) => {
-				// Log-stream error (disk full, permissions, etc.). The child is
-				// still running: record the failure and stop mirroring writes, but
-				// do NOT mark the session exited — that would make it unkillable
-				// (kill() no-ops once hasExited) and orphan the process.
-				self.recordFailure(`log stream error: ${err?.message ?? err}`);
-				self.logStream = undefined;
-			});
-		} catch (err: any) {
-			self.markFailure(`failed to open log file ${self.logPath}: ${err?.message ?? err}`);
-			self.exitedAc.abort();
-			self.outputClosed.close();
-			return self;
-		}
+		const self = new ExecSession(id, { ...opts, displayCommand: opts.displayCommand ?? opts.command.join(" ") });
+		if (!self.openLog()) return self;
 
 		const cols = opts.cols ?? DEFAULT_PTY_COLS;
 		const rows = opts.rows ?? DEFAULT_PTY_ROWS;
+		let child: SpawnedChild;
 		try {
-			self.child = spawnChild({
+			child = spawnChild({
 				command: opts.command,
 				cwd: opts.cwd,
 				env: opts.env,
@@ -157,64 +171,133 @@ export class ExecSession {
 			self.outputClosed.close();
 			return self;
 		}
+		self.engine = { kind: "process", child };
 
 		// child's actual pid
-		Object.defineProperty(self, "pid", { value: self.child.pid, enumerable: true });
+		Object.defineProperty(self, "pid", { value: child.pid, enumerable: true });
 
 		// A real terminal answers queries (cursor position, device attributes);
 		// a child that waits for the answer would otherwise stall.
 		if (opts.tty) self.screen = new TerminalScreen(cols, rows, (reply) => void self.write(reply), opts.appearance);
 
-		self.child.onData((chunk) => {
-			self.totalOutputBytes += chunk.length;
-			if (self.screen) {
-				self.screen.write(chunk);
-			} else {
-				self.outputBuffer.pushChunk(chunk);
-				self.appendStreamTail(chunk);
-			}
-			// Mirror every byte to the log file. Errors are handled by the
-			// 'error' listener on the stream, which nulls `logStream` out.
-			self.logStream?.write(Buffer.from(chunk));
-			self.outputNotify.notifyAll();
-		});
-
-		self.child.onExit((exitCode, signal, failureMessage) => {
-			self.state = {
-				hasExited: true,
-				exitCode,
-				signal,
-				failureMessage: self.state.failureMessage ?? failureMessage ?? null,
-			};
-			self.exitedAc.abort();
-			self.notifyExitListeners();
-			// Fire a notify so any parked waiters wake up and see the exit.
-			self.outputNotify.notifyAll();
-			// A short tick later, flush the log stream to disk, then close the
-			// output gate. The tick lets any pending data-handler chunks land
-			// in the buffer+log before we declare the session fully done.
-			setImmediate(() => {
-				self.outputNotify.notifyAll();
-				const stream = self.logStream;
-				self.logStream = undefined;
-				if (!stream) {
-					self.outputClosed.close();
-					self.outputNotify.notifyAll();
-					return;
-				}
-				const finalize = () => {
-					self.outputClosed.close();
-					self.outputNotify.notifyAll();
-				};
-				// Wait for the stream to finish flushing before declaring
-				// `outputClosed` so consumers that await the drain see a
-				// fully-flushed log file on disk.
-				stream.once("close", finalize);
-				stream.end();
-			});
-		});
-
+		child.onData((chunk) => self.receive(chunk));
+		child.onExit((exitCode, signal, failureMessage) => self.finish(exitCode, signal, failureMessage ?? null));
 		return self;
+	}
+
+	/**
+	 * A Brush session: `opts.start` starts the embedded shell execution, whose
+	 * output and outcome drive this session exactly like a pipe child's.
+	 * Brush sessions have no pid (their shell runs in-process).
+	 */
+	static brush(id: number, opts: BrushSessionOptions): ExecSession {
+		const self = new ExecSession(id, { ...opts, command: [opts.displayCommand], tty: false });
+		if (!self.openLog()) return self;
+		const encoder = new TextEncoder();
+		let execution: BrushExecution;
+		try {
+			execution = opts.start((chunk) => self.receive(encoder.encode(chunk)));
+		} catch (err) {
+			self.markFailure(err instanceof Error ? err.message : String(err));
+			self.logStream?.end();
+			self.logStream = undefined;
+			self.exitedAc.abort();
+			self.outputClosed.close();
+			return self;
+		}
+		self.engine = { kind: "brush", execution };
+		void execution.outcome.then((outcome) => {
+			switch (outcome.kind) {
+				case "exited":
+					return self.finish(outcome.exitCode, null, null);
+				case "timed-out":
+					return self.finish(null, null, outcome.notice);
+				case "cancelled":
+					return self.finish(null, null, "the command was terminated");
+				case "failed":
+					return self.finish(null, null, outcome.message);
+			}
+		});
+		return self;
+	}
+
+	/**
+	 * Touch-create the log file synchronously so it exists on disk from t=0
+	 * even before the child writes anything (and before the lazy stream opens
+	 * the fd on its first buffered write), then open a stream in append mode
+	 * for the actual writes. False when the log cannot be created: the session
+	 * is then already failed and exited.
+	 */
+	private openLog(): boolean {
+		try {
+			closeSync(openSync(this.logPath, "w"));
+			this.logStream = createWriteStream(this.logPath, { flags: "a" });
+			this.logStream.on("error", (err) => {
+				// Log-stream error (disk full, permissions, etc.). The child is
+				// still running: record the failure and stop mirroring writes, but
+				// do NOT mark the session exited — that would make it unkillable
+				// (kill() no-ops once hasExited) and orphan the process.
+				this.recordFailure(`log stream error: ${err?.message ?? err}`);
+				this.logStream = undefined;
+			});
+			return true;
+		} catch (err: any) {
+			this.markFailure(`failed to open log file ${this.logPath}: ${err?.message ?? err}`);
+			this.exitedAc.abort();
+			this.outputClosed.close();
+			return false;
+		}
+	}
+
+	/** One chunk of the engine's combined stdout+stderr. */
+	private receive(chunk: Uint8Array): void {
+		this.totalOutputBytes += chunk.length;
+		if (this.screen) {
+			this.screen.write(chunk);
+		} else {
+			this.outputBuffer.pushChunk(chunk);
+			this.appendStreamTail(chunk);
+		}
+		// Mirror every byte to the log file. Errors are handled by the
+		// 'error' listener on the stream, which nulls `logStream` out.
+		this.logStream?.write(Buffer.from(chunk));
+		this.outputNotify.notifyAll();
+	}
+
+	/** The engine ended: record the exit, wake waiters, then flush the log and close the output gate. */
+	private finish(exitCode: number | null, signal: NodeJS.Signals | null, failureMessage: string | null): void {
+		this.state = {
+			hasExited: true,
+			exitCode,
+			signal,
+			failureMessage: this.state.failureMessage ?? failureMessage,
+		};
+		this.exitedAc.abort();
+		this.notifyExitListeners();
+		// Fire a notify so any parked waiters wake up and see the exit.
+		this.outputNotify.notifyAll();
+		// A short tick later, flush the log stream to disk, then close the
+		// output gate. The tick lets any pending data-handler chunks land
+		// in the buffer+log before we declare the session fully done.
+		setImmediate(() => {
+			this.outputNotify.notifyAll();
+			const stream = this.logStream;
+			this.logStream = undefined;
+			if (!stream) {
+				this.outputClosed.close();
+				this.outputNotify.notifyAll();
+				return;
+			}
+			const finalize = () => {
+				this.outputClosed.close();
+				this.outputNotify.notifyAll();
+			};
+			// Wait for the stream to finish flushing before declaring
+			// `outputClosed` so consumers that await the drain see a
+			// fully-flushed log file on disk.
+			stream.once("close", finalize);
+			stream.end();
+		});
 	}
 
 	private appendStreamTail(chunk: Uint8Array): void {
@@ -334,16 +417,78 @@ export class ExecSession {
 		return this.screen?.release() ?? Promise.resolve();
 	}
 
-	/** Write bytes to stdin. Returns true on success, false if closed/dead. */
+	/**
+	 * Write bytes to a process session's stdin or PTY (terminal query replies
+	 * included). Returns true on success, false if closed/dead. Brush sessions
+	 * take input through {@link writeInput} only.
+	 */
 	write(data: Uint8Array): boolean {
 		if (this.state.hasExited) return false;
-		return this.child.write(data);
+		switch (this.engine.kind) {
+			case "process":
+				return this.engine.child.write(data);
+			case "brush":
+				return false;
+		}
 	}
 
-	/** Send a signal. No-op if already exited. */
+	/**
+	 * Write model input. A Brush execution resolves once its stdin pipe has
+	 * accepted every byte (no buffering beyond the pipe); a process takes the
+	 * bytes synchronously as before.
+	 */
+	async writeInput(data: Uint8Array): Promise<InputWrite> {
+		if (this.state.hasExited) return { kind: "not_running" };
+		switch (this.engine.kind) {
+			case "process":
+				if (this.engine.child.write(data)) return { kind: "written" };
+				return this.state.hasExited
+					? { kind: "not_running" }
+					: { kind: "refused", reason: "the child closed its stdin" };
+			case "brush": {
+				const written = await this.engine.execution.writeStdin(data);
+				switch (written.kind) {
+					case "written":
+						return written;
+					case "not-running":
+						return { kind: "not_running" };
+					case "refused":
+						return { kind: "refused", reason: `the command did not take the bytes (${written.reason})` };
+				}
+			}
+		}
+	}
+
+	/**
+	 * Stop the session. A process gets `signal`; a Brush execution ignores it
+	 * and is cancelled through its termination primitive. No-op if already
+	 * exited (the primitive is never called for an ended execution).
+	 */
 	kill(signal: NodeJS.Signals = "SIGTERM"): void {
 		if (this.state.hasExited) return;
-		this.child.kill(signal);
+		switch (this.engine.kind) {
+			case "process":
+				this.engine.child.kill(signal);
+				return;
+			case "brush":
+				this.engine.execution.terminate();
+				return;
+		}
+	}
+
+	/** The Brush execution's termination primitive; undefined for process sessions. */
+	terminateBrush(): TerminateResult | undefined {
+		return this.engine?.kind === "brush" ? this.engine.execution.terminate() : undefined;
+	}
+
+	/** Whether this session runs on the embedded brush shell. */
+	get isBrush(): boolean {
+		return this.engine?.kind === "brush";
+	}
+
+	/** Brush: pids of the running execution's processes (none once it ended); process sessions report `pid`. */
+	brushPids(): readonly number[] | undefined {
+		return this.engine?.kind === "brush" ? this.engine.execution.pids() : undefined;
 	}
 
 	get hasExited(): boolean {
@@ -355,10 +500,17 @@ export class ExecSession {
 	 * while `hasExited` is still false: background jobs that inherited the
 	 * output pipe keep it open, so the close-based session exit lags (or
 	 * never arrives). Lets callers explain a session that reports "running"
-	 * although its shell is gone.
+	 * although its shell is gone. A Brush execution ends with its foreground
+	 * command, so its shell exits with the session.
 	 */
 	get shellExited(): boolean {
-		return this.child.processExited;
+		switch (this.engine?.kind) {
+			case "process":
+				return this.engine.child.processExited;
+			case "brush":
+			case undefined:
+				return this.state.hasExited;
+		}
 	}
 
 	get exitCode(): number | null {

@@ -98,7 +98,9 @@ export function processScriptResult(shape: ProcessResultDetails): ProcessScriptR
 }
 
 export const killScriptResultSchema = Type.Object({
-	status: Type.Union([Type.Literal("killed"), Type.Literal("kill_failed")]),
+	status: Type.Union([Type.Literal("killed"), Type.Literal("kill_failed"), Type.Literal("already_exited")], {
+		description: "already_exited: an embedded-shell session had already ended; nothing was terminated.",
+	}),
 	found: Type.Boolean({ description: "False when no session had this id." }),
 	killed: Type.Boolean(),
 	running: Type.Boolean({ description: "True when the kill was not confirmed and the session remains registered." }),
@@ -171,6 +173,9 @@ export const listSessionsScriptResultSchema = Type.Object({
 			cwd: Type.Optional(Type.String()),
 			tty: Type.Boolean(),
 			pid: Type.Optional(Type.Number()),
+			pids: Type.Optional(
+				Type.Array(Type.Number(), { description: "Embedded-shell sessions: pids the running command spawned (they have no pid)." }),
+			),
 			elapsed_ms: Type.Number(),
 			running: Type.Boolean({ description: "False for sessions that just exited; they are removed after this listing." }),
 			wake_armed: Type.Boolean(),
@@ -192,6 +197,7 @@ export function listSessionsScriptResult(value: {
 		cwd?: string;
 		tty: boolean;
 		pid?: number;
+		pids?: number[];
 		elapsed_ms: number;
 		running: boolean;
 		wake_armed: boolean;
@@ -211,6 +217,7 @@ export function listSessionsScriptResult(value: {
 				cwd: optionalMeta(s.cwd),
 				tty: s.tty,
 				pid: s.pid,
+				pids: s.pids,
 				elapsed_ms: s.elapsed_ms,
 				running: s.running,
 				wake_armed: s.wake_armed,

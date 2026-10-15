@@ -72,7 +72,7 @@ const killInput: FinalizeKillInput = {
 	cwd: "/repo",
 	command: "cat",
 	escalated: false,
-	killed: true,
+	outcome: "killed",
 };
 
 function processView(details: ProcessResultDetails) {
@@ -226,7 +226,7 @@ describe("omp shell result presentation", () => {
 
 	it("shows failed kill diagnostics and marks the result as an error", () => {
 		const failure = "process still running; session remains registered";
-		const details = finalizeKillResult({ ...killInput, killed: false, signal: null, failure, escalated: true });
+		const details = finalizeKillResult({ ...killInput, outcome: "kill_failed", signal: null, failure, escalated: true });
 		const view = parseResultView({ details }, false);
 		assert.equal(view.kind, "kill_failed");
 		assert.deepEqual(toShellResult(view), {
@@ -293,7 +293,7 @@ describe("omp shell result presentation", () => {
 					...killInput,
 					collected,
 					escalated: true,
-					killed: scenario === "escalated kill",
+					outcome: scenario === "escalated kill" ? "killed" : "kill_failed",
 					signal: scenario === "escalated kill" ? "SIGKILL" : null,
 					failure: scenario === "failed kill" ? "process still running" : null,
 				});

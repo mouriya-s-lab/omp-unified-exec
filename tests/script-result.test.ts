@@ -149,7 +149,7 @@ describe("script result projections", () => {
 					failure: null,
 					tty: true,
 					escalated: false,
-					killed: true,
+					outcome: "killed",
 				}));
 				assert.ok(Value.Check(processScriptResultSchema, process));
 				assert.ok(Value.Check(killScriptResultSchema, kill));
@@ -186,7 +186,7 @@ describe("script result projections", () => {
 				failure: null,
 				tty: true,
 				escalated: false,
-				killed: true,
+				outcome: "killed",
 			}));
 			assert.ok(Value.Check(processScriptResultSchema, process));
 			assert.ok(Value.Check(killScriptResultSchema, kill));
@@ -214,14 +214,14 @@ describe("script result projections", () => {
 			failure: null,
 			tty: false,
 			escalated: false,
-			killed: true,
+			outcome: "killed" as const,
 		};
 		const killed = killScriptResult(finalizeKillResult(killInput));
 		assert.ok(Value.Check(killScriptResultSchema, killed));
 		assert.equal(killed.status, "killed");
 		assert.equal(killed.output, "bye\n");
 
-		const failed = killScriptResult(finalizeKillResult({ ...killInput, killed: false, failure: "still alive" }));
+		const failed = killScriptResult(finalizeKillResult({ ...killInput, outcome: "kill_failed", failure: "still alive" }));
 		assert.ok(Value.Check(killScriptResultSchema, failed));
 		assert.equal(failed.status, "kill_failed");
 		assert.equal(failed.running, true);

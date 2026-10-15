@@ -67,7 +67,7 @@ describe("unified-exec renderers", () => {
 			cwd: "/repo",
 			command: "noisy job",
 			escalated: false,
-			killed: true,
+			outcome: "killed",
 		});
 		const result = { content: [{ type: "text", text: renderKillResultText(details) }], details } as any;
 		const state: Record<string, unknown> = {};

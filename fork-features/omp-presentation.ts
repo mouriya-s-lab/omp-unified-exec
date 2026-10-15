@@ -10,7 +10,8 @@
  * On omp, exec_command / write_stdin / kill_session delegate to omp's own bash
  * renderer through display-only adapters; every other tool drops its Pi
  * renderers and gets omp's default card. Model-visible results are untouched.
- * omp hosts also get the Tern terminal HUD (tern-terminal-hud.ts).
+ * omp hosts also get the Tern terminal HUD (tern-terminal-hud.ts) and the
+ * services and native addon of the embedded brush shell (brush/).
  */
 import type { ExtensionAPI, ToolDefinition, TruncationResult } from "@earendil-works/pi-coding-agent";
 
@@ -19,6 +20,9 @@ import { base64ByteLength, stringifyChars } from "../src/render.ts";
 import type { SessionStore } from "../src/session-store.ts";
 import type { TerminalAppearance } from "../src/terminal-screen.ts";
 import { truncationMarker } from "../src/tool-result.ts";
+import { loadNativeShell } from "./brush/native.ts";
+import { loadOmpHost } from "./brush/omp-host.ts";
+import { type HostRuntime, ompWarn } from "./brush/runtime.ts";
 import { loadNativeRenderingState, mountTerminalHud } from "./tern-terminal-hud.ts";
 import { initializeTernPlugin } from "./tern-plugin-install.ts";
 
@@ -220,6 +224,18 @@ export function parseResultView(result: HostResult, isPartial: boolean): ResultV
 			if (details.status === "kill_failed") {
 				return { kind: "kill_failed", output, failure, wallTimeMs, marker };
 			}
+			// A Brush execution that had already ended: shown like any exited command (#27 C2).
+			if (details.status === "already_exited") {
+				return {
+					kind: "exited",
+					output,
+					exitCode: optionalNumber(details.exit_code),
+					signal: optionalString(details.signal),
+					failure,
+					wallTimeMs,
+					marker,
+				};
+			}
 			break;
 	}
 	return messageView(result, result.isError === true);
@@ -399,12 +415,13 @@ async function loadOmpAppearance(): Promise<() => TerminalAppearance> {
  * Wraps the extension factory per host. Pi hosts activate synchronously with
  * `pi` unchanged. omp is identified by its injected `arktype` builder and
  * activates through {@link presentOnOmp} with omp's theme appearance (tty
- * sessions answer it to OSC 10/11). The awaited factory initializes Tern's
- * normal plugin copy before registering tools/HUD; omp also awaits this
- * factory during package install/force-reinstall validation.
+ * sessions answer it to OSC 10/11), the host services of the embedded brush
+ * shell and its native addon. The awaited factory initializes Tern's normal
+ * plugin copy before registering tools/HUD; omp also awaits this factory
+ * during package install/force-reinstall validation.
  */
 export function withHostPresentation(
-	activate: (pi: ExtensionAPI, appearance?: () => TerminalAppearance) => ActivatedExtension,
+	activate: (pi: ExtensionAPI, host?: HostRuntime) => ActivatedExtension,
 ): (host: ExtensionAPI) => void | Promise<void> {
 	return (host) => {
 		if (!("arktype" in host)) {
@@ -412,10 +429,16 @@ export function withHostPresentation(
 			return;
 		}
 		// The omp modules load before activating, so a reshaped omp fails plugin loading with nothing registered.
-		return Promise.all([presentOnOmp(host), loadNativeRenderingState(), loadOmpAppearance()]).then(async ([pi, native, appearance]) => {
-			await initializeTernPlugin();
-			const activated = activate(pi, appearance);
-			mountTerminalHud(pi, activated.store, native, activated.kill);
-		});
+		// A missing native addon does not: Brush dispatch then reports native_shell_unavailable.
+		return Promise.all([presentOnOmp(host), loadNativeRenderingState(), loadOmpAppearance(), loadOmpHost()]).then(
+			async ([pi, nativeRendering, appearance, services]) => {
+				await initializeTernPlugin();
+				const warn = ompWarn(host);
+				const native = loadNativeShell();
+				if (native.kind === "unavailable") warn(`omp-unified-exec: embedded brush shell unavailable: ${native.reason}`);
+				const activated = activate(pi, { kind: "omp", appearance, services, native, warn });
+				mountTerminalHud(pi, activated.store, nativeRendering, activated.kill);
+			},
+		);
 	};
 }

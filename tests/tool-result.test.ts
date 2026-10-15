@@ -68,7 +68,7 @@ describe("bounded tool results", () => {
 			cwd: "/repo",
 			command: "noisy-job",
 			escalated: false,
-			killed: true,
+			outcome: "killed",
 		});
 
 		assert.equal(details.operation, "kill_session");
@@ -180,7 +180,7 @@ describe("bounded tool results", () => {
 			failure: null,
 			tty: true,
 			escalated: false,
-			killed: true,
+			outcome: "killed",
 		});
 		for (const details of [process, kill]) {
 			assert.equal(details.output, observation.text);
@@ -211,7 +211,7 @@ describe("bounded tool results", () => {
 			tty: false,
 			logPath: "/tmp/live.log",
 			escalated: true,
-			killed: false,
+			outcome: "kill_failed",
 		});
 
 		assert.equal(details.status, "kill_failed");
