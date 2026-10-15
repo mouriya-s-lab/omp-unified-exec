@@ -66,6 +66,36 @@ export interface TerminalSnapshot {
 	readonly text: string;
 }
 
+export type TerminalColor =
+	| { readonly kind: "default" }
+	| { readonly kind: "palette"; readonly value: number }
+	| { readonly kind: "rgb"; readonly value: number };
+
+/** Copied values only: xterm reuses both its line and cell objects. */
+export interface TerminalCell {
+	readonly chars: string;
+	readonly width: 0 | 1 | 2;
+	readonly foreground: TerminalColor;
+	readonly background: TerminalColor;
+	readonly bold: boolean;
+	readonly dim: boolean;
+	readonly italic: boolean;
+	readonly underline: boolean;
+	readonly inverse: boolean;
+	readonly invisible: boolean;
+	readonly strikethrough: boolean;
+}
+
+/** Non-consuming, immutable physical-row projection; only the active grid has styled cells. */
+export interface TerminalProjection {
+	readonly view: TerminalView;
+	readonly retainedLines: readonly string[];
+	readonly screenLines: readonly string[];
+	readonly cells: readonly (readonly TerminalCell[])[];
+	readonly appearance: TerminalAppearance;
+	readonly historyMayBeTruncated: boolean;
+}
+
 /** The retained history and the current screen with SGR styling, one line per terminal row. */
 export interface StyledScreen {
 	readonly view: TerminalView;
@@ -181,6 +211,7 @@ export class TerminalScreen {
 	private disposed = false;
 	/** Notified after each child write is parsed into the screen. */
 	private readonly changeListeners = new Set<() => void>();
+	private readonly appearance: () => TerminalAppearance;
 
 	/**
 	 * @param reply receives the terminal's own responses to queries (cursor
@@ -198,6 +229,7 @@ export class TerminalScreen {
 	) {
 		this.cols = cols;
 		this.rows = rows;
+		this.appearance = appearance;
 		this.scrollback = Math.max(rows, Math.floor(TERMINAL_HISTORY_CELLS / cols));
 		this.term = new Terminal({ cols, rows, scrollback: this.scrollback, allowProposedApi: true });
 		const encoder = new TextEncoder();
@@ -276,6 +308,67 @@ export class TerminalScreen {
 	}
 
 	/**
+	 * Copy a fully parsed projection without changing any observation marker.
+	 * Reads and disposal share the observation chain so no reader outlives xterm.
+	 */
+	project(): Promise<TerminalProjection> {
+		const run = this.observeChain.then(async () => {
+			if (this.disposed) throw new Error("terminal screen read after release");
+			// An ordered barrier covers writes already accepted without waiting for a
+			// continuously producing child to become globally idle.
+			await new Promise<void>((resolve) => this.term.write("", resolve));
+			const normal = this.term.buffer.normal;
+			const active = this.term.buffer.active;
+			const physicalLines = (kind: TerminalScreenKind, start: number, end: number): readonly string[] => {
+				const lines = this.readRows(kind, start, end).map((row) => row.text.trimEnd());
+				while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+				return Object.freeze(lines);
+			};
+			const cell = active.getNullCell();
+			const cells: TerminalCell[][] = [];
+			for (let y = 0; y < this.rows; y++) {
+				const line = active.getLine(active.baseY + y);
+				const row: TerminalCell[] = [];
+				for (let x = 0; x < this.cols; x++) {
+					if (!line?.getCell(x, cell)) continue;
+					const foreground: TerminalColor = cell.isFgPalette()
+						? { kind: "palette", value: cell.getFgColor() }
+						: cell.isFgRGB() ? { kind: "rgb", value: cell.getFgColor() } : { kind: "default" };
+					const background: TerminalColor = cell.isBgPalette()
+						? { kind: "palette", value: cell.getBgColor() }
+						: cell.isBgRGB() ? { kind: "rgb", value: cell.getBgColor() } : { kind: "default" };
+					const width = cell.getWidth();
+					if (width !== 0 && width !== 1 && width !== 2) throw new Error(`unexpected terminal cell width: ${width}`);
+					row.push(Object.freeze({
+						chars: cell.getChars(),
+						width,
+						foreground: Object.freeze(foreground),
+						background: Object.freeze(background),
+						bold: Boolean(cell.isBold()),
+						dim: Boolean(cell.isDim()),
+						italic: Boolean(cell.isItalic()),
+						underline: Boolean(cell.isUnderline()),
+						inverse: Boolean(cell.isInverse()),
+						invisible: Boolean(cell.isInvisible()),
+						strikethrough: Boolean(cell.isStrikethrough()),
+					}));
+				}
+				cells.push(row);
+			}
+			const view = this.view();
+			return Object.freeze({
+				view: Object.freeze({ ...view, cursor: Object.freeze(view.cursor) }),
+				retainedLines: physicalLines("normal", 0, normal.baseY + this.rows),
+				screenLines: physicalLines(active.type, active.baseY, active.baseY + this.rows),
+				cells: Object.freeze(cells.map((row) => Object.freeze(row))),
+				appearance: this.appearance(),
+				historyMayBeTruncated: normal.baseY >= this.scrollback,
+			});
+		});
+		this.observeChain = run.catch(() => undefined);
+		return run;
+	}
+	/**
 	 * The retained history and the current screen, each row's colors and
 	 * attributes as SGR, without consuming anything. The alternate screen has
 	 * no history. May lag unparsed output. Must not be called after release.
@@ -320,7 +413,7 @@ export class TerminalScreen {
 
 	private async observeNow(): Promise<TerminalObservation> {
 		if (this.disposed) throw new Error("terminal screen observed after release");
-		await this.flushed();
+		await new Promise<void>((resolve) => this.term.write("", resolve));
 		const view = this.view();
 		const buffer = this.term.buffer.active;
 
@@ -410,12 +503,16 @@ export class TerminalScreen {
 		};
 	}
 
-	/** Release the emulator once all output written so far is parsed. Idempotent. */
-	async release(): Promise<void> {
-		if (this.disposed) return;
-		this.disposed = true;
+	/** Release after all previously queued reads and observations finish. Idempotent. */
+	release(): Promise<void> {
 		this.changeListeners.clear();
-		await this.flushed();
-		this.term.dispose();
+		const run = this.observeChain.then(async () => {
+			if (this.disposed) return;
+			await this.flushed();
+			this.disposed = true;
+			this.term.dispose();
+		});
+		this.observeChain = run.catch(() => undefined);
+		return run;
 	}
 }

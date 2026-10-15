@@ -21,6 +21,7 @@ import type { TerminalAppearance } from "../src/terminal-screen.ts";
 import { truncationMarker } from "../src/tool-result.ts";
 import { loadNativeRenderingState, mountTerminalHud } from "./tern-terminal-hud.ts";
 import { initializeTernPlugin } from "./tern-plugin-install.ts";
+import { initializeTerminalUrls } from "./terminal-url.ts";
 
 // ---------------- omp bash renderer contract ----------------
 
@@ -414,6 +415,7 @@ export function withHostPresentation(
 		// The omp modules load before activating, so a reshaped omp fails plugin loading with nothing registered.
 		return Promise.all([presentOnOmp(host), loadNativeRenderingState(), loadOmpAppearance()]).then(async ([pi, native, appearance]) => {
 			await initializeTernPlugin();
+			await initializeTerminalUrls();
 			const activated = activate(pi, appearance);
 			mountTerminalHud(pi, activated.store, native, activated.kill);
 		});

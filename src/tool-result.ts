@@ -34,6 +34,8 @@ export interface OutputResultDetails {
 	failure_message?: string;
 	tty?: boolean;
 	log_path?: string;
+	/** Non-consuming retained terminal projection; tty sessions only. */
+	terminal_url?: string;
 	cwd?: string;
 	command?: string;
 	truncation?: TruncationResult;
@@ -163,6 +165,7 @@ type OutputEnvelope = Pick<
 	| "omitted_bytes"
 	| "output_bytes_total"
 	| "terminal"
+	| "terminal_url"
 >;
 
 function createOutputEnvelope(input: OutputEnvelopeInput): OutputEnvelope {
@@ -191,6 +194,7 @@ function createOutputEnvelope(input: OutputEnvelopeInput): OutputEnvelope {
 	if (input.logPath) envelope.log_path = input.logPath;
 	if (collected.kind === "stream" && collected.omittedBytes) envelope.omitted_bytes = collected.omittedBytes;
 	if (collected.kind === "screen") envelope.terminal = terminalDetails(collected.observation);
+	if (collected.kind === "screen" && collected.terminalUrl) envelope.terminal_url = collected.terminalUrl;
 	if (input.totalBytes !== undefined) envelope.output_bytes_total = input.totalBytes;
 	if (truncation.truncated) envelope.truncation = truncation;
 	return envelope;
@@ -317,6 +321,7 @@ export function renderProcessResultText(shape: ProcessResultDetails): string {
 	if (shape.on_exit_wake) lines.push(`on_exit_wake: ${safeMeta(shape.on_exit_wake)}`);
 	if (shape.tool_time_utc) lines.push(`tool_time_utc: ${safeMeta(shape.tool_time_utc)}`);
 	if (shape.log_path) lines.push(`log_path: ${safeMeta(shape.log_path)}`);
+	if (shape.terminal_url) lines.push(`terminal_url: ${safeMeta(shape.terminal_url)}`);
 	if (shape.cwd) lines.push(`cwd: ${safeMeta(shape.cwd)}`);
 	lines.push(`wall_time_seconds: ${shape.wall_time_seconds.toFixed(3)}`);
 	lines.push(`chunk_id: ${shape.chunk_id}`);
@@ -340,6 +345,7 @@ export function renderKillResultText(shape: KillResultDetails): string {
 	if (shape.signal) lines.push(`signal: ${safeMeta(shape.signal)}`);
 	if (shape.failure_message) lines.push(`failure: ${safeMeta(shape.failure_message)}`);
 	if (shape.log_path) lines.push(`log_path: ${safeMeta(shape.log_path)}`);
+	if (shape.terminal_url) lines.push(`terminal_url: ${safeMeta(shape.terminal_url)}`);
 	if (shape.cwd) lines.push(`cwd: ${safeMeta(shape.cwd)}`);
 	lines.push(`wall_time_seconds: ${shape.wall_time_seconds.toFixed(3)}`);
 	lines.push(`chunk_id: ${shape.chunk_id}`);

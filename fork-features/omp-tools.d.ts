@@ -14,3 +14,7 @@ declare module "@oh-my-pi/pi-tui/theme" {
 	export const isLightTheme: unknown;
 	export const getCurrentThemeName: unknown;
 }
+
+declare module "@oh-my-pi/pi-coding-agent/internal-urls" {
+	export const InternalUrlRouter: unknown;
+}

@@ -65,6 +65,7 @@ export interface StreamOutput {
 export interface ScreenOutput {
 	readonly kind: "screen";
 	readonly observation: TerminalObservation;
+	readonly terminalUrl?: string;
 }
 
 export type CollectResult = StreamOutput | ScreenOutput;

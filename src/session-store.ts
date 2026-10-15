@@ -100,7 +100,7 @@ export class SessionStore {
 			} catch {
 				// ignore
 			}
-			void s.release();
+			void s.releaseForShutdown();
 			this.onEvict?.(s, "shutdown");
 		}
 		if (drained.length > 0) this.notifyMembership();

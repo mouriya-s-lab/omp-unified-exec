@@ -16,6 +16,7 @@ import { closeSync, createWriteStream, openSync, type WriteStream } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { discardLiveTerminal, freezeTerminal, registerTerminal } from "../fork-features/terminal-resource.ts";
 import { type CollectResult, collectOutputUntilDeadline } from "./collect.ts";
 import { HeadTailBuffer } from "./head-tail-buffer.ts";
 import { Gate, Notify } from "./notify.ts";
@@ -72,6 +73,8 @@ export class ExecSession {
 	readonly outputBuffer: HeadTailBuffer;
 	/** Rendered terminal for tty sessions; created once the PTY child exists. */
 	private screen: TerminalScreen | undefined;
+	private terminalKey: string | undefined;
+	private terminalFinalized: Promise<void> | undefined;
 	/** Fired whenever new data arrives in outputBuffer. */
 	readonly outputNotify = new Notify();
 	/** Closed when the stream is done (all data flushed after exit). */
@@ -163,7 +166,14 @@ export class ExecSession {
 
 		// A real terminal answers queries (cursor position, device attributes);
 		// a child that waits for the answer would otherwise stall.
-		if (opts.tty) self.screen = new TerminalScreen(cols, rows, (reply) => void self.write(reply), opts.appearance);
+		if (opts.tty) {
+			self.screen = new TerminalScreen(cols, rows, (reply) => void self.write(reply), opts.appearance);
+			const key = registerTerminal(id, self.screen);
+			self.terminalKey = key;
+			// The output gate closes after the final child bytes and log flush.
+			// freezeTerminal then waits for parsing without consuming observation.
+			self.terminalFinalized = self.outputClosed.closed().then(() => freezeTerminal(key));
+		}
 
 		self.child.onData((chunk) => {
 			self.totalOutputBytes += chunk.length;
@@ -326,12 +336,23 @@ export class ExecSession {
 			postExitCloseWaitMs: opts.postExitCloseWaitMs,
 		});
 		if (!this.screen) return drained;
-		return { kind: "screen", observation: await this.screen.observe() };
+		return { kind: "screen", observation: await this.screen.observe(), terminalUrl: this.terminalUrl };
 	}
 
-	/** Release the terminal emulator once the session leaves ownership (removed, evicted, never registered). */
-	release(): Promise<void> {
-		return this.screen?.release() ?? Promise.resolve();
+	get terminalUrl(): string | undefined {
+		return this.terminalKey === undefined ? undefined : `term://${this.terminalKey}`;
+	}
+
+	/** Normal removal waits for output closure and the one session-owned freeze. */
+	async release(): Promise<void> {
+		await this.terminalFinalized;
+		await this.screen?.release();
+	}
+
+	/** Shutdown need not retain an unfinished projection; completed resources survive. */
+	async releaseForShutdown(): Promise<void> {
+		if (this.terminalKey !== undefined) discardLiveTerminal(this.terminalKey);
+		await this.screen?.release();
 	}
 
 	/** Write bytes to stdin. Returns true on success, false if closed/dead. */
