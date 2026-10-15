@@ -131,3 +131,55 @@ describe("monitor source and delivery", () => {
 		assert.equal(coordinator.monitorStatus(session.id), undefined);
 	});
 });
+
+describe("pipe monitor sanitized bounds", () => {
+	it("counts only cleaned characters and preserves keywords across control spans", async (t) => {
+		const session = pipeSession(9201);
+		const delivered = Promise.withResolvers<MonitorMessage>();
+		const coordinator = new CompletionCoordinator({ send: () => {}, sendMonitor: (message) => { delivered.resolve(message); } });
+		t.after(async () => { coordinator.shutdown(); await close(session); });
+		await coordinator.startMonitor(session, "KEYWORD", 10);
+		const input = "\x1b[31m".repeat(220) + "KEYWORD colored\n" +
+			"KEYWORD" + "x".repeat(2000) + "\n" +
+			"x".repeat(2000) + "KEYWORD beyond-visible-bound\n" +
+			"中KEY\x1b[0mWORD🎉\n";
+		session.write(encoder.encode(input));
+		const message = await delivered.promise;
+		assert.deepEqual(message.details.lines, ["KEYWORD colored", "KEYWORD" + "x".repeat(1017), "中KEYWORD🎉"]);
+		assert.equal(message.details.recent_matches, 3);
+		assert.equal(message.details.returns, 1);
+		assert.equal(message.details.omitted_lines, 0);
+		const ordinary = await session.collect({ deadlineMs: Date.now() });
+		if (ordinary.kind !== "stream") throw new Error("pipe returned a terminal projection");
+		assert.match(new TextDecoder().decode(ordinary.bytes), /KEYWORD colored/);
+	});
+
+	it("does not expose control-string newlines or payload across pipe chunks", async (t) => {
+		const session = pipeSession(9202);
+		const delivered = Promise.withResolvers<MonitorMessage>();
+		const coordinator = new CompletionCoordinator({ send: () => {}, sendMonitor: (message) => { delivered.resolve(message); } });
+		t.after(async () => { coordinator.shutdown(); await close(session); });
+		await coordinator.startMonitor(session, "KEYWORD", 10);
+		session.write(encoder.encode("\x1b]0;hidden\nPAYLOAD KEYWORD\n\x1b"));
+		session.write(encoder.encode("\\KEY\x1b[31mWORD visible\n"));
+		const message = await delivered.promise;
+		assert.deepEqual(message.details.lines, ["KEYWORD visible"]);
+		assert.equal(message.details.recent_matches, 1);
+	});
+
+	it("flushes the visible final partial while discarding an unterminated control suffix", async (t) => {
+		const session = pipeSession(9203);
+		const delivered = Promise.withResolvers<MonitorMessage>();
+		const coordinator = new CompletionCoordinator({ send: () => {}, sendMonitor: (message) => { delivered.resolve(message); } });
+		t.after(async () => { coordinator.shutdown(); await close(session); });
+		await coordinator.startMonitor(session, "KEYWORD", 10);
+		const received = session.outputNotify.notified();
+		session.write(encoder.encode("KEYWORD before\x1bPpayload\nHIDDEN KEYWORD"));
+		await received;
+		session.kill("SIGKILL");
+		const message = await delivered.promise;
+		assert.equal(message.details.event, "end");
+		assert.deepEqual(message.details.lines, ["KEYWORD before"]);
+		assert.equal(message.details.returns, 0);
+	});
+});

@@ -336,10 +336,19 @@ export class ExecSession {
 				// Register final draining before publishing the subscription. The
 				// gate's freeze callback already queued its projection; this queues
 				// the monitor drain before any release awaiting that freeze.
-				void this.outputClosed.closed().then(async () => {
+				const unsubscribeClose = this.outputClosed.subscribe(async () => {
 					if (await handle.finish()) listener.end();
 				});
-				return accept(handle);
+				const source: MonitorSourceHandle = {
+					cancel: () => { unsubscribeClose(); handle.cancel(); },
+				};
+				try {
+					if (!accept(source)) { source.cancel(); return false; }
+					return true;
+				} catch (error) {
+					source.cancel();
+					throw error;
+				}
 			}, signal);
 		}
 		let active = true;
@@ -349,20 +358,21 @@ export class ExecSession {
 			cancel: () => {
 				active = false;
 				this.pipeListeners.delete(tap);
+				unsubscribeClose();
 			},
 		};
+		const unsubscribeClose = this.outputClosed.subscribe(async () => {
+			if (this.terminalFinalized) await this.terminalFinalized;
+			if (!active) return;
+			handle.cancel();
+			listener.end();
+		});
 		try {
 			if (!accept(handle)) { handle.cancel(); return "cancelled"; }
 		} catch (error) {
 			handle.cancel();
 			throw error;
 		}
-		void this.outputClosed.closed().then(async () => {
-			if (this.terminalFinalized) await this.terminalFinalized;
-			if (!active) return;
-			handle.cancel();
-			listener.end();
-		});
 		return "accepted";
 	}
 

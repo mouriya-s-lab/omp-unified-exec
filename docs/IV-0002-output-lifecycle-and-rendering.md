@@ -90,6 +90,10 @@ The initiative establishes a durable output contract across these layers:
   screen and explicit terminal screenshots, are generated only from emulator
   cell attributes (SGR for the HUD, SVG rasterized to PNG for screenshots);
   no child byte reaches either.
+- Batch output and streaming pipe monitors use one control grammar. The streaming
+  sanitizer keeps only finite control state, never payload text, and cleans
+  before line splitting or monitor bounds. Unterminated OSC/DCS remains hidden
+  until its terminator/EOF; no resynchronization threshold exposes payload.
 - Consuming tty observations, non-consuming projections and emulator disposal
   are serialized per session. A cancelled empty poll does not observe.
   Reads use an ordered parser barrier covering bytes accepted before the read,
@@ -206,7 +210,7 @@ The initiative establishes a durable output contract across these layers:
 
 | Area | Location |
 |---|---|
-| Terminal-control scanner | `src/output-safety.ts` |
+| Shared batch/stream terminal-control scanner | `src/output-safety.ts` (`sanitizeOutputText`, `OutputTextSanitizer`) |
 | tty terminal emulator, serialized observations/projections/disposal, snapshots, styled screens, parse notifications | `src/terminal-screen.ts`, owned by `ExecSession` (`src/session.ts`); session-owned freeze after output closure, release from `src/session-store.ts` |
 | Process-global terminal keys, live/frozen projections, physical paging and omp internal URL handler | `fork-features/terminal-resource.ts`, `fork-features/terminal-url.ts`; initialized by `withHostPresentation` before activation |
 | Terminal cell SVG, host PNG rasterization and file-backed image location | `fork-features/terminal-image.ts`, `fork-features/terminal-url.ts` |

@@ -75,6 +75,23 @@ describe("Gate", () => {
 		await g.closed();
 		assert.ok(Date.now() - t0 < 20);
 	});
+	it("physically cancels closure subscriptions and preserves Promise notification ordering", async () => {
+		const gate = new Gate();
+		const events: string[] = [];
+		const frozen = gate.closed().then(() => { events.push("freeze"); });
+		const unsubscribe = gate.subscribe(() => { events.push("cancelled"); });
+		gate.subscribe(() => { events.push("monitor"); });
+		unsubscribe();
+		unsubscribe();
+		gate.close();
+		assert.deepEqual(events, [], "closure notifications are not synchronous source callbacks");
+		await frozen;
+		await Promise.resolve();
+		assert.deepEqual(events, ["freeze", "monitor"]);
+		gate.close();
+		await Promise.resolve();
+		assert.deepEqual(events, ["freeze", "monitor"], "closure is one-shot");
+	});
 });
 
 describe("sleep", () => {

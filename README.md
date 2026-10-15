@@ -366,7 +366,9 @@ the process or consuming ordinary observations.
 | `max_returns` | number | `10` | Positive safe integer, counting successful match messages, not lines or End. |
 
 Pipe conditions see sanitized complete future lines and the final partial
-line. TTY conditions see changed/new rendered logical lines, including prompts
+line. Control state spans chunks; an unterminated OSC/DCS stays hidden until
+its terminator or EOF. The bound is the first 1024 clean UTF-16 code units.
+TTY conditions see changed/new rendered logical lines, including prompts
 without a newline; wrapped physical rows are joined. Pure cursor/style changes
 do not trigger, and old output is never replayed.
 

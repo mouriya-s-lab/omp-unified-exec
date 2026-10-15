@@ -1,6 +1,6 @@
 import { TextDecoder } from "node:util";
 
-import { sanitizeOutputText } from "../src/output-safety.ts";
+import { OutputTextSanitizer, sanitizeOutputText } from "../src/output-safety.ts";
 
 export type MonitorStart = "accepted" | "not_running" | "cancelled";
 export interface MonitorSourceHandle { cancel(): void }
@@ -63,6 +63,11 @@ const BATCH_MS = 250;
 
 interface Batch { lines: string[]; omitted: number }
 
+interface PipeMonitorInput {
+	readonly decoder: TextDecoder;
+	readonly sanitizer: OutputTextSanitizer;
+}
+
 /** One actual source subscription. The coordinator owns its identity and notification routing. */
 export class MonitorSubscription implements MonitorListener {
 	readonly conditional: boolean;
@@ -74,7 +79,7 @@ export class MonitorSubscription implements MonitorListener {
 	private pending: Batch = { lines: [], omitted: 0 };
 	private timer: NodeJS.Timeout | undefined;
 	private delivery: "idle" | "sending" | "retry" = "idle";
-	private readonly decoder: TextDecoder | undefined;
+	private readonly pipe: PipeMonitorInput | undefined;
 	private partial = "";
 	private readonly recent: Array<{ at: number; count: number }> = [];
 	private recentStart = 0;
@@ -90,7 +95,10 @@ export class MonitorSubscription implements MonitorListener {
 		private readonly isCurrent: (subscription: MonitorSubscription) => boolean,
 	) {
 		this.conditional = condition.kind === "regex";
-		this.decoder = this.conditional && !session.terminalUrl ? new TextDecoder("utf-8", { fatal: false }) : undefined;
+		this.pipe = this.conditional && !session.terminalUrl ? {
+			decoder: new TextDecoder("utf-8", { fatal: false }),
+			sanitizer: new OutputTextSanitizer((input, start, end) => this.acceptText(input, start, end)),
+		} : undefined;
 	}
 
 	attach(handle: MonitorSourceHandle): void { this.handle = handle; }
@@ -98,19 +106,18 @@ export class MonitorSubscription implements MonitorListener {
 	setEndReason(reason: MonitorEndReason): void { this.reason = reason; }
 
 	bytes(bytes: Uint8Array): void {
-		if (!this.active || !this.decoder) return;
-		this.acceptText(this.decoder.decode(bytes, { stream: true }));
+		if (!this.active || !this.pipe) return;
+		this.pipe.sanitizer.write(this.pipe.decoder.decode(bytes, { stream: true }));
 	}
 
-	private acceptText(text: string): void {
-		let start = 0;
-		for (let i = 0; i < text.length; i++) {
+	private acceptText(text: string, start: number, end: number): void {
+		for (let i = start; i < end; i++) {
 			if (text[i] !== "\n") continue;
 			this.lines([this.partial + text.slice(start, Math.min(i, start + MAX_LINE_CHARS - this.partial.length))]);
 			this.partial = "";
 			start = i + 1;
 		}
-		if (start < text.length && this.partial.length < MAX_LINE_CHARS) this.partial += text.slice(start, start + MAX_LINE_CHARS - this.partial.length);
+		if (start < end && this.partial.length < MAX_LINE_CHARS) this.partial += text.slice(start, Math.min(end, start + MAX_LINE_CHARS - this.partial.length));
 	}
 
 	lines(lines: readonly string[]): void {
@@ -144,8 +151,8 @@ export class MonitorSubscription implements MonitorListener {
 
 	end(): void {
 		if (!this.active || this.ended) return;
-		if (this.decoder) {
-			this.acceptText(this.decoder.decode());
+		if (this.pipe) {
+			this.pipe.sanitizer.write(this.pipe.decoder.decode());
 			if (this.partial) this.lines([this.partial]);
 			this.partial = "";
 		}

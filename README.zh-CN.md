@@ -247,8 +247,9 @@ write_stdin chars_b64="G3s6wgo="  → exact 5 decoded bytes
 | `condition` | string | 不传 | JavaScript 正则源码（不带 `/` 分隔符）；不传则只在输出关闭时返回。 |
 | `max_returns` | number | `10` | 正安全整数，计成功的匹配消息数，不是行数，也不含 End。 |
 
-Pipe 条件接收清洗后的完整后续行与最后一个不完整行。TTY 条件接收新增或
-改变的渲染逻辑行，包括没有换行的提示符；wrapped 物理行会合并。
+Pipe 条件接收清洗后的完整后续行与最后一个不完整行。控制状态跨 chunk；
+未终止的 OSC/DCS 到终止符或 EOF 前一直隐藏。上限取前 1024 个清洗后的 UTF-16
+code unit。TTY 条件接收新增或改变的渲染逻辑行，包括没有换行的提示符；wrapped 物理行会合并。
 纯光标/样式变化不触发，也不会重放建立前的输出。
 
 约 250 ms 内的匹配合并成一条 `unified-exec-monitor` 后续消息并唤醒模型。

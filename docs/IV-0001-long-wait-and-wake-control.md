@@ -57,8 +57,11 @@ existing subscription.
 
 The process/terminal source establishes the future-only boundary before the
 coordinator publishes the actual subscription. Pipe sessions stream-decode
-only subsequent bytes into sanitized complete lines, plus the last partial
-line at closure. TTY sessions compare parsed rendered text/row identities:
+only subsequent bytes, sanitize before splitting visible lines, and then bound
+each clean line. Control state spans chunks: newlines inside OSC/DCS payloads
+never create output lines. An unterminated control string stays suppressed
+until its terminator or EOF; no length reset exposes its payload. The final
+visible partial line is flushed at closure. TTY sessions compare rendered text/row identities:
 wrapped physical rows form logical lines, including nonempty incomplete
 prompts. Cursor-only movement over existing blank rows and style-only changes
 do not trigger. New blank row identities and nonempty-to-empty erases can
@@ -73,8 +76,10 @@ only after its old marker is disposed. RIS invalidates this monitor cursor at
 the emulator's native reset boundary. There is no second terminal parser,
 global output copy or coordinator cursor mirror.
 
-Matched lines are sanitized and bounded to 1024 characters before regex
-evaluation; each message shows at most 16 lines and counts omitted matches.
+Matched lines use their first 1024 sanitized UTF-16 code units for regex
+evaluation and display; later characters are ignored until the next clean
+newline. The builder never retains an unbounded raw or clean line. Each
+message shows at most 16 lines and counts omitted matches.
 Matches arriving within about 250 ms coalesce. Successful messages alone
 advance `returns`; the last allowed match message announces the limit and
 ends the subscription, not the process. More than 20 matching lines in the
@@ -104,6 +109,11 @@ flush boundaries. Idle failed delivery may wait for such a boundary. Limit or
 explicit cancellation removes the monitor without consuming a future ordinary
 wake. All replacement/reset callbacks check exact subscription and map
 identity. No already-enqueued follow-up can be recalled.
+
+Source handles physically remove both byte and close listeners on cancellation,
+not merely disable their callbacks. `Gate.subscribe` queues closure callbacks
+in the same microtask order as `closed().then`, preserving freeze, final drain,
+then release while allowing cancelled subscriptions to detach before closure.
 
 `list_sessions` exposes each active monitor's condition, returns and limit.
 Neither monitor nor `read` drains session buffers or removes sessions. This
@@ -166,7 +176,7 @@ attached waits should work (with safe `setTimeout` chunking).
 | Policy change | `src/completion.ts` → `setOnExit(id, policy, session?)` | By-id disarm (tombstones); status tokens; flushPending deliver filter. |
 | Wake audit | `list_sessions` / widget / slash picker | `wake_armed` / `[wake]`. |
 | Tool surface | `src/index.ts` | `set_on_exit` tool + renderer; rewritten `promptGuidelines`. |
-| Monitor source and bounded delivery | `fork-features/monitor-subscription.ts`, `ExecSession.subscribeMonitor`, `TerminalScreen.subscribeLines` | Source-owned future boundary; non-consuming rows/bytes; batching/count/rate window. |
+| Monitor source and bounded delivery | `fork-features/monitor-subscription.ts`, `OutputTextSanitizer`, `ExecSession.subscribeMonitor`, `TerminalScreen.subscribeLines`, `Gate.subscribe` | Source-owned future boundary; shared control grammar before bounded line matching; physically cancellable source listeners. |
 | Monitor lifecycle and tools | `CompletionCoordinator.startMonitor` / `cancelMonitor`, `src/index.ts`, `src/script-result.ts` | One actual subscription map, End/wake routing, typed errors and list state. |
 | Docs | `README.md`, `Changelog.md`, this IV, `DC-0001` | Rules + API tables + workspace doctrine. |
 | Tests | `tests/time.test.ts`, `long-wait.test.ts`, `completion.test.ts`, `wake-e2e.test.ts`, `e2e.test.ts` | Unit + pipeline; wake-e2e `afterEach` shutdown. |
