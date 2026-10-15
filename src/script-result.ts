@@ -27,21 +27,29 @@ function compact<T extends Record<string, unknown>>(value: T): T {
 	return value;
 }
 
-const terminalSchema = Type.Object(
-	{
-		screen: Type.Union([Type.Literal("normal"), Type.Literal("alternate")]),
-		cols: Type.Number(),
-		rows: Type.Number(),
-		cursor_row: Type.Number({ description: "1-based cursor row within the screen." }),
-		cursor_col: Type.Number({ description: "1-based cursor column." }),
-		screen_changed: Type.Boolean({ description: "False when the screen is exactly as last reported (output is empty)." }),
+const terminalGeometryFields = {
+	screen: Type.Union([Type.Literal("normal"), Type.Literal("alternate")]),
+	cols: Type.Number(),
+	rows: Type.Number(),
+	cursor_row: Type.Number({ description: "1-based cursor row within the screen." }),
+	cursor_col: Type.Number({ description: "1-based cursor column." }),
+};
+
+const terminalSchema = Type.Union([
+	Type.Object({
+		...terminalGeometryFields,
+		screen_changed: Type.Boolean({ description: "False when the running screen is exactly as last reported (output is empty)." }),
 		history_lines: Type.Optional(
 			Type.Number({ description: "Leading output lines that scrolled off above the screen since the last call." }),
 		),
 		history_may_be_truncated: Type.Optional(Type.Literal(true)),
-	},
-	{ description: "tty sessions only: output is the rendered terminal (history lines, then the full current screen)." },
-);
+	}, { description: "Running tty observation: unseen history followed by the current screen." }),
+	Type.Object({
+		...terminalGeometryFields,
+		retained_rows: Type.Number({ description: "Normal-screen physical rows retained at freeze, not total output rows." }),
+		history_may_be_truncated: Type.Boolean(),
+	}, { description: "Completed tty result: only the final active screen; recover retained history through terminal_url." }),
+]);
 
 const outputFields = {
 	output: Type.String({

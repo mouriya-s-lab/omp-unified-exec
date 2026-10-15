@@ -131,6 +131,7 @@ All notable changes to this project. **Newest entries go on top.**
 
 - tty 会话的默认终端尺寸从 120×30 改为 120×80。仅默认行数改变；显式 `cols`/`rows`、`[20,500]` / `[5,300]` 限制以及 240000 单元格历史预算保持不变，并同步更新工具说明与 README 示例。
 - Add process-unique `term://` resources on omp: non-consuming retained physical rows, active screens, positive/negative screen pages and existing `read` head/tail selectors. Sessions freeze copied rows, active styled cells, geometry, cursor and appearance after output closure and parsing; resources survive exit, confirmed kill, LRU removal and reload until process exit. TTY results and session listings expose `terminal_url`.
+- Completed tty results now return only the frozen final active screen, including unchanged screens and confirmed kills, with `terminal_url` and final `terminal.retained_rows` / `rows` / `history_may_be_truncated`. Running observations and pipe results retain their existing behavior; earlier retained rows remain readable through `term://`.
 - Updated the exact Pi/TUI development baseline from 0.83.0 to 0.84.1,
   TypeBox from 1.1.24 to 1.3.7, and the test runner to `tsx` 4.23.12.
   Synchronized the lockfile root metadata with package version 0.9.1. Runtime

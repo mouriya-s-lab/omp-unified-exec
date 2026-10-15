@@ -49,25 +49,30 @@ export interface OutputResultDetails {
 	terminal?: TerminalDetails;
 }
 
-/**
- * Tty output is rendered terminal state, not raw stream bytes: `output` holds
- * `history_lines` lines that scrolled off above the screen since the previous
- * call, then the full current screen (trailing blank rows removed). When
- * `screen_changed` is false the screen is exactly as last reported and
- * `output` is empty.
- */
-export interface TerminalDetails {
+/** Geometry is shared; only running observations carry incremental metadata. */
+interface TerminalGeometryDetails {
 	screen: TerminalScreenKind;
 	cols: number;
 	rows: number;
 	/** 1-based cursor position within the screen. */
 	cursor_row: number;
 	cursor_col: number;
+}
+
+export interface IncrementalTerminalDetails extends TerminalGeometryDetails {
 	screen_changed: boolean;
 	history_lines?: number;
 	/** Rows that scrolled off since the previous call were evicted from the capped history before being reported; they are only in the log. */
 	history_may_be_truncated?: true;
 }
+
+export interface FinalTerminalDetails extends TerminalGeometryDetails {
+	retained_rows: number;
+	/** The retained normal-screen history may have reached the emulator's cap. */
+	history_may_be_truncated: boolean;
+}
+
+export type TerminalDetails = IncrementalTerminalDetails | FinalTerminalDetails;
 
 export interface ProcessResultDetails extends OutputResultDetails {
 	operation: ProcessOperation;
@@ -183,6 +188,10 @@ function createOutputEnvelope(input: OutputEnvelopeInput): OutputEnvelope {
 			byteLength = Buffer.byteLength(text, "utf8");
 			break;
 		}
+		case "final-screen":
+			text = sanitizeOutputText(collected.projection.screenLines.join("\n"));
+			byteLength = Buffer.byteLength(text, "utf8");
+			break;
 	}
 	const truncation = truncateTail(text, { maxBytes: DEFAULT_MAX_BYTES, maxLines: DEFAULT_MAX_LINES });
 	const envelope: OutputEnvelope = {
@@ -194,14 +203,26 @@ function createOutputEnvelope(input: OutputEnvelopeInput): OutputEnvelope {
 	if (input.logPath) envelope.log_path = input.logPath;
 	if (collected.kind === "stream" && collected.omittedBytes) envelope.omitted_bytes = collected.omittedBytes;
 	if (collected.kind === "screen") envelope.terminal = terminalDetails(collected.observation);
-	if (collected.kind === "screen" && collected.terminalUrl) envelope.terminal_url = collected.terminalUrl;
+	if (collected.kind === "final-screen") {
+		const { projection } = collected;
+		envelope.terminal = {
+			screen: projection.view.screen,
+			cols: projection.view.cols,
+			rows: projection.view.rows,
+			cursor_row: projection.view.cursor.row,
+			cursor_col: projection.view.cursor.col,
+			retained_rows: projection.retainedLines.length,
+			history_may_be_truncated: projection.historyMayBeTruncated,
+		};
+	}
+	if (collected.kind !== "stream" && collected.terminalUrl) envelope.terminal_url = collected.terminalUrl;
 	if (input.totalBytes !== undefined) envelope.output_bytes_total = input.totalBytes;
 	if (truncation.truncated) envelope.truncation = truncation;
 	return envelope;
 }
 
 /** Terminal metadata for a full rendered screen (also used by live streaming snapshots). */
-export function terminalViewDetails(view: TerminalView, screenChanged: boolean): TerminalDetails {
+export function terminalViewDetails(view: TerminalView, screenChanged: boolean): IncrementalTerminalDetails {
 	return {
 		screen: view.screen,
 		cols: view.cols,
@@ -212,7 +233,7 @@ export function terminalViewDetails(view: TerminalView, screenChanged: boolean):
 	};
 }
 
-function terminalDetails(observation: TerminalObservation): TerminalDetails {
+function terminalDetails(observation: TerminalObservation): IncrementalTerminalDetails {
 	const details = terminalViewDetails(observation.view, observation.kind === "rendered");
 	if (observation.kind === "rendered") {
 		if (observation.historyLines > 0) details.history_lines = observation.historyLines;
@@ -227,9 +248,14 @@ function terminalLines(terminal: TerminalDetails | undefined): string[] {
 	const lines = [
 		`terminal: ${terminal.screen} screen ${terminal.cols}x${terminal.rows}, cursor row ${terminal.cursor_row} col ${terminal.cursor_col}`,
 	];
-	if (!terminal.screen_changed) lines.push("screen_changed: false");
-	if (terminal.history_lines) lines.push(`history_lines: ${terminal.history_lines}`);
-	if (terminal.history_may_be_truncated) lines.push("history_may_be_truncated: true");
+	if ("retained_rows" in terminal) {
+		lines.push(`retained_rows: ${terminal.retained_rows}`);
+		lines.push(`history_may_be_truncated: ${terminal.history_may_be_truncated}`);
+	} else {
+		if (!terminal.screen_changed) lines.push("screen_changed: false");
+		if (terminal.history_lines) lines.push(`history_lines: ${terminal.history_lines}`);
+		if (terminal.history_may_be_truncated) lines.push("history_may_be_truncated: true");
+	}
 	return lines;
 }
 
