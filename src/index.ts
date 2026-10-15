@@ -37,6 +37,7 @@ import { sleep } from "./notify.ts";
 import { sanitizeOutputText } from "./output-safety.ts";
 import { getPtyLoadError, isPtyAvailable } from "./pty.ts";
 import {
+	renderBashAliasCall,
 	renderExecCommandCall,
 	renderKillSessionCall,
 	renderKillSessionResult,
@@ -933,15 +934,6 @@ function activate(pi: ExtensionAPI, appearance: () => TerminalAppearance = () =>
 		appearance,
 	};
 
-	// By default, unified-exec removes pi's built-in `bash` tool so the LLM
-	// is steered toward exec_command/write_stdin. Pass --keep-builtin-bash to
-	// preserve the built-in alongside the unified-exec tools.
-	pi.registerFlag("keep-builtin-bash", {
-		description: "Keep pi's built-in `bash` tool alongside exec_command/write_stdin. By default it is removed.",
-		type: "boolean",
-		default: false,
-	});
-
 	// Observation finalization: "observed" is committed at pi's finalized
 	// tool-result event, not merely when the handler returns — see completion.ts.
 	pi.on("tool_execution_end", async (event) => {
@@ -956,17 +948,15 @@ function activate(pi: ExtensionAPI, appearance: () => TerminalAppearance = () =>
 		ctx.shuttingDown = false; // reload/new/resume re-arms the extension
 		ctx.coordinator.reset(); // never resurrect wakes from a previous session
 		updateRunningSessionsUi(ctx);
-		// Default behavior is to remove the built-in `bash` tool. Only keep it
-		// if --keep-builtin-bash was passed. Flag lookup uses the registered
-		// name without leading dashes.
-		const keep = pi.getFlag("keep-builtin-bash");
-		if (keep !== true) {
-			const active = pi.getActiveTools();
-			const filtered = active.filter((name) => name !== "bash");
-			if (filtered.length !== active.length) {
-				pi.setActiveTools(filtered);
-			}
-		}
+		// The built-in `bash` is shadowed at registration time: this plugin
+		// registers a `bash` tool of its own, and omp's extension registration
+		// replaces the same-name registry slot (keeping the native
+		// implementation only for `ctx.invokeTool`). So there is never a second
+		// shell tool to remove, and removing by name here would delete the
+		// alias itself — `setActiveTools` is a full-set replacement.
+		//
+		// There is consequently no `--keep-builtin-bash`: the flag existed to
+		// choose between two shell tools, and the alias leaves only one.
 		if (!isPtyAvailable() && eventCtx.hasUI) {
 			// Non-fatal: pipes mode still works.
 			eventCtx.ui.notify(
@@ -1259,6 +1249,76 @@ function activate(pi: ExtensionAPI, appearance: () => TerminalAppearance = () =>
 		},
 		renderCall: renderSetOnExitCall,
 		renderResult: renderSetOnExitResult,
+	});
+
+	// ---------------- bash alias ----------------
+	//
+	// Models arrive trained to call a tool literally named `bash`. Without it
+	// they either fail the call (name not in the schema) or detour through
+	// eval/exec_command even when bash was the right tool. Registering under the
+	// built-in name is a supported omp path: the extension registration replaces
+	// the registry slot (`sdk.ts`: extension tools overwrite the same-name
+	// built-in entry, keeping the native implementation for `ctx.invokeTool`).
+	//
+	// The schema mirrors the built-in bash tool so a model that knows bash's
+	// shape can call it unchanged, while execution goes through the same session
+	// model as exec_command: `pty` maps to a tty session, `timeout` to a yield
+	// window plus an on_exit policy, and a session that outlives the window is
+	// reported as a session id the model then drives with write_stdin.
+	pi.registerTool({
+		name: "bash",
+		label: "bash",
+		description:
+			"Persistent shell. One fact command or pipeline per call; dependencies use `&&`. Use `cwd`, not `cd`. Interactive work (ssh, REPL, sudo, TUI) sets `pty: true` and is then driven over later turns. Long-running commands keep running after the call returns and are reached with `write_stdin`.",
+		promptSnippet: "Run a shell command; long-running or interactive ones yield a session id",
+		promptGuidelines: [
+			"Prefer dedicated file tools when available (read/grep/find/ls). bash is for real binaries and short fact pipelines: builds, tests, git, external CLIs, counts, checksums.",
+			"Never read, list, search, or edit files through bash (`cat`, `ls`, `find`, `grep`, `sed`, redirection) — that is what read/glob/grep/edit do, and an unanchored shell read cannot ground the next edit.",
+			"Set `pty: true` for anything that expects a terminal — interactive `ssh`, password and host-key prompts, `sudo`, REPLs, database shells, TUIs, `git rebase -i`. Pipes, heredocs and `yes |` are not a terminal.",
+			"A command that outlives the yield window keeps running: the result names its session id, and you read or drive it with `write_stdin` (empty write = poll, `\\x03` = Ctrl-C). `kill_session` only what will not exit.",
+			"`timeout: 0` disables the deadline for watchers and long jobs; `async: true` defers the result as a follow-up message — NEVER poll for it.",
+			"`name` marks a long-lived service: unique, `ready` needs a log regex or port, no async/timeout, pty defaults true.",
+		],
+		outputSchema: processScriptResultSchema,
+		parameters: Type.Object({
+			command: Type.String({ description: "Shell command to execute." }),
+			timeout: Type.Optional(Type.Number({ description: "Seconds before the command is stopped. Omit for the default; 0 disables the deadline." })),
+			cwd: Type.Optional(Type.String({ description: "Working directory. Defaults to the session cwd." })),
+			pty: Type.Optional(Type.Boolean({ description: "Allocate a PTY. Default false. With a PTY, output is the rendered terminal screen rather than the raw stream." })),
+			name: Type.Optional(Type.String({ description: "Unique name for a long-lived service; makes the call a service start." })),
+			async: Type.Optional(Type.Boolean({ description: "Defer the result as a follow-up message. Default false." })),
+		}),
+		async execute(_toolCallId, params, signal, onUpdate, eventCtx) {
+			ctx.ui ??= eventCtx.ui;
+			const timeoutMs = params.timeout && params.timeout > 0 ? Math.round(params.timeout * 1000) : undefined;
+			// clampYield lower-bounds at MIN_YIELD_TIME_MS, so 0 cannot express
+			// "return immediately"; a named service attaches for the minimum
+			// window, which is the shortest legal observation.
+			const yieldMs = params.name !== undefined ? MIN_YIELD_TIME_MS : timeoutMs ?? DEFAULT_EXEC_YIELD_MS;
+			const shape = await runExecCommand(
+				ctx,
+				{
+					cmd: params.command,
+					workdir: params.cwd,
+					tty: params.pty === true,
+					yield_time_ms: yieldMs,
+					// An async call defers its result as a follow-up, which is the
+					// same one-shot notification on_exit: "wake" produces.
+					on_exit: params.async === true ? "wake" : "none",
+				},
+				signal,
+				onUpdate,
+				eventCtx.cwd,
+			);
+			updateRunningSessionsUi(ctx);
+			return {
+				content: [{ type: "text", text: renderProcessResultText(shape) }],
+				details: shape,
+				structuredContent: processScriptResult(shape),
+			};
+		},
+		renderCall: renderBashAliasCall,
+		renderResult: renderProcessResult,
 	});
 
 	pi.registerTool({

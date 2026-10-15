@@ -149,6 +149,36 @@ export function renderExecCommandCall(
 	return text;
 }
 
+/**
+ * `bash` alias args → the exec banner. The alias speaks the built-in bash
+ * shape (`command`, `cwd`, `timeout`, `pty`, `name`, `async`), so it cannot
+ * reuse renderExecCommandCall directly; projection keeps one banner format.
+ */
+export function renderBashAliasCall(
+	args: { command?: string; cwd?: string; timeout?: number; pty?: boolean; name?: string; async?: boolean },
+	theme: Theme,
+	context: ToolRenderContext<RenderState, typeof args>,
+): Component {
+	const state = context.state;
+	markStarted(state, context.executionStarted);
+
+	// Match Pi's built-in bash renderer: preserve multiline commands verbatim.
+	const cmd = sanitizeOutputText(args?.command || "...");
+	const parts: string[] = [];
+	if (args?.name) parts.push(`service ${args.name}`);
+	if (args?.timeout && args.timeout > 0) parts.push(`timeout ${args.timeout}s`);
+	const effectiveCwd = args?.cwd || context.cwd;
+	if (effectiveCwd) parts.push(`cwd: ${safeOneLine(tildify(effectiveCwd))}`);
+	if (args?.pty) parts.push("pty");
+	const suffix = parts.length ? theme.fg("muted", ` (${parts.join(" · ")})`) : "";
+	const wake = args?.async === true ? theme.fg("warning", " [wake]") : "";
+	const banner = theme.fg("toolTitle", theme.bold(`$ ${cmd}`)) + suffix + wake;
+
+	const text = context.lastComponent instanceof Text ? context.lastComponent : new Text("", 0, 0);
+	text.setText(banner);
+	return text;
+}
+
 export function renderWriteStdinCall(
 	args: { session_id?: number; chars?: string; chars_b64?: string; yield_time_ms?: number; yield_until?: string },
 	theme: Theme,

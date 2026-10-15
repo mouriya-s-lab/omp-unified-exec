@@ -343,6 +343,25 @@ function isShellPresented(name: string): name is ShellPresentedTool {
 }
 
 /**
+ * omp keeps extension tools out of the model's top-level schema by default
+ * (`discoverable`), and `tools.xdev` is on by default, so a plugin tool is
+ * reachable only through the `xd://` JSON transport — fine for discovery
+ * helpers, wrong for a shell.
+ *
+ * `exec_command` / `write_stdin` are the documented surface, and `bash` is the
+ * alias that shadows the built-in of the same name: models are trained to call
+ * a tool named `bash`, so the alias must sit top-level or the model detours
+ * around it. `kill_session` / `set_on_exit` / `list_sessions` stay
+ * discoverable: they are reachable once the model has a session id, and
+ * keeping them mounted saves the prompt the inline device docs would cost.
+ */
+const OMP_ESSENTIAL_TOOLS: Readonly<Record<string, true>> = {
+	exec_command: true,
+	write_stdin: true,
+	bash: true,
+};
+
+/**
  * omp's registration API: Pi renderers stripped (omp cannot call them), bash
  * delegation attached for the shell-presented tools. The bash renderer is
  * required; a missing or reshaped one fails plugin loading rather than silently
@@ -360,8 +379,9 @@ async function presentOnOmp(pi: ExtensionAPI): Promise<ExtensionAPI> {
 	const registerTool: ExtensionAPI["registerTool"] = (definition) => {
 		const { renderCall: _piCall, renderResult: _piResult, ...rest } = definition;
 		const presented = isShellPresented(definition.name) ? { ...rest, ...hooks[definition.name] } : rest;
+		const essential = OMP_ESSENTIAL_TOOLS[definition.name] === true ? { loadMode: "essential" as const } : {};
 		// omp's registerTool takes its own render signatures; Pi's ToolDefinition type cannot express them.
-		pi.registerTool(presented as unknown as ToolDefinition);
+		pi.registerTool({ ...presented, ...essential } as unknown as ToolDefinition);
 	};
 	return Object.create(pi, { registerTool: { value: registerTool } }) as ExtensionAPI;
 }
