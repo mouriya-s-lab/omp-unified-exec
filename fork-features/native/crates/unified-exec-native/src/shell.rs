@@ -200,6 +200,8 @@ const STDIN_CLOSED: &str = "stdin_closed";
 /// Rejection reason prefix of a write the pipe refused (the command closed
 /// its read end, e.g. EPIPE).
 const STDIN_BROKEN: &str = "stdin_broken";
+/// Rejection of one cancelled write; its stdin and shell remain alive.
+const STDIN_WRITE_CANCELLED: &str = "stdin_write_cancelled";
 
 #[cfg(unix)]
 type StdinSender = tokio::net::unix::pipe::Sender;
@@ -224,21 +226,37 @@ impl StdinWriter {
 		}
 	}
 
-	async fn write(&self, data: Vec<u8>) -> Result<()> {
-		let mut guard = self.sender.lock().await;
+	async fn write(&self, data: Vec<u8>, cancel: task::CancelToken) -> Result<()> {
+		if self.closed.is_cancelled() {
+			return Err(Error::from_reason(STDIN_CLOSED));
+		}
+		if cancel.aborted() {
+			return Err(Error::from_reason(STDIN_WRITE_CANCELLED));
+		}
+		let mut guard = tokio::select! {
+			biased;
+			() = self.closed.cancelled() => return Err(Error::from_reason(STDIN_CLOSED)),
+			_ = cancel.wait() => return Err(Error::from_reason(STDIN_WRITE_CANCELLED)),
+			guard = self.sender.lock() => guard,
+		};
 		if self.closed.is_cancelled() {
 			guard.take();
 			return Err(Error::from_reason(STDIN_CLOSED));
+		}
+		if cancel.aborted() {
+			return Err(Error::from_reason(STDIN_WRITE_CANCELLED));
 		}
 		let Some(sender) = guard.as_mut() else {
 			return Err(Error::from_reason(STDIN_CLOSED));
 		};
 		let written = tokio::select! {
+			biased;
 			written = sender.write_all(&data) => written,
 			() = self.closed.cancelled() => {
 				guard.take();
 				return Err(Error::from_reason(STDIN_CLOSED));
 			},
+			_ = cancel.wait() => return Err(Error::from_reason(STDIN_WRITE_CANCELLED)),
 		};
 		written.map_err(|err| Error::from_reason(format!("{STDIN_BROKEN}: {err}")))
 	}
@@ -287,8 +305,10 @@ fn stdin_pipe() -> std::io::Result<(fs::File, StdinSender)> {
 /// end; a `ShellStdin` cannot be reused, so bytes written to it only ever
 /// reach that run. `write` resolves once the pipe accepted every byte (the
 /// pipe's capacity is the only buffer) and rejects with `stdin_closed` after
-/// `close`, or `stdin_broken: <reason>` when the command closed its end. The
-/// write end closes on `close` or when the run settles, whichever is first.
+/// `close`, or `stdin_broken: <reason>` when the command closed its end.
+/// A write's signal rejects with `stdin_write_cancelled` without closing stdin
+/// or cancelling the run; an incomplete write may have delivered a prefix.
+/// The write end closes on `close` or when the run settles, whichever is first.
 #[napi]
 pub struct ShellStdin {
 	reader: parking_lot::Mutex<Option<fs::File>>,
@@ -310,12 +330,22 @@ impl ShellStdin {
 		})
 	}
 
-	/// Write `data` to the run's stdin, after any earlier write.
+	/// Write `data` after earlier writes. Cancelling this wait keeps stdin
+	/// open; an incomplete write may already have delivered a prefix.
 	#[napi(ts_return_type = "Promise<void>")]
-	pub fn write<'env>(&self, env: &'env Env, data: Uint8Array) -> Result<PromiseRaw<'env, ()>> {
+	pub fn write<'env>(
+		&self,
+		env: &'env Env,
+		data: Uint8Array,
+		signal: Option<Unknown<'env>>,
+	) -> Result<PromiseRaw<'env, ()>> {
+		let cancel = task::CancelToken::new(None, signal);
+		if cancel.aborted() {
+			return Err(Error::from_reason(STDIN_WRITE_CANCELLED));
+		}
 		let writer = Arc::clone(&self.writer);
 		let bytes = data.to_vec();
-		task::future(env, "shell.stdin.write", async move { writer.write(bytes).await })
+		task::future(env, "shell.stdin.write", async move { writer.write(bytes, cancel).await })
 	}
 
 	/// Close the write end (EOF for the command). Idempotent.

@@ -39,6 +39,40 @@ try {
 	console.log(JSON.stringify(head));
 	assert.equal(head.output.replace(/\r\n/g, "\n"), "brush-stdin-line\n");
 	assert.equal(head.exitCode, 0);
+
+	// A cancelled write must release backpressure without closing stdin or
+	// leaving a detached write that later delivers the rest of the payload.
+	const stdin = new native.ShellStdin();
+	const cancellation = new AbortController();
+	const payload = Buffer.alloc(4 * 1024 * 1024, 120);
+	const marker = "\nbrush-after-cancel\n";
+	let ended = false;
+	let outputBytes = 0;
+	let outputTail = "";
+	const reading = shell.run({ command: "sleep 1; cat", cwd: process.cwd() }, stdin, (error, chunk) => {
+		if (error) throw error;
+		outputBytes += Buffer.byteLength(chunk);
+		outputTail = (outputTail + chunk).slice(-64);
+	}).then((result) => {
+		ended = true;
+		return result;
+	});
+	const writing = stdin.write(payload, cancellation.signal);
+	const timer = setTimeout(() => cancellation.abort(), 50);
+	try {
+		await assert.rejects(writing, /stdin_write_cancelled/);
+	} finally {
+		clearTimeout(timer);
+	}
+	assert.equal(ended, false, "cancelling a write does not cancel the command");
+	await stdin.write(Buffer.from(marker));
+	stdin.close();
+	const afterCancel = await reading;
+	assert.equal(afterCancel.exitCode, 0);
+	assert.equal(afterCancel.cancelled, false);
+	assert.ok(outputTail.endsWith(marker), "the same stdin still accepts the next write");
+	assert.ok(outputBytes < payload.length + Buffer.byteLength(marker), "the cancelled remainder was not delivered later");
+	console.log(JSON.stringify({ writeCancelled: true, resumed: true, outputBytes, exitCode: afterCancel.exitCode }));
 } finally {
 	await shell.dispose();
 }
