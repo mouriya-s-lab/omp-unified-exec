@@ -11,6 +11,7 @@ All notable changes to this project. **Newest entries go on top.**
 - On Windows, acknowledge Brush stdin only after the overlapped pipe write completes. Cancellation reaps that exact serialized write before returning, instead of Mio acknowledging a heap-buffered request early; later writes keep the same live pipe.
 - Complete stdin close after a concurrent write releases its guard, on every platform, so a close racing write completion cannot leave the command waiting indefinitely for EOF.
 - On omp, apply built-in bash's ordered command approval to raw `exec_command.cmd`: session-local allow/deny/prompt patterns, compound-command policy and critical-command confirmation. Confirmation details include the command; unbound approval returns the host default `exec`, and Pi and stdin/session-control tools remain unchanged ([#29](https://github.com/oh-my-omp/omp-unified-exec/issues/29)).
+- Build an immutable omp execution plan before backend startup: extract a supported leading `cd` only without workdir, resolve relative local directories against the calling session cwd, and reject missing/non-directory paths before allocating a session. Registered internal URL directories remain unchanged for their later stage; execution uses effective fields while display metadata keeps the original command. Pi retains its existing raw-path process behavior ([#30](https://github.com/oh-my-omp/omp-unified-exec/issues/30)).
 
 ## 0.14.7 - 2026-10-13
 

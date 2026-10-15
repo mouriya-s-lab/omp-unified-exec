@@ -46,8 +46,17 @@ declare module "@oh-my-pi/pi-coding-agent/exec/settings" {
 declare module "@oh-my-pi/pi-coding-agent/tools/shell-tokenize" {
 	export const tokenizeShellSegments: unknown;
 	export const extractLiteralAndChainSegments: unknown;
+	export const extractLeadingCdTarget: unknown;
 }
 
 declare module "@oh-my-pi/pi-coding-agent/tools/approval" {
 	export const truncateForPrompt: unknown;
+}
+
+declare module "@oh-my-pi/pi-coding-agent/internal-urls" {
+	export const InternalUrlRouter: unknown;
+}
+
+declare module "@oh-my-pi/pi-coding-agent/tools/path-utils" {
+	export const resolveToCwd: unknown;
 }
