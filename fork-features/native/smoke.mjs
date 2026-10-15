@@ -73,6 +73,42 @@ try {
 	assert.ok(outputTail.endsWith(marker), "the same stdin still accepts the next write");
 	assert.ok(outputBytes < payload.length + Buffer.byteLength(marker), "the cancelled remainder was not delivered later");
 	console.log(JSON.stringify({ writeCancelled: true, resumed: true, outputBytes, exitCode: afterCancel.exitCode }));
+
+	// A successful large write is acknowledged only after the pipe accepts
+	// it, and EOF must deliver every byte in order before the command exits.
+	const accepted = new native.ShellStdin();
+	let acceptedBytes = 0;
+	const complete = shell.run({ command: "sleep 0.2; cat", cwd: process.cwd() }, accepted, (error, chunk) => {
+		if (error) throw error;
+		const bytes = Buffer.from(chunk);
+		assert.ok(bytes.equals(payload.subarray(acceptedBytes, acceptedBytes + bytes.length)));
+		acceptedBytes += bytes.length;
+	});
+	let acknowledged = false;
+	const largeWrite = accepted.write(payload).then(() => { acknowledged = true; });
+	await new Promise((resolve) => setTimeout(resolve, 50));
+	assert.equal(acknowledged, false, "a non-reading command does not acknowledge a heap-buffered write");
+	await largeWrite;
+	accepted.close();
+	assert.equal((await complete).exitCode, 0);
+	assert.equal(acceptedBytes, payload.length);
+	console.log(JSON.stringify({ largeWriteBytes: acceptedBytes, ordered: true, eof: true }));
+
+	const closing = new native.ShellStdin();
+	const closeRun = shell.run({ command: "sleep 0.2; cat", cwd: process.cwd() }, closing, (error) => {
+		if (error) throw error;
+	});
+	const closeWrite = closing.write(payload);
+	closing.close();
+	await assert.rejects(closeWrite, /stdin_closed/);
+	assert.equal((await closeRun).exitCode, 0);
+
+	const preaborted = new native.ShellStdin();
+	const beforeSubmission = new AbortController();
+	beforeSubmission.abort();
+	await assert.rejects(async () => preaborted.write(payload, beforeSubmission.signal), /stdin_write_cancelled/);
+	preaborted.close();
+	console.log(JSON.stringify({ closedPendingWrite: true, cancelledBeforeSubmission: true }));
 } finally {
 	await shell.dispose();
 }

@@ -9,6 +9,8 @@
 //! - `Shell.dispose` ends the session and terminates its background jobs.
 
 pub mod vfs;
+#[cfg(windows)]
+mod stdin_windows;
 
 use std::{
 	collections::HashMap,
@@ -30,6 +32,7 @@ use pi_shell::{
 	MinimizerResult as CoreMinimizerResult, Shell as CoreShell, ShellOptions as CoreShellOptions,
 	ShellRunOptions as CoreShellRunOptions, ShellRunResult as CoreShellRunResult, minimizer,
 };
+#[cfg(unix)]
 use tokio::io::AsyncWriteExt as _;
 use tokio_util::sync::CancellationToken;
 
@@ -206,7 +209,7 @@ const STDIN_WRITE_CANCELLED: &str = "stdin_write_cancelled";
 #[cfg(unix)]
 type StdinSender = tokio::net::unix::pipe::Sender;
 #[cfg(windows)]
-type StdinSender = tokio::net::windows::named_pipe::NamedPipeServer;
+type StdinSender = Arc<stdin_windows::StdinSender>;
 
 /// Write end of a run's stdin: one pipe per [`ShellStdin`], shared by its
 /// writes (serialized in call order by the fair async mutex) and its close.
@@ -249,16 +252,29 @@ impl StdinWriter {
 		let Some(sender) = guard.as_mut() else {
 			return Err(Error::from_reason(STDIN_CLOSED));
 		};
-		let written = tokio::select! {
-			biased;
-			written = sender.write_all(&data) => written,
-			() = self.closed.cancelled() => {
+		#[cfg(unix)]
+		{
+			let written = tokio::select! {
+				biased;
+				written = sender.write_all(&data) => written,
+				() = self.closed.cancelled() => {
+					guard.take();
+					return Err(Error::from_reason(STDIN_CLOSED));
+				},
+				_ = cancel.wait() => return Err(Error::from_reason(STDIN_WRITE_CANCELLED)),
+			};
+			written.map_err(|err| Error::from_reason(format!("{STDIN_BROKEN}: {err}")))
+		}
+		#[cfg(windows)]
+		{
+			// Do not race/drop this future: it joins the cancelled overlapped
+			// operation before the serialized writer can be used again.
+			let result = sender.write(data, self.closed.clone(), cancel).await;
+			if self.closed.is_cancelled() {
 				guard.take();
-				return Err(Error::from_reason(STDIN_CLOSED));
-			},
-			_ = cancel.wait() => return Err(Error::from_reason(STDIN_WRITE_CANCELLED)),
-		};
-		written.map_err(|err| Error::from_reason(format!("{STDIN_BROKEN}: {err}")))
+			}
+			result
+		}
 	}
 }
 
@@ -278,34 +294,16 @@ fn stdin_pipe() -> std::io::Result<(fs::File, StdinSender)> {
 /// server of a uniquely named outbound pipe and the read end its client.
 #[cfg(windows)]
 fn stdin_pipe() -> std::io::Result<(fs::File, StdinSender)> {
-	use std::sync::atomic::AtomicU64;
-
-	use tokio::net::windows::named_pipe::ServerOptions;
-	static NEXT: AtomicU64 = AtomicU64::new(0);
-	let name = format!(
-		r"\\.\pipe\omp-unified-exec-stdin-{}-{}",
-		std::process::id(),
-		NEXT.fetch_add(1, Ordering::Relaxed)
-	);
-	let sender = within_runtime_if_available(|| {
-		ServerOptions::new()
-			.first_pipe_instance(true)
-			.access_inbound(false)
-			.access_outbound(true)
-			.reject_remote_clients(true)
-			.create(&name)
-	})?;
-	let reader = fs::OpenOptions::new().read(true).open(&name)?;
-	Ok((reader, sender))
+	stdin_windows::pipe()
 }
 
 /// The stdin of one `Shell.run` (omp-unified-exec addition).
 ///
 /// Create one per run and pass it to [`Shell::run`], which takes its read
 /// end; a `ShellStdin` cannot be reused, so bytes written to it only ever
-/// reach that run. `write` resolves once the pipe accepted every byte (the
-/// pipe's capacity is the only buffer) and rejects with `stdin_closed` after
-/// `close`, or `stdin_broken: <reason>` when the command closed its end.
+/// reach that run. `write` resolves once the pipe accepted every byte, not
+/// when an application buffer queued it, and rejects with `stdin_closed`
+/// after `close`, or `stdin_broken: <reason>` when the command closed its end.
 /// A write's signal rejects with `stdin_write_cancelled` without closing stdin
 /// or cancelling the run; an incomplete write may have delivered a prefix.
 /// The write end closes on `close` or when the run settles, whichever is first.
