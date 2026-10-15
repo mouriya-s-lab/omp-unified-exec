@@ -28,6 +28,7 @@ import { type AgentToolResult, type AgentToolUpdateCallback, type ExtensionAPI, 
 import { Type, type TUnsafe } from "typebox";
 
 import { type ActivatedExtension, withHostPresentation } from "../fork-features/omp-presentation.ts";
+import { MonitorError } from "../fork-features/monitor-subscription.ts";
 import { type CollectResult, NO_OUTPUT } from "./collect.ts";
 import { registerCompactCodemode } from "./codemode-render.ts";
 import { CompletionCoordinator, type OnExitPolicy, sanitizeMeta } from "./completion.ts";
@@ -53,6 +54,8 @@ import {
 	killScriptResultSchema,
 	listSessionsScriptResult,
 	listSessionsScriptResultSchema,
+	monitorScriptResultSchema,
+	type MonitorScriptResult,
 	processScriptResult,
 	processScriptResultSchema,
 	setOnExitScriptResult,
@@ -711,12 +714,15 @@ async function terminateSessionById(
 	ctx: ExtensionCtx,
 	sid: number,
 	initial: NodeJS.Signals,
+	origin: "model" | "human" = "human",
 ): Promise<TerminateOutcome | undefined> {
+	if (origin === "model") ctx.coordinator.cancelMonitor(sid);
 	const session = ctx.store.get(sid);
 	if (!session) return undefined;
 	// Explicit kill (model tool or human slash command): suppress the wake
 	// BEFORE signaling so the induced exit can never race a wake enqueue.
 	ctx.coordinator.suppress(sid);
+	if (origin === "human") ctx.coordinator.monitorEndReason(sid, "human_terminated");
 	session.kill(initial);
 	// Event-driven wait (resolves the instant the exit fires): up to 2s.
 	await waitForExitOrDeadline({ exited: session.exited, durationMs: 2000 });
@@ -739,6 +745,7 @@ async function terminateSessionById(
 		// The kill did NOT land — the process is still alive and still owned.
 		// Restore its prior wake eligibility.
 		ctx.coordinator.restoreAfterFailedKill(sid);
+		ctx.coordinator.monitorEndReason(sid, "natural");
 	}
 	return { session, escalated, collected, killed };
 }
@@ -911,6 +918,12 @@ function activate(pi: ExtensionAPI, appearance: () => TerminalAppearance = () =>
 				{ triggerTurn: true, deliverAs: "followUp" },
 			);
 		},
+		sendMonitor: (message) => {
+			pi.sendMessage(
+				{ customType: "unified-exec-monitor", content: message.content, display: true, details: message.details },
+				{ triggerTurn: true, deliverAs: "followUp" },
+			);
+		},
 		onSendError: (err) => {
 			ctx.ui?.notify(
 				`unified-exec: failed to deliver completion notification: ${err instanceof Error ? err.message : String(err)}`,
@@ -920,9 +933,12 @@ function activate(pi: ExtensionAPI, appearance: () => TerminalAppearance = () =>
 	});
 	const ctx: ExtensionCtx = {
 		coordinator,
-		// Eviction UI (status clear + warning) is handled at the insert site;
-		// no onEvict callback needed.
-		store: new SessionStore({ maxSessions: MAX_SESSIONS, lruProtectedCount: LRU_PROTECTED_COUNT }),
+		store: new SessionStore({
+			maxSessions: MAX_SESSIONS, lruProtectedCount: LRU_PROTECTED_COUNT,
+			onEvict: (session, reason) => {
+				if (reason === "lru" && !session.hasExited) coordinator.monitorEndReason(session.id, "lru_terminated");
+			},
+		}),
 		ui: undefined,
 		widgetVisible: false,
 		exitUnsubscribers: new Map(),
@@ -1081,7 +1097,7 @@ function activate(pi: ExtensionAPI, appearance: () => TerminalAppearance = () =>
 			"For a long non-interactive command, start with a short yield to obtain a session_id, then use an empty write_stdin poll with a finite yield_time_ms suited to its expected duration. There is no built-in empty-poll maximum; an operator may configure one. Keep waits short for interactive or indefinite processes. Pi manages cache warming independently.",
 			'on_exit defaults to "none". Prefer polling or human follow-up. Use on_exit: "wake" ONLY when the human explicitly wants auto-resume on unobserved completion — not for indefinite processes (dev servers, watchers). If you armed wake by mistake or the job is wrong/abandoned, call set_on_exit(session_id, on_exit: "none") promptly (does not kill the process). kill_session still kills and suppresses wake. Combining wake with an observing write_stdin is safe: direct completion consumes the wake.',
 			"In codemode scripts, exec_command and write_stdin resolve to objects: print r.output with text(r.output) and check r.exit_code / r.session_id, instead of printing the whole result object.",
-			"tty: true output is the rendered terminal, as a human would see it, not the raw stream: each result shows any history_lines that scrolled off above the screen since the last call, then the full current screen, plus the cursor position. screen_changed: false means the screen is exactly as last reported. Full-screen programs (alternate screen) are shown as the whole screen. Styling (colours, reverse video) is not shown; the raw byte stream is in log_path.",
+			"tty: true output is rendered terminal state, not raw bytes. Running results show unseen history plus the current screen and cursor; unchanged running screens report screen_changed:false. Completed results show only the frozen final active screen. Read terminal_url for retained history, /screen for active text, or /screen.png for cell colours and styling; raw bytes remain in log_path.",
 		],
 		outputSchema: processScriptResultSchema,
 		parameters: Type.Object({
@@ -1263,10 +1279,50 @@ function activate(pi: ExtensionAPI, appearance: () => TerminalAppearance = () =>
 	});
 
 	pi.registerTool({
+		name: "monitor",
+		label: "monitor",
+		description: "Subscribe to future session output with an optional JavaScript regex condition; each matched batch wakes the agent without stopping the process. Without condition, await output closure once. Replaces any existing monitor; action cancel silently removes it. Default max_returns is 10 successful match messages.",
+		promptSnippet: "Await matching output or completion of an existing session",
+		promptGuidelines: [
+			"Monitor observes without consuming output. Use read term:// for tty history/screens and log_path for pipe recovery.",
+			"Only output after establishment participates. Match batches coalesce for about 250ms; the final allowed return ends the monitor, not the process.",
+			"Model kill_session, explicit cancel, replacement and session reset silently cancel monitoring. Already delivered follow-ups cannot be recalled.",
+		],
+		parameters: Type.Object({
+			session_id: Type.Number({ description: "Existing running session id." }),
+			action: Type.Optional(StringEnum(["start", "cancel"] as const, "start (default) establishes/replaces; cancel silently removes.")),
+			condition: Type.Optional(Type.String({ description: "JavaScript regular expression source, no / delimiters. Omit to wait only for completion." })),
+			max_returns: Type.Optional(Type.Number({ description: "Positive safe integer; default 10 successful matched batches. End does not count." })),
+		}),
+		outputSchema: monitorScriptResultSchema,
+		async execute(_toolCallId, params, signal) {
+			let details: MonitorScriptResult;
+			try {
+				if (params.action === "cancel") {
+					details = { session_id: params.session_id, status: coordinator.cancelMonitor(params.session_id) ? "cancelled" : "not_monitored" };
+				} else {
+					const session = ctx.store.get(params.session_id);
+					if (!session) throw new MonitorError("unknown_session", `No such session: ${params.session_id}`);
+					const monitor = await coordinator.startMonitor(session, params.condition, params.max_returns, signal);
+					details = { session_id: params.session_id, status: "started", monitor };
+				}
+			} catch (error) {
+				if (!(error instanceof MonitorError)) throw error;
+				details = { session_id: params.session_id, status: "error", code: error.code, message: error.message };
+			}
+			return {
+				content: [{ type: "text", text: JSON.stringify(details) }],
+				details, structuredContent: details,
+				...(details.status === "error" ? { isError: true } : {}),
+			};
+		},
+	});
+
+	pi.registerTool({
 		name: "kill_session",
 		label: "kill_session",
 		description:
-			"Terminate a session (SIGTERM, escalates to SIGKILL after 2s; on Windows any signal force-kills the process tree). Use when the process won't exit via Ctrl-C. session_id is invalid after. Also suppresses any armed on_exit wake.",
+			"Terminate a session (SIGTERM, escalates to SIGKILL after 2s; on Windows any signal force-kills the process tree). Use when the process won't exit via Ctrl-C. session_id is invalid after confirmed exit. Also suppresses any armed on_exit wake and silently cancels its monitor before signaling, even if termination fails.",
 		promptSnippet: "Terminate a session",
 		outputSchema: killScriptResultSchema,
 		parameters: Type.Object({
@@ -1280,7 +1336,7 @@ function activate(pi: ExtensionAPI, appearance: () => TerminalAppearance = () =>
 			const sid = (params as { session_id: number; signal?: string }).session_id;
 			const initial = normalizeSignal((params as { signal?: string }).signal);
 			const startedAt = Date.now();
-			const outcome = await terminateSessionById(ctx, sid, initial);
+			const outcome = await terminateSessionById(ctx, sid, initial, "model");
 			if (!outcome) {
 				return {
 					content: [{ type: "text", text: `No such session: ${sid}` }],
@@ -1372,6 +1428,7 @@ function activate(pi: ExtensionAPI, appearance: () => TerminalAppearance = () =>
 					elapsed_ms: now - s.startedAt,
 					running: !s.hasExited,
 					wake_armed: ctx.coordinator.isArmed(s.id),
+					monitor: ctx.coordinator.monitorStatus(s.id),
 					exit_code: s.hasExited ? s.exitCode : undefined,
 					signal: s.hasExited ? (s.signal ?? undefined) : undefined,
 					failure_message: s.failureMessage ?? undefined,
@@ -1386,9 +1443,10 @@ function activate(pi: ExtensionAPI, appearance: () => TerminalAppearance = () =>
 							? ""
 							: `  [exited${s.exit_code !== undefined && s.exit_code !== null ? ` exit_code=${s.exit_code}` : ""}${s.signal ? ` signal=${s.signal}` : ""}; removed from store]`;
 						const wake = s.wake_armed ? " [wake]" : "";
+						const monitor = s.monitor ? ` [monitor ${s.monitor.returns}/${s.monitor.max_returns} condition=${JSON.stringify(s.monitor.condition)}]` : "";
 						return `  ${String(s.session_id).padStart(3)}  pid=${String(s.pid ?? "?").padStart(6)}  ${
 							s.tty ? "tty" : "pipe"
-						}  ${((s.elapsed_ms / 1000).toFixed(1) + "s").padStart(8)}${wake}  ${oneLineCommand(s.command, 60)}${exitedSuffix}\n        log: ${s.log_path}${s.terminal_url ? `\n        terminal_url: ${s.terminal_url}` : ""}`;
+						}  ${((s.elapsed_ms / 1000).toFixed(1) + "s").padStart(8)}${wake}${monitor}  ${oneLineCommand(s.command, 60)}${exitedSuffix}\n        log: ${s.log_path}${s.terminal_url ? `\n        terminal_url: ${s.terminal_url}` : ""}`;
 					})
 				: ["  (no live sessions)"];
 			const header = reaped.length

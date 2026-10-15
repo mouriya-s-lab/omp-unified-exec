@@ -1,0 +1,185 @@
+import { strict as assert } from "node:assert";
+import { describe, it } from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
+
+import type { MonitorMessage } from "../fork-features/monitor-subscription.ts";
+import { CompletionCoordinator } from "../src/completion.ts";
+import { ExecSession } from "../src/session.ts";
+import { TerminalScreen, type TerminalLineSubscription } from "../src/terminal-screen.ts";
+
+const encoder = new TextEncoder();
+
+async function renderedDelta(cols: number, rows: number, before: string, after: string): Promise<string[]> {
+	const screen = new TerminalScreen(cols, rows, () => {});
+	let handle: TerminalLineSubscription | undefined;
+	const lines: string[] = [];
+	try {
+		screen.write(encoder.encode(before));
+		await screen.project();
+		assert.equal(await screen.subscribeLines(() => true, (batch) => lines.push(...batch), (source) => { handle = source; return true; }), "accepted");
+		screen.write(encoder.encode(after));
+		await handle!.finish();
+		return lines;
+	} finally {
+		handle?.cancel();
+		await screen.release();
+	}
+}
+
+function pipeSession(id: number): ExecSession {
+	return ExecSession.spawn(id, {
+		command: [process.execPath, "-e", "process.stdin.on('data', b => { if (b.toString().includes('EXIT')) process.stdout.write('LAST MATCH', () => process.exit(4)); else process.stdout.write(b); });"],
+		cwd: process.cwd(), env: { ...process.env }, tty: false,
+	});
+}
+
+async function close(session: ExecSession): Promise<void> {
+	session.kill("SIGKILL");
+	await session.outputClosed.closed();
+	await session.release();
+}
+
+describe("monitor source and delivery", () => {
+	it("does not replay old screen survivors when a burst trims the first baseline row", async () => {
+		const fresh = Array.from({ length: 481 }, (_, index) => `NEW${index}`);
+		assert.deepEqual(await renderedDelta(500, 5, "OLD0\r\nOLD1\r\nOLD2\r\nOLD3\r\nOLD4", `\r\n${fresh.join("\r\n")}`), fresh);
+	});
+
+	it("joins changed wrapped rows and preserves distinct equal-text new lines", async () => {
+		assert.deepEqual(await renderedDelta(5, 3, "", "1234KEYWORD"), ["1234KEYWORD"]);
+		assert.deepEqual(await renderedDelta(20, 3, "", "same\r\nsame"), ["same", "same"]);
+	});
+
+	it("suppresses same-content erase/redraw but reports actual erased text", async () => {
+		assert.deepEqual(await renderedDelta(20, 3, "STATIC\r\nNEXT", "\x1b[2J\x1b[HSTATIC\r\nNEXT"), []);
+		assert.deepEqual(await renderedDelta(20, 3, "STATIC\r\nNEXT", "\x1b[2J"), ["", ""]);
+		assert.deepEqual(await renderedDelta(20, 3, "", "\n"), [], "cursor-only movement is not a rendered text change");
+		assert.deepEqual(await renderedDelta(20, 2, "", "\n\n"), [""], "a newly scrolled blank row has a new identity");
+	});
+
+	it("separates history erase, buffer reset and alternate-screen padding", async () => {
+		const old = Array.from({ length: 20 }, (_, index) => `OLD${index}`).join("\r\n");
+		assert.deepEqual(await renderedDelta(20, 3, old, "\x1b[3J"), []);
+		assert.deepEqual(await renderedDelta(20, 3, old, "\x1bcRESET"), ["RESET"]);
+		assert.deepEqual(await renderedDelta(20, 3, "OLD", "\x1b[?1049h\x1b[HALT"), ["ALT"]);
+		assert.deepEqual(await renderedDelta(20, 3, "OLD\x1b[?1049h\x1b[HALT", "\x1b[?1049l\r\nNEW"), ["NEW"]);
+	});
+
+	it("rolls back an accepted source tap when its publication callback throws", async () => {
+		const screen = new TerminalScreen(20, 3, () => {});
+		let called = false;
+		try {
+			await assert.rejects(screen.subscribeLines(() => true, () => { called = true; }, () => { throw new Error("publication failed"); }), /publication failed/);
+			screen.write(encoder.encode("MATCH"));
+			await screen.project();
+			await delay(80);
+			assert.equal(called, false);
+		} finally { await screen.release(); }
+	});
+
+	it("counts successful returns only and retries a failed batch without losing process output", async (t) => {
+		const session = pipeSession(9101);
+		const failed = Promise.withResolvers<void>();
+		const delivered = Promise.withResolvers<MonitorMessage>();
+		let attempts = 0;
+		const coordinator = new CompletionCoordinator({
+			send: () => { throw new Error("unexpected ordinary wake"); },
+			sendMonitor: (message) => {
+				if (++attempts === 1) { failed.resolve(); throw new Error("queue unavailable"); }
+				delivered.resolve(message);
+			},
+			onSendError: () => { throw new Error("UI also unavailable"); },
+		});
+		t.after(async () => { coordinator.shutdown(); await close(session); });
+		await coordinator.startMonitor(session, "MATCH", 1);
+		session.write(encoder.encode("MATCH one\n"));
+		await failed.promise;
+		assert.equal(coordinator.monitorStatus(session.id)?.returns, 0);
+		coordinator.flushPending();
+		const message = await delivered.promise;
+		await delay(0);
+		assert.equal(attempts, 2);
+		assert.equal(message.details.returns, 1);
+		assert.deepEqual(message.details.lines, ["MATCH one"]);
+		assert.match(message.content, /limit reached/);
+		assert.equal(coordinator.monitorStatus(session.id), undefined);
+		const output = await session.collect({ deadlineMs: Date.now() });
+		assert.equal(output.kind, "stream");
+		if (output.kind === "stream") assert.match(new TextDecoder().decode(output.bytes), /MATCH one/);
+	});
+
+	it("merges final partial pipe output with End and consumes exactly the matching ordinary wake", async (t) => {
+		const session = pipeSession(9102);
+		const delivered = Promise.withResolvers<MonitorMessage>();
+		let ordinary = 0;
+		let monitors = 0;
+		const coordinator = new CompletionCoordinator({ send: () => { ordinary++; }, sendMonitor: (message) => { monitors++; delivered.resolve(message); } });
+		t.after(async () => { coordinator.shutdown(); await close(session); });
+		coordinator.register(session);
+		await coordinator.startMonitor(session, "MATCH");
+		session.write(encoder.encode("EXIT\n"));
+		const message = await delivered.promise;
+		await delay(0);
+		coordinator.flushPending();
+		await delay(300);
+		assert.equal(message.details.event, "end");
+		assert.equal(message.details.exit_code, 4);
+		assert.deepEqual(message.details.lines, ["LAST MATCH"]);
+		assert.equal(message.details.returns, 0);
+		assert.equal(monitors, 1);
+		assert.equal(ordinary, 0);
+		assert.equal(coordinator.monitorStatus(session.id), undefined);
+	});
+});
+
+describe("pipe monitor sanitized bounds", () => {
+	it("counts only cleaned characters and preserves keywords across control spans", async (t) => {
+		const session = pipeSession(9201);
+		const delivered = Promise.withResolvers<MonitorMessage>();
+		const coordinator = new CompletionCoordinator({ send: () => {}, sendMonitor: (message) => { delivered.resolve(message); } });
+		t.after(async () => { coordinator.shutdown(); await close(session); });
+		await coordinator.startMonitor(session, "KEYWORD", 10);
+		const input = "\x1b[31m".repeat(220) + "KEYWORD colored\n" +
+			"KEYWORD" + "x".repeat(2000) + "\n" +
+			"x".repeat(2000) + "KEYWORD beyond-visible-bound\n" +
+			"中KEY\x1b[0mWORD🎉\n";
+		session.write(encoder.encode(input));
+		const message = await delivered.promise;
+		assert.deepEqual(message.details.lines, ["KEYWORD colored", "KEYWORD" + "x".repeat(1017), "中KEYWORD🎉"]);
+		assert.equal(message.details.recent_matches, 3);
+		assert.equal(message.details.returns, 1);
+		assert.equal(message.details.omitted_lines, 0);
+		const ordinary = await session.collect({ deadlineMs: Date.now() });
+		if (ordinary.kind !== "stream") throw new Error("pipe returned a terminal projection");
+		assert.match(new TextDecoder().decode(ordinary.bytes), /KEYWORD colored/);
+	});
+
+	it("does not expose control-string newlines or payload across pipe chunks", async (t) => {
+		const session = pipeSession(9202);
+		const delivered = Promise.withResolvers<MonitorMessage>();
+		const coordinator = new CompletionCoordinator({ send: () => {}, sendMonitor: (message) => { delivered.resolve(message); } });
+		t.after(async () => { coordinator.shutdown(); await close(session); });
+		await coordinator.startMonitor(session, "KEYWORD", 10);
+		session.write(encoder.encode("\x1b]0;hidden\nPAYLOAD KEYWORD\n\x1b"));
+		session.write(encoder.encode("\\KEY\x1b[31mWORD visible\n"));
+		const message = await delivered.promise;
+		assert.deepEqual(message.details.lines, ["KEYWORD visible"]);
+		assert.equal(message.details.recent_matches, 1);
+	});
+
+	it("flushes the visible final partial while discarding an unterminated control suffix", async (t) => {
+		const session = pipeSession(9203);
+		const delivered = Promise.withResolvers<MonitorMessage>();
+		const coordinator = new CompletionCoordinator({ send: () => {}, sendMonitor: (message) => { delivered.resolve(message); } });
+		t.after(async () => { coordinator.shutdown(); await close(session); });
+		await coordinator.startMonitor(session, "KEYWORD", 10);
+		const received = session.outputNotify.notified();
+		session.write(encoder.encode("KEYWORD before\x1bPpayload\nHIDDEN KEYWORD"));
+		await received;
+		session.kill("SIGKILL");
+		const message = await delivered.promise;
+		assert.equal(message.details.event, "end");
+		assert.deepEqual(message.details.lines, ["KEYWORD before"]);
+		assert.equal(message.details.returns, 0);
+	});
+});

@@ -129,13 +129,13 @@ export class SessionStore {
 		if (!victim) return null;
 
 		this.sessions.delete(victim.id);
+		this.onEvict?.(victim, "lru");
 		try {
 			victim.terminate();
 		} catch {
 			// ignore
 		}
 		void victim.release();
-		this.onEvict?.(victim, "lru");
 		return victim;
 	}
 }

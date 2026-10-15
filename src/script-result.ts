@@ -17,6 +17,7 @@
 import { Type, type Static } from "typebox";
 
 import type { OnExitPolicy } from "./completion.ts";
+import type { MonitorStatus } from "../fork-features/monitor-subscription.ts";
 import { type KillResultDetails, type ProcessResultDetails, safeMeta } from "./tool-result.ts";
 
 const optionalMeta = (value: string | undefined): string | undefined => (value ? safeMeta(value) : undefined);
@@ -174,6 +175,19 @@ export function setOnExitScriptResult(value: {
 	return compact({ ...value });
 }
 
+const monitorStatusSchema = Type.Object({
+	condition: Type.Union([Type.String(), Type.Null()]),
+	returns: Type.Number(),
+	max_returns: Type.Number(),
+});
+
+export const monitorScriptResultSchema = Type.Union([
+	Type.Object({ session_id: Type.Number(), status: Type.Literal("started"), monitor: monitorStatusSchema }),
+	Type.Object({ session_id: Type.Number(), status: Type.Union([Type.Literal("cancelled"), Type.Literal("not_monitored")]) }),
+	Type.Object({ session_id: Type.Number(), status: Type.Literal("error"), code: Type.String(), message: Type.String() }),
+]);
+export type MonitorScriptResult = Static<typeof monitorScriptResultSchema>;
+
 export const listSessionsScriptResultSchema = Type.Object({
 	sessions: Type.Array(
 		Type.Object({
@@ -185,6 +199,7 @@ export const listSessionsScriptResultSchema = Type.Object({
 			elapsed_ms: Type.Number(),
 			running: Type.Boolean({ description: "False for sessions that just exited; they are removed after this listing." }),
 			wake_armed: Type.Boolean(),
+			monitor: Type.Optional(monitorStatusSchema),
 			exit_code: Type.Optional(Type.Number()),
 			signal: Type.Optional(Type.String()),
 			log_path: Type.Optional(Type.String()),
@@ -207,6 +222,7 @@ export function listSessionsScriptResult(value: {
 		elapsed_ms: number;
 		running: boolean;
 		wake_armed: boolean;
+		monitor?: MonitorStatus;
 		exit_code?: number | null;
 		signal?: string;
 		log_path?: string;
@@ -227,6 +243,7 @@ export function listSessionsScriptResult(value: {
 				elapsed_ms: s.elapsed_ms,
 				running: s.running,
 				wake_armed: s.wake_armed,
+				monitor: s.monitor,
 				exit_code: s.exit_code ?? undefined,
 				signal: optionalMeta(s.signal),
 				log_path: optionalMeta(s.log_path),

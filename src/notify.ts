@@ -61,6 +61,20 @@ export class Gate {
 			this.waiters.push(resolve);
 		});
 	}
+
+	/** Queue one closure notification; cancellation removes it before closure. */
+	subscribe(listener: () => void): () => void {
+		if (this.state) {
+			queueMicrotask(listener);
+			return () => {};
+		}
+		const notify = () => queueMicrotask(listener);
+		this.waiters.push(notify);
+		return () => {
+			const index = this.waiters.indexOf(notify);
+			if (index >= 0) this.waiters.splice(index, 1);
+		};
+	}
 }
 
 /** Sleep for `ms` milliseconds, optionally aborted by `signal`. */
