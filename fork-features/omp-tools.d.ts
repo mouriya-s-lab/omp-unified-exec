@@ -19,6 +19,7 @@ declare module "@oh-my-pi/pi-tui/theme" {
 // (fork-features/brush/omp-host.ts parses them).
 declare module "@oh-my-pi/pi-coding-agent" {
 	export const AgentRegistry: unknown;
+	export const CRITICAL_BASH_PATTERNS: unknown;
 }
 
 declare module "@oh-my-pi/pi-coding-agent/exec/non-interactive-env" {
@@ -38,4 +39,15 @@ declare module "@oh-my-pi/pi-coding-agent/exec/settings" {
 	export const cfgBashDirenv: unknown;
 	export const cfgBashDirenvLoadTimeoutMs: unknown;
 	export const cfgShellMinimizer: unknown;
+	export const cfgBashPatterns: unknown;
+	export const cfgBashAllowCompoundCommands: unknown;
+}
+
+declare module "@oh-my-pi/pi-coding-agent/tools/shell-tokenize" {
+	export const tokenizeShellSegments: unknown;
+	export const extractLiteralAndChainSegments: unknown;
+}
+
+declare module "@oh-my-pi/pi-coding-agent/tools/approval" {
+	export const truncateForPrompt: unknown;
 }
