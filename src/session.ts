@@ -17,6 +17,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { discardLiveTerminal, freezeTerminal, readTerminal, registerTerminal } from "../fork-features/terminal-resource.ts";
+import type { MonitorListener, MonitorSourceHandle, MonitorStart } from "../fork-features/monitor-subscription.ts";
 import { type CollectResult, collectOutputUntilDeadline, type FinalScreenOutput } from "./collect.ts";
 import { HeadTailBuffer } from "./head-tail-buffer.ts";
 import { Gate, Notify } from "./notify.ts";
@@ -98,6 +99,7 @@ export class ExecSession {
 		failureMessage: null,
 	};
 	private readonly exitListeners = new Set<(session: ExecSession) => void>();
+	private readonly pipeListeners = new Set<(bytes: Uint8Array) => void>();
 	private lastUsedAt: number;
 	private child!: SpawnedChild;
 
@@ -182,6 +184,7 @@ export class ExecSession {
 			} else {
 				self.outputBuffer.pushChunk(chunk);
 				self.appendStreamTail(chunk);
+				for (const listener of self.pipeListeners) listener(chunk);
 			}
 			// Mirror every byte to the log file. Errors are handled by the
 			// 'error' listener on the stream, which nulls `logStream` out.
@@ -318,6 +321,49 @@ export class ExecSession {
 	/** Call `listener` whenever new tty output has been parsed into the screen; returns the unsubscribe. */
 	onScreenChange(listener: () => void): () => void {
 		return this.screen?.onChange(listener) ?? (() => {});
+	}
+
+	/** Establish on the source's boundary; no replay and no speculative subscription. */
+	async subscribeMonitor(
+		listener: MonitorListener,
+		accept: (handle: MonitorSourceHandle) => boolean,
+		signal?: AbortSignal,
+	): Promise<MonitorStart> {
+		if (signal?.aborted) return "cancelled";
+		if (this.hasExited) return "not_running";
+		if (listener.conditional && this.screen) {
+			return this.screen.subscribeLines(() => !this.hasExited, (lines) => listener.lines(lines), (handle) => {
+				// Register final draining before publishing the subscription. The
+				// gate's freeze callback already queued its projection; this queues
+				// the monitor drain before any release awaiting that freeze.
+				void this.outputClosed.closed().then(async () => {
+					if (await handle.finish()) listener.end();
+				});
+				return accept(handle);
+			}, signal);
+		}
+		let active = true;
+		const tap = (bytes: Uint8Array) => listener.bytes(bytes);
+		if (listener.conditional) this.pipeListeners.add(tap);
+		const handle: MonitorSourceHandle = {
+			cancel: () => {
+				active = false;
+				this.pipeListeners.delete(tap);
+			},
+		};
+		try {
+			if (!accept(handle)) { handle.cancel(); return "cancelled"; }
+		} catch (error) {
+			handle.cancel();
+			throw error;
+		}
+		void this.outputClosed.closed().then(async () => {
+			if (this.terminalFinalized) await this.terminalFinalized;
+			if (!active) return;
+			handle.cancel();
+			listener.end();
+		});
+		return "accepted";
 	}
 
 	/**

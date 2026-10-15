@@ -5,7 +5,7 @@
 为 [oh-my-pi](https://github.com/can1357/oh-my-pi)（omp）提供长时间运行的 shell
 会话，并在 Tern 里带一个终端 HUD。模型执行的每条命令都会成为一个会话，由模型通过写入和轮询来驱动，而不是一次阻塞到底的调用：开发服务器、REPL、`ssh`、`sudo`、全屏程序和长时间任务在多轮对话之间持续运行，人也可以在 Tern 里查看它们、向它们输入。
 
-本仓库 fork 自 [iamwrm/pi-unified-exec](https://github.com/iamwrm/pi-unified-exec)，后者是 codex `unified_exec` 的 Pi 移植。工具接口（`exec_command`、`write_stdin`、`set_on_exit`、`kill_session`、`list_sessions`）及其语义来自上游；fork 补上了 omp 和 Tern 需要的部分。fork 的全部改动、每项改动的原因，以及 omp/Tern 升级后如何重新验证，见 [fork-features/README.zh-CN.md](fork-features/README.zh-CN.md)。
+本仓库 fork 自 [iamwrm/pi-unified-exec](https://github.com/iamwrm/pi-unified-exec)，后者是 codex `unified_exec` 的 Pi 移植。原有工具（`exec_command`、`write_stdin`、`set_on_exit`、`kill_session`、`list_sessions`）保留其会话模型；fork 为 omp 增加终端读取/截图和 `monitor`。fork 的全部改动、每项改动的原因，以及 omp/Tern 升级后如何重新验证，见 [fork-features/README.zh-CN.md](fork-features/README.zh-CN.md)。
 
 ## 安装
 
@@ -31,6 +31,7 @@ Tern 更新会在这条命令成功返回前完成，无需单独执行 Tern 命
 - **PTY 输出就是终端上看到的内容。** `tty: true` 的会话经过无头终端模拟器。运行中的结果返回当前屏幕、自上次调用以来滚出的未见历史与光标位置，而不是叠加每次重绘；退出结果只返回最终活动屏，其余保留行通过 `terminal_url` 读取。模拟器会像真实终端一样回应光标位置、设备属性与默认颜色查询，因此等待回应或选择配色的程序表现与真实终端一致。
 - **输出有上限，完整内容可找回。** 模型看到的每个结果都从尾部截取，最多 50 KiB / 2000 行，并去掉终端控制序列；每个会话的完整原始输出都写入 `log_path`。
 - **可选的完成唤醒。** `on_exit: "wake"` 让后台进程在无人观察时退出后唤醒一次 agent；`set_on_exit` 可以取消。
+- **等待匹配输出。** `monitor` 不消费输出地观察已有会话，在匹配批次或结束时唤醒模型；默认最多成功返回十次匹配消息。
 - **omp 原生呈现。** `exec_command`、`write_stdin` 和 `kill_session` 用 omp 自己的 bash 卡片渲染（命令行、输出、退出码标签、错误配色），在 ANSI TUI 和 Tern 里都是如此。
 - **Tern 里的终端 HUD。** 不用调用工具，就能查看、回滚、输入并结束模型的 tty 会话。
 
@@ -235,6 +236,32 @@ write_stdin chars_b64="G3s6wgo="  → exact 5 decoded bytes
 - 提示只包含有限的元数据（会话 id、退出码/信号、命令、cwd、耗时、日志路径、失败信息）——绝不包含原始输出。
 - `kill_session`、`/unified-exec-sessions` 命令、对存活进程的 LRU 淘汰以及 `session_shutdown` 都会取消唤醒；kill 失败则恢复唤醒。自然退出、尚未通知就被淘汰的唤醒会话会保留一条有上限的墓碑记录，唤醒仍会送达。
 
+### `monitor`
+
+订阅已有运行中会话的后续输出，不停止进程，也不消费普通观察。
+
+| 参数 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `session_id` | number | — | 已有的运行中会话。 |
+| `action` | `"start"` \| `"cancel"` | `"start"` | 建立/替换该会话唯一的订阅，或静默取消。 |
+| `condition` | string | 不传 | JavaScript 正则源码（不带 `/` 分隔符）；不传则只在输出关闭时返回。 |
+| `max_returns` | number | `10` | 正安全整数，计成功的匹配消息数，不是行数，也不含 End。 |
+
+Pipe 条件接收清洗后的完整后续行与最后一个不完整行。TTY 条件接收新增或
+改变的渲染逻辑行，包括没有换行的提示符；wrapped 物理行会合并。
+纯光标/样式变化不触发，也不会重放建立前的输出。
+
+约 250 ms 内的匹配合并成一条 `unified-exec-monitor` 后续消息并唤醒模型。
+每条最多展示 16 行、每行最多 1024 字符，带省略数、成功次数/上限及
+`terminal_url` 或 `log_path`。60 秒内匹配超过 20 个时提示收窄条件，
+但继续观察；最后一次允许的匹配注明上限，只结束 monitor，不结束进程。
+
+实际输出关闭时发送 End，附尚未返回的匹配和退出码/信号；人工 HUD/slash
+与 LRU 终止写明原因。End 合并已启用的普通完成唤醒。模型 `kill_session`、
+显式取消、替换、reset 与关闭都静默结束，即使模型 kill 失败也是如此。
+已排队交给宿主的后续消息无法撤回。未知/已结束会话、非法正则及非法上限
+返回类型化错误。
+
 ### `kill_session`
 
 | 参数 | 类型 | 默认值 | 说明 |
@@ -246,7 +273,7 @@ write_stdin chars_b64="G3s6wgo="  → exact 5 decoded bytes
 
 ### `list_sessions`
 
-列出存活的会话，并把每个已退出的会话最后报告一次（带 `running: false`、`exit_code`/`signal` 和 `log_path`）后再移除。每条记录带 `wake_armed`；响应带 `tool_time_utc`，用于计算 `yield_until` 截止时间。
+列出存活的会话，并把每个已退出的会话最后报告一次（带 `running: false`、`exit_code`/`signal` 和 `log_path`）后再移除。每条记录带 `wake_armed` 及活动 monitor 的条件/成功次数/上限；响应带 `tool_time_utc`，用于计算 `yield_until` 截止时间。
 
 ## 命令和参数
 
@@ -255,9 +282,9 @@ write_stdin chars_b64="G3s6wgo="  → exact 5 decoded bytes
 
 ## 呈现
 
-**在 omp 上，**`exec_command`、`write_stdin` 和 `kill_session` 通过 omp 导出的 bash 渲染器渲染，ANSI TUI 和 Tern 都一样：`$ cmd`，可用 omp 的展开快捷键展开的折叠输出，失败时的退出码标签和错误配色，运行中会话显示 `Backgrounded: session N`，最后一行是带日志路径的截断标记。`write_stdin` 和 `kill_session` 以 bash 注释的形式显示所做的动作（`# poll session N`、`# stdin → session N: "…"`、`# kill session N (SIGTERM)`）。`set_on_exit` 和 `list_sessions` 使用 omp 的默认卡片。如果 omp 的 bash 渲染器缺失或接口变了，插件会直接加载失败，而不是显示原始的结果包装。
+**在 omp 上，**`exec_command`、`write_stdin` 和 `kill_session` 通过 omp 导出的 bash 渲染器渲染，ANSI TUI 和 Tern 都一样：`$ cmd`，可用 omp 的展开快捷键展开的折叠输出，失败时的退出码标签和错误配色，运行中会话显示 `Backgrounded: session N`，最后一行是带日志路径的截断标记。`write_stdin` 和 `kill_session` 以 bash 注释的形式显示所做的动作（`# poll session N`、`# stdin → session N: "…"`、`# kill session N (SIGTERM)`）。`monitor`、`set_on_exit` 和 `list_sessions` 使用 omp 的默认卡片。如果 omp 的 bash 渲染器缺失或接口变了，插件会直接加载失败，而不是显示原始的结果包装。
 
-**在 Pi 上，**五个工具都有各自的渲染器：命令标题、默认显示五个可视行的输出尾部（用 `app.tools.expand` 展开）、实时计时、`⟳ poll` / `» input` 标题，以及 kill/list 摘要。有进程存活时，底栏显示 `unified-exec: N sessions running`。
+**在 Pi 上，**原有五个工具都有各自的渲染器；`monitor` 使用默认卡片。原有渲染器提供命令标题、默认显示五个可视行的输出尾部（用 `app.tools.expand` 展开）、实时计时、`⟳ poll` / `» input` 标题，以及 kill/list 摘要。有进程存活时，底栏显示 `unified-exec: N sessions running`。
 
 两种宿主下，模型可见的内容和持久化的 details 相同。
 
@@ -301,7 +328,7 @@ DEFAULT_MAX_LINES            = 2000
 - **Esc** 中断当前等待，但会话继续运行。
 - **关闭**时向每个会话发送 SIGTERM，1 秒后对仍存活的发送 SIGKILL。
 - **LRU 淘汰**在达到 64 个会话时进行，淘汰最旧的非保护会话，优先选已退出的；最近使用的 8 个永不淘汰。
-- **tty 观察**按会话串行执行；流式更新、`read term://` 与 Tern HUD 不消费屏幕。冻结终端资源的生命周期不受会话存储成员关系限制。
+- **tty 观察**按会话串行执行；流式更新、`read term://`、monitor 与 Tern HUD 不消费普通观察。冻结终端资源的生命周期不受会话存储成员关系限制。
 - **日志**放在临时目录（`/tmp` 或 `%TEMP%`），本包从不删除。请用不会执行控制序列的查看器查看原始 PTY 日志，不要用 `cat`。
 
 ## 示例

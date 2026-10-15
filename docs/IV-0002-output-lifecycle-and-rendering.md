@@ -96,6 +96,9 @@ The initiative establishes a durable output contract across these layers:
   rather than waiting for continuous output to become idle. Streaming snapshots
   and HUD screens may lag unparsed output and never consume; the HUD reads only
   sessions still in the store.
+- Conditional monitors use their own rendered-row cursor on this same parser
+  chain, never the consuming observer. Their sanitized, bounded notifications
+  follow the [monitor contract](IV-0001-long-wait-and-wake-control.md#monitor-contract).
 - On omp, `read term://<session-id>-<unique-suffix>` reads normal-screen retained
   physical rows, `/screen` reads the active screen, and `/page/N` reads `rows`
   physical rows per page (negative pages count from the end). Existing `read`
@@ -125,11 +128,11 @@ The initiative establishes a durable output contract across these layers:
   rather than inferring liveness from the presence of `session_id`.
 - Preserve failed-kill ownership: an unconfirmed kill remains registered and is
   reported as running.
-- On Pi, give all five tools explicit call and result renderers and use
-  `keyHint("app.tools.expand", ...)`, not a hard-coded Ctrl+O label. On omp,
-  never register Pi-signature renderers: exec/write/kill provide omp render and
-  describe hooks delegating to omp's bash renderer; set_on_exit and
-  list_sessions use omp's bounded default card.
+- On Pi, the five original tools keep explicit call/result renderers and use
+  `keyHint("app.tools.expand", ...)`, not a hard-coded Ctrl+O label; monitor
+  uses the default card. On omp, never register Pi-signature renderers:
+  exec/write/kill delegate render and describe hooks to omp's bash renderer;
+  monitor, set_on_exit and list_sessions use omp's bounded default card.
 - On omp, mount the terminal HUD only while omp renders natively and the store
   holds a tty session, so the ANSI TUI gains no row. In Tern the pill takes a
   line of its own above omp's pill line. The stylesheet moves and resets the
@@ -207,6 +210,7 @@ The initiative establishes a durable output contract across these layers:
 | tty terminal emulator, serialized observations/projections/disposal, snapshots, styled screens, parse notifications | `src/terminal-screen.ts`, owned by `ExecSession` (`src/session.ts`); session-owned freeze after output closure, release from `src/session-store.ts` |
 | Process-global terminal keys, live/frozen projections, physical paging and omp internal URL handler | `fork-features/terminal-resource.ts`, `fork-features/terminal-url.ts`; initialized by `withHostPresentation` before activation |
 | Terminal cell SVG, host PNG rasterization and file-backed image location | `fork-features/terminal-image.ts`, `fork-features/terminal-url.ts` |
+| Non-consuming monitor rows, bounded notifications and End/wake routing | `TerminalScreen.subscribeLines`, `ExecSession.subscribeMonitor`, `fork-features/monitor-subscription.ts`, `src/completion.ts`; lifecycle in IV-0001 |
 | Session membership notifications | `SessionStore.subscribe` in `src/session-store.ts` |
 | Shared output envelope, truncation, incremental/final terminal metadata and process/kill text | `src/tool-result.ts`; `FinalScreenOutput` in `src/collect.ts`, produced from the frozen projection by `ExecSession.collect` |
 | Codemode script schemas and projections | `src/script-result.ts`, `tests/script-result.test.ts` |
@@ -544,8 +548,9 @@ existing backlogs; they do not weaken this output contract.
 - No input from the Tern HUD to sessions beyond the terminal page's typed keys
   and Kill; neither is model-visible except through the session's own output
   and exit.
-- No new model tool or output-size parameter.
-- No change to process signaling, wake suppression, or kill escalation.
+- No output-size parameter or screenshot option on exec/write/kill.
+- Process signaling and kill escalation remain unchanged; monitor interaction
+  with optional completion wakes follows IV-0001.
 - No archive cap or deletion policy in 0.9.0.
 
 ## Retirement conditions

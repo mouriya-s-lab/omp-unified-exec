@@ -1,11 +1,11 @@
 # IV-0001 — Long-wait UX, wake control, and agent guidance
 
-**Status:** 0.11.0 source, uncapped relative empty polls; earlier releases documented below
+**Status:** active; uncapped relative empty polls and output monitors
 **Root IV:** this document  
 **Related release:** [Changelog.md](../Changelog.md) — 2026-07-22 — 0.7.1 / 0.7.2  
 **Workspace doctrine:** [docs/DC-0001-agentic-workspace.md](./DC-0001-agentic-workspace.md)
 
-## Current contract: 0.11.0
+## Current wait contract
 
 Empty relative polls have no built-in maximum. They retain the five-second
 minimum/default; exec and input-bearing calls retain the 30-second ceiling.
@@ -44,6 +44,71 @@ Archive quotas, output-delivery acknowledgement, per-job concurrency changes,
 and registry eviction redesign are not part of this wait-path release. They
 remain separate work; this release does not claim to implement the entire
 from-scratch process-manager proposal.
+
+## Monitor contract
+
+`monitor` subscribes to an existing running session. Its optional `condition`
+is a JavaScript regex source; omitting it waits only for output closure.
+`max_returns` defaults to 10 and must be a positive safe integer. One session
+has at most one subscription: a successful new establishment replaces the
+old one; `action: "cancel"` silently removes it. Unknown/ended sessions,
+invalid regexes and invalid limits return typed errors without replacing an
+existing subscription.
+
+The process/terminal source establishes the future-only boundary before the
+coordinator publishes the actual subscription. Pipe sessions stream-decode
+only subsequent bytes into sanitized complete lines, plus the last partial
+line at closure. TTY sessions compare parsed rendered text/row identities:
+wrapped physical rows form logical lines, including nonempty incomplete
+prompts. Cursor-only movement over existing blank rows and style-only changes
+do not trigger. New blank row identities and nonempty-to-empty erases can
+match an empty-line condition; untouched padding is not output. These are
+rendered-state deltas, not byte/LF replay.
+
+TTY evaluation waits 50 ms for quiet, with a 250 ms maximum delay during
+continuous output. A source-owned history frontier and reusable per-current-row
+markers distinguish moved/trimmed rows from new rows without consuming the
+ordinary observation cursor. Erase/redraw compares the same viewport position
+only after its old marker is disposed. RIS invalidates this monitor cursor at
+the emulator's native reset boundary. There is no second terminal parser,
+global output copy or coordinator cursor mirror.
+
+Matched lines are sanitized and bounded to 1024 characters before regex
+evaluation; each message shows at most 16 lines and counts omitted matches.
+Matches arriving within about 250 ms coalesce. Successful messages alone
+advance `returns`; the last allowed match message announces the limit and
+ends the subscription, not the process. More than 20 matching lines in the
+preceding 60 seconds adds an advisory to narrow the condition, without stopping.
+
+Each return is a `unified-exec-monitor` message using the existing completion
+display path with `display: true`, `triggerTurn: true`, `deliverAs: "followUp"`.
+It names the session, condition, successful count/limit, bounded matching
+lines, and `terminal_url` or `log_path`, and labels command output as
+untrusted rather than user instructions. The monitor tool itself uses omp's
+default card; no new UI styling is introduced.
+
+Output closure (and final parser completion for tty) produces one End with
+the pending matches, natural/human/LRU reason and exit code/signal. End does
+not count against the match limit. Model `kill_session` cancels before
+signaling, even on failed kill; explicit cancel, replacement, reset and
+shutdown are also silent. Human HUD/slash termination and LRU termination
+retain the monitor until actual closure. Direct write/listing observations
+do not cancel it. A source acceptance before model kill is cancelled; a new
+parallel acceptance after the kill request may still observe a running source.
+
+The completion coordinator owns both distinct objects: optional wake intent
+and actual monitor subscription. An active/closing monitor blocks ordinary
+wake reservation. Successful End consumes that session's wake before removing
+the monitor; failed sends remain owned and retry only on subsequent safe host
+flush boundaries. Idle failed delivery may wait for such a boundary. Limit or
+explicit cancellation removes the monitor without consuming a future ordinary
+wake. All replacement/reset callbacks check exact subscription and map
+identity. No already-enqueued follow-up can be recalled.
+
+`list_sessions` exposes each active monitor's condition, returns and limit.
+Neither monitor nor `read` drains session buffers or removes sessions. This
+change does not remove empty polling, add Brush/HostJob integration, or change
+`on_exit` defaults and its human-explicit guidance.
 
 ## Historical intent: 0.7.x
 
@@ -85,6 +150,10 @@ attached waits should work (with safe `setTimeout` chunking).
 | Remove default 10 h horizon entirely (option A) | No silent clamp; no env cap; any valid RFC 3339 UTC future is accepted. |
 | Chunk timers at `MAX_TIMER_ARM_MS` (`2^31-1`) | Prevents `setTimeout` overflow on multi-day waits. |
 | Mid-flight flush re-checks suppression | Disarm racing a reserved wake must not still send. |
+| Source-first monitor acceptance | The source checks liveness after its parser baseline and publishes only the real installed tap; reset/abort cannot leave speculative coordinator entries. |
+| Rendered row identities for tty monitors | Reusable current-row markers plus a history frontier prevent pre-subscription replay across trim, erase and scrolling; regex sees joined rendered logical text, not raw child bytes. |
+| One coordinator routes End and ordinary wake | Successful monitor End consumes the same session's wake before releasing ownership; separate claim flags or temporary disarm/rearm would create a second authority. |
+| Serialized bounded match delivery | A successful host enqueue, not model-turn completion, counts toward the limit; failed batches remain pending, and End includes unreturned final matches. |
 
 ## Implementation map
 
@@ -97,6 +166,8 @@ attached waits should work (with safe `setTimeout` chunking).
 | Policy change | `src/completion.ts` → `setOnExit(id, policy, session?)` | By-id disarm (tombstones); status tokens; flushPending deliver filter. |
 | Wake audit | `list_sessions` / widget / slash picker | `wake_armed` / `[wake]`. |
 | Tool surface | `src/index.ts` | `set_on_exit` tool + renderer; rewritten `promptGuidelines`. |
+| Monitor source and bounded delivery | `fork-features/monitor-subscription.ts`, `ExecSession.subscribeMonitor`, `TerminalScreen.subscribeLines` | Source-owned future boundary; non-consuming rows/bytes; batching/count/rate window. |
+| Monitor lifecycle and tools | `CompletionCoordinator.startMonitor` / `cancelMonitor`, `src/index.ts`, `src/script-result.ts` | One actual subscription map, End/wake routing, typed errors and list state. |
 | Docs | `README.md`, `Changelog.md`, this IV, `DC-0001` | Rules + API tables + workspace doctrine. |
 | Tests | `tests/time.test.ts`, `long-wait.test.ts`, `completion.test.ts`, `wake-e2e.test.ts`, `e2e.test.ts` | Unit + pipeline; wake-e2e `afterEach` shutdown. |
 
@@ -114,6 +185,12 @@ list_sessions            → includes wake_armed for audit
 ```
 
 Disarm cannot recall a follow-up already queued via `pi.sendMessage`.
+
+Use `monitor(session_id, condition)` to await subsequent matching output, or
+omit the condition to await closure. Cancel with `monitor(session_id,
+action: "cancel")` when the observation is no longer wanted. Do not arm an
+extra ordinary wake merely to implement monitor; an already-armed wake is
+merged automatically at End.
 
 ## Evidence
 

@@ -10,9 +10,9 @@ and long jobs keep running between turns, and a human can watch and type into
 them from Tern.
 
 This is a fork of [iamwrm/pi-unified-exec](https://github.com/iamwrm/pi-unified-exec),
-a Pi port of codex's `unified_exec`. The tool surface (`exec_command`,
-`write_stdin`, `set_on_exit`, `kill_session`, `list_sessions`) and its
-semantics are upstream's; the fork adds what omp and Tern need. The full list
+a Pi port of codex's `unified_exec`. The original tools (`exec_command`,
+`write_stdin`, `set_on_exit`, `kill_session`, `list_sessions`) retain their
+session model; the fork adds terminal reads/images and `monitor` for omp. The full list
 of fork changes, why each exists and how to requalify them on omp/Tern
 upgrades is in [fork-features/README.md](fork-features/README.md).
 
@@ -61,6 +61,9 @@ capability.
   complete raw stream of every session is written to `log_path`.
 - **Opt-in completion wake.** `on_exit: "wake"` resumes the agent once when a
   backgrounded process exits unobserved; `set_on_exit` disarms it.
+- **Await matching output.** `monitor` watches an existing session without
+  consuming output, wakes for matching batches or completion, and defaults to
+  at most ten successful match returns.
 - **omp-native presentation.** `exec_command`, `write_stdin` and
   `kill_session` render through omp's own bash card (command line, output,
   exit chip, error tone), in the ANSI TUI and in Tern alike.
@@ -350,6 +353,36 @@ follow-up already queued to the host.
   it. A naturally exited wake session evicted before notification keeps a
   bounded tombstone so its wake is still delivered.
 
+### `monitor`
+
+Subscribes to future output from an existing running session without stopping
+the process or consuming ordinary observations.
+
+| Param | Type | Default | Notes |
+|---|---|---|---|
+| `session_id` | number | — | Existing running session. |
+| `action` | `"start"` \| `"cancel"` | `"start"` | Start/replaces the session's one subscription, or silently cancel it. |
+| `condition` | string | omitted | JavaScript regex source (no `/` delimiters); omit to return only at output closure. |
+| `max_returns` | number | `10` | Positive safe integer, counting successful match messages, not lines or End. |
+
+Pipe conditions see sanitized complete future lines and the final partial
+line. TTY conditions see changed/new rendered logical lines, including prompts
+without a newline; wrapped physical rows are joined. Pure cursor/style changes
+do not trigger, and old output is never replayed.
+
+Matches coalesce for about 250 ms. Each `unified-exec-monitor` follow-up wakes
+the model, with at most 16 matching lines of at most 1024 characters, an omitted
+count, successful returns/limit, and `terminal_url` or `log_path`. More than
+20 matches in the last 60 seconds adds a narrow-the-condition advisory, without
+stopping. The final allowed match announces the limit and ends only the monitor.
+
+Actual output closure sends End with pending matches and exit code/signal;
+human HUD/slash and LRU terminations identify their reason. End merges an
+already-armed ordinary completion wake. Model `kill_session`, explicit cancel,
+replacement, reset and shutdown end monitoring silently, including a failed
+model kill. Already-enqueued follow-ups cannot be recalled. Unknown/ended
+sessions, invalid regexes and invalid limits return typed errors.
+
 ### `kill_session`
 
 | Param | Type | Default | Notes |
@@ -367,8 +400,8 @@ path.
 
 Lists live sessions and reports each exited one a final time (with
 `running: false`, `exit_code`/`signal` and `log_path`) before pruning it. Each
-entry has `wake_armed`; the response carries `tool_time_utc` for computing
-`yield_until` deadlines.
+entry has `wake_armed` and an active monitor's condition/returns/limit; the
+response carries `tool_time_utc` for computing `yield_until` deadlines.
 
 ## Command and flag
 
@@ -387,11 +420,12 @@ output with omp's expand binding, the exit chip and error tone for failures,
 `Backgrounded: session N` for running sessions, and the truncation marker with
 the log path as the last line. `write_stdin` and `kill_session` show their
 action as a bash comment (`# poll session N`, `# stdin → session N: "…"`,
-`# kill session N (SIGTERM)`). `set_on_exit` and `list_sessions` use omp's
-default card. If omp's bash renderer is missing or reshaped, plugin loading
+`# kill session N (SIGTERM)`). `monitor`, `set_on_exit` and `list_sessions`
+use omp's default card. If omp's bash renderer is missing or reshaped, plugin loading
 fails rather than showing raw envelopes.
 
-**On Pi,** all five tools have their own renderers: command banners,
+**On Pi,** the five original tools have their own renderers; `monitor` uses the
+default card. The original renderers provide command banners,
 five-visual-line output tails expanded with `app.tools.expand`, live elapsed
 counters, `⟳ poll` / `» input` banners and kill/list summaries. While a process
 is alive the footer shows `unified-exec: N sessions running`.
@@ -447,9 +481,9 @@ DEFAULT_MAX_LINES            = 2000
 - **Shutdown** sends SIGTERM to every session and SIGKILLs survivors after 1s.
 - **LRU eviction** at 64 sessions takes the oldest non-protected one, preferring
   exited sessions; the 8 most recent are never evicted.
-- **tty observations** are serialized per session; streaming updates, `read term://`
-  and the Tern HUD read the screen without consuming it. Frozen terminal resources
-  outlive session-store membership.
+- **tty observations** are serialized per session; streaming updates, `read term://`,
+  monitor and the Tern HUD never consume ordinary observations. Frozen terminal
+  resources outlive session-store membership.
 - **Logs** live in the temp directory (`/tmp` or `%TEMP%`) and are never
   deleted by the package. Inspect raw PTY logs with a non-executing viewer, not
   `cat`.

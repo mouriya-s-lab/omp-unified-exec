@@ -32,6 +32,8 @@
 import xtermHeadless from "@xterm/headless";
 import type { IBufferCell, IMarker } from "@xterm/headless";
 
+import type { MonitorStart } from "../fork-features/monitor-subscription.ts";
+
 const { Terminal } = xtermHeadless;
 type Terminal = InstanceType<typeof Terminal>;
 
@@ -101,6 +103,12 @@ export interface StyledScreen {
 	readonly view: TerminalView;
 	/** History rows, then screen rows, joined by `\n`; trailing blank rows dropped. Only SGR (`ESC [ … m`) sequences appear. */
 	readonly text: string;
+}
+
+export interface TerminalLineSubscription {
+	cancel(): void;
+	/** Final parsed rows, before emulator disposal; false if already cancelled. */
+	finish(): Promise<boolean>;
 }
 
 /** Immutable copy of one physical row; xterm reuses its line objects. */
@@ -402,6 +410,178 @@ export class TerminalScreen {
 		}
 		while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
 		return { view: this.view(), text: lines.join("\n") };
+	}
+
+	/** Atomic future-only baseline and an independent positional row cursor. */
+	subscribeLines(
+		isRunning: () => boolean,
+		onLines: (lines: readonly string[]) => void,
+		accept: (handle: TerminalLineSubscription) => boolean,
+		signal?: AbortSignal,
+	): Promise<MonitorStart> {
+		const run = this.observeChain.then(async (): Promise<MonitorStart> => {
+			await new Promise<void>((resolve) => this.term.write("", resolve));
+			if (signal?.aborted || this.disposed) return "cancelled";
+			if (!isRunning()) return "not_running";
+			let active = true;
+			interface MarkedRow { readonly row: Row; readonly marker: IMarker }
+			interface NormalCursor { readonly rows: readonly MarkedRow[]; readonly frontier: IMarker | undefined }
+			const logicalStart = (): number => {
+				const buffer = this.term.buffer.normal;
+				let start = buffer.baseY;
+				while (start > 0 && buffer.getLine(start)?.isWrapped) start--;
+				return start;
+			};
+			const markerAt = (line: number): IMarker => {
+				const buffer = this.term.buffer.normal;
+				const marker = this.term.registerMarker(line - buffer.baseY - buffer.cursorY);
+				if (!marker) throw new Error("normal terminal monitor marker unavailable");
+				return marker;
+			};
+			const capture = (start: number, rows: readonly Row[], prior: ReadonlyMap<number, MarkedRow>, old?: NormalCursor): NormalCursor => {
+				const frontierLine = start - 1;
+				const frontier = old?.frontier && !old.frontier.isDisposed && old.frontier.line === frontierLine
+					? old.frontier : frontierLine >= 0 ? markerAt(frontierLine) : undefined;
+				if (old?.frontier !== frontier) old?.frontier?.dispose();
+				const marked = rows.map((row, index): MarkedRow => {
+					const previous = prior.get(start + index);
+					return { row, marker: previous?.marker ?? markerAt(start + index) };
+				});
+				for (const [line, previous] of prior) {
+					if (line < start || line >= start + rows.length) previous.marker.dispose();
+				}
+				return { rows: marked, frontier };
+			};
+			const baseline = (): NormalCursor => {
+				const start = logicalStart();
+				return capture(start, this.readRows("normal", start, this.term.buffer.normal.baseY + this.rows), new Map());
+			};
+			let normal = this.term.buffer.active.type === "normal" ? baseline() : undefined;
+			let previousAlt = this.readRows("alternate", 0, this.rows);
+			let previousEpoch = this.altEpoch;
+			const disposeNormal = () => {
+				normal?.frontier?.dispose();
+				for (const row of normal?.rows ?? []) row.marker.dispose();
+			};
+			// RIS replaces xterm's underlying normal buffer, while its public
+			// BufferApiView object stays identical. Invalidate this cursor at
+			// that authoritative parser boundary, not by guessing from row text.
+			const reset = this.term.parser.registerEscHandler({ final: "c" }, () => {
+				disposeNormal();
+				normal = undefined;
+				previousAlt = [];
+				return false;
+			});
+			// Normal markers cannot be created while alternate is active.
+			const bufferSwitch = this.term.buffer.onBufferChange((buffer) => {
+				if (buffer.type === "normal" && normal === undefined) normal = baseline();
+			});
+			const changedLines = (rows: readonly Row[], changed: readonly boolean[]): string[] => {
+				const lines: string[] = [];
+				for (let start = 0; start < rows.length;) {
+					let end = start + 1;
+					while (end < rows.length && rows[end]!.wrapped) end++;
+					let dirty = false;
+					for (let index = start; index < end; index++) dirty ||= changed[index]!;
+					if (dirty) {
+						const parts: string[] = [];
+						for (let index = start; index < end; index++) parts.push(rows[index]!.text);
+						lines.push(parts.join("").trimEnd());
+					}
+					start = end;
+				}
+				return lines;
+			};
+			let quiet: NodeJS.Timeout | undefined;
+			let maximum: NodeJS.Timeout | undefined;
+			const clearTimers = () => {
+				clearTimeout(quiet);
+				clearTimeout(maximum);
+				quiet = maximum = undefined;
+			};
+			const drain = (): Promise<void> => {
+				const reading = this.observeChain.then(async () => {
+					if (!active) return;
+					await new Promise<void>((resolve) => this.term.write("", resolve));
+					if (!active) return;
+					const buffer = this.term.buffer.active;
+					let changed: string[];
+					if (buffer.type === "alternate") {
+						const rows = this.readRows("alternate", 0, this.rows);
+						changed = changedLines(rows, rows.map((row, index) =>
+							row.text.trimEnd() !== (previousAlt[index]?.text.trimEnd() ?? "") || row.wrapped !== (previousAlt[index]?.wrapped ?? false) ||
+							(previousEpoch !== this.altEpoch && row.text.trimEnd() !== "")));
+						previousAlt = rows;
+						previousEpoch = this.altEpoch;
+					} else {
+						const prior = new Map<number, MarkedRow>();
+						for (const row of normal?.rows ?? []) if (!row.marker.isDisposed) prior.set(row.marker.line, row);
+						const frontier = normal?.frontier;
+						const start = frontier && !frontier.isDisposed ? frontier.line + 1 : 0;
+						const rows = this.readRows("normal", start, buffer.baseY + this.rows);
+						const oldScreenStart = (normal?.rows.length ?? 0) - this.rows;
+						const differences = rows.map((row, index) => {
+							const line = start + index;
+							// Live markers preserve physical identity across scroll/trim.
+							// Erase/redraw disposes markers: compare the same viewport
+							// position while a surviving history frontier fixes its origin.
+							const positional = normal?.rows[oldScreenStart + line - buffer.baseY];
+							const previous = prior.get(line)?.row ??
+								(line >= buffer.baseY && positional?.marker.isDisposed && ((frontier && !frontier.isDisposed) || buffer.baseY === 0)
+									? positional.row : undefined);
+							if (previous) return row.text !== previous.text || row.wrapped !== previous.wrapped;
+							// Unwritten padding below the cursor is not a new output line.
+							return row.text.trimEnd() !== "" || line <= buffer.baseY + buffer.cursorY;
+						});
+						changed = changedLines(rows, differences);
+						const nextStart = logicalStart();
+						normal = capture(nextStart, rows.slice(nextStart - start), prior, normal);
+					}
+					if (changed.length) onLines(changed);
+				});
+				this.observeChain = reading.catch(() => undefined);
+				return reading;
+			};
+			const evaluate = () => {
+				clearTimers();
+				void drain();
+			};
+			const unsubscribe = this.onChange(() => {
+				clearTimeout(quiet);
+				quiet = setTimeout(evaluate, 50);
+				maximum ??= setTimeout(evaluate, 250);
+			});
+			const handle: TerminalLineSubscription = {
+				cancel() {
+					active = false;
+					clearTimers();
+					unsubscribe();
+					bufferSwitch.dispose();
+					reset.dispose();
+					disposeNormal();
+				},
+				async finish() {
+					clearTimers();
+					unsubscribe();
+					await drain();
+					bufferSwitch.dispose();
+					if (!active) return false;
+					active = false;
+					reset.dispose();
+					disposeNormal();
+					return true;
+				},
+			};
+			try {
+				if (!accept(handle)) { handle.cancel(); return "cancelled"; }
+			} catch (error) {
+				handle.cancel();
+				throw error;
+			}
+			return "accepted";
+		});
+		this.observeChain = run.catch(() => undefined);
+		return run;
 	}
 
 	/** Consuming observation; serialized so concurrent callers never share or skip a boundary. */

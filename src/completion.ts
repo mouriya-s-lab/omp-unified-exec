@@ -1,3 +1,4 @@
+import { MonitorError, MonitorSubscription, parseMonitorCondition, type MonitorEndReason, type MonitorMessage, type MonitorSession, type MonitorStatus } from "../fork-features/monitor-subscription.ts";
 import { formatElapsedShort } from "./format-time.ts";
 
 /**
@@ -82,6 +83,8 @@ export interface WakeMessage {
 export interface CompletionCoordinatorOptions {
 	/** Deliver one synthetic model prompt (pi.sendMessage wrapper). May throw. */
 	send: (message: WakeMessage) => void | Promise<void>;
+	/** Independent repeated monitor returns, through the same host follow-up path. */
+	sendMonitor?: (message: MonitorMessage) => void | Promise<void>;
 	/** Debounce so naturally simultaneous completions batch into one prompt. */
 	debounceMs?: number;
 	/** Optional error sink for failed sends (ui.notify wrapper). */
@@ -110,6 +113,7 @@ function oneLine(raw: string, max: number): string {
 
 export class CompletionCoordinator {
 	private readonly records = new Map<number, CompletionRecord>();
+	private monitors = new Map<number, MonitorSubscription>();
 	private readonly opts: Required<Pick<CompletionCoordinatorOptions, "send" | "debounceMs">> &
 		CompletionCoordinatorOptions;
 	private debounceHandle: unknown;
@@ -135,6 +139,65 @@ export class CompletionCoordinator {
 	/** Number of live records (test helper). */
 	get recordCount(): number {
 		return this.records.size;
+	}
+
+	async startMonitor(session: MonitorSession, source: string | undefined, maximum = 10, signal?: AbortSignal): Promise<MonitorStatus> {
+		const condition = parseMonitorCondition(source);
+		if (!Number.isSafeInteger(maximum) || maximum < 1) throw new MonitorError("invalid_max_returns", "max_returns must be a positive safe integer");
+		const send = this.opts.sendMonitor;
+		if (!send) throw new Error("monitor delivery is not configured");
+		const scope = this.monitors;
+		const current = (subscription: MonitorSubscription): boolean => !this.stopped && this.monitors === scope && scope.get(session.id) === subscription;
+		const subscription = new MonitorSubscription(session, condition, maximum, send,
+			(sub, completed) => {
+				if (!current(sub)) return;
+				// Consume the ordinary wake before removing monitor ownership.
+				if (completed) {
+					const record = this.records.get(session.id);
+					if (record) this.resolveRecord(record);
+				}
+				scope.delete(session.id);
+				sub.cancel();
+				this.scheduleFlush();
+			},
+			(error) => this.opts.onSendError?.(error), current);
+		const result = await session.subscribeMonitor(subscription, (handle) => {
+			if (this.stopped || this.monitors !== scope || signal?.aborted) return false;
+			subscription.attach(handle);
+			const old = scope.get(session.id);
+			scope.set(session.id, subscription);
+			old?.cancel();
+			return true;
+		}, signal);
+		if (result !== "accepted") {
+			subscription.cancel();
+			throw new MonitorError(result === "not_running" ? "session_not_running" : "monitor_cancelled",
+				result === "not_running" ? "session is no longer running" : "monitor establishment was cancelled");
+		}
+		if (signal?.aborted) {
+			if (current(subscription)) {
+				scope.delete(session.id);
+				this.scheduleFlush();
+			}
+			subscription.cancel();
+			throw new MonitorError("monitor_cancelled", "monitor establishment was cancelled");
+		}
+		return subscription.status();
+	}
+
+	monitorStatus(sessionId: number): MonitorStatus | undefined { return this.monitors.get(sessionId)?.status(); }
+
+	cancelMonitor(sessionId: number): boolean {
+		const subscription = this.monitors.get(sessionId);
+		if (!subscription) return false;
+		this.monitors.delete(sessionId);
+		subscription.cancel();
+		this.scheduleFlush();
+		return true;
+	}
+
+	monitorEndReason(sessionId: number, reason: MonitorEndReason): void {
+		this.monitors.get(sessionId)?.setEndReason(reason);
 	}
 
 	/**
@@ -351,6 +414,10 @@ export class CompletionCoordinator {
 	/** Session shutdown / reset / teardown: cancel timers, drop all records. */
 	shutdown(): void {
 		this.stopped = true;
+		const monitors = this.monitors;
+		this.monitors = new Map();
+		for (const subscription of monitors.values()) subscription.cancel();
+		monitors.clear();
 		if (this.debounceHandle !== undefined) {
 			this.clearTimer(this.debounceHandle);
 			this.debounceHandle = undefined;
@@ -368,6 +435,7 @@ export class CompletionCoordinator {
 	}
 
 	private resolveRecord(record: CompletionRecord): void {
+		if (this.records.get(record.sessionId) !== record) return;
 		record.unsubscribeExit();
 		this.records.delete(record.sessionId);
 	}
@@ -390,6 +458,7 @@ export class CompletionCoordinator {
 	 */
 	flushPending(): void {
 		if (this.stopped) return;
+		for (const subscription of this.monitors.values()) subscription.retry();
 		const eligible: CompletionRecord[] = [];
 		for (const r of this.records.values()) {
 			if (
@@ -398,6 +467,7 @@ export class CompletionCoordinator {
 				!r.observed &&
 				!r.suppressed &&
 				!r.wakeQueued &&
+				!this.monitors.has(r.sessionId) &&
 				r.observers.size === 0 &&
 				r.snapshot
 			) {
