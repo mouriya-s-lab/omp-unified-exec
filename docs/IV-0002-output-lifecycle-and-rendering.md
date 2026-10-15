@@ -86,9 +86,10 @@ The initiative establishes a durable output contract across these layers:
   text is stripped directly; tty bytes are first interpreted by the session's
   terminal emulator and only its rendered plain text (sanitized again) leaves
   it. Keep exact raw bytes only in the session log and sanitize again while
-  rendering legacy/fallback details. The one styled projection, the Tern HUD
-  screen, is re-encoded from the emulator's cell attributes as SGR only; no
-  child byte reaches it.
+  rendering legacy/fallback details. The two styled projections, the Tern HUD
+  screen and explicit terminal screenshots, are generated only from emulator
+  cell attributes (SGR for the HUD, SVG rasterized to PNG for screenshots);
+  no child byte reaches either.
 - Consuming tty observations, non-consuming projections and emulator disposal
   are serialized per session. A cancelled empty poll does not observe.
   Reads use an ordered parser barrier covering bytes accepted before the read,
@@ -107,6 +108,12 @@ The initiative establishes a durable output contract across these layers:
   short-command release await that freeze before disposing the emulator.
   Frozen projections remain addressable until process exit, even across plugin
   activations; shutdown may discard only its own unfinished live resources.
+- `read term://<key>/screen.png` returns the complete active cell grid through
+  omp's file-backed image pipeline. It preserves palette/256/RGB colours,
+  bold, dim, italic, underline, inverse and strikethrough; invisible cells draw
+  only their background, wide glyphs span two cells. Live reads use the same
+  projection's current appearance and draw an outline cursor; frozen reads
+  use frozen appearance and never draw a cursor. No raw-output replay occurs.
 - Every completed tty result uses the frozen active screen, including short
   commands, attached exits, input-bearing writes and confirmed kills. An
   unchanged final screen is still returned. `terminal_url` remains root-level;
@@ -175,7 +182,7 @@ The initiative establishes a durable output contract across these layers:
 | Completed tty result = frozen active screen | Exit is a final state, not an incremental observation. The final body and `/screen` use the same frozen projection, so unchanged screens and last-moment output remain visible. Retained history stays behind `terminal_url`; `retained_rows` describes retained physical rows, not total produced output. |
 | Align history with an xterm marker on the observed screen's top row | Each observation registers a marker at the screen's top row; the next observation's history starts there, so positional comparison with the previous screen is exact. The marker follows the row as it scrolls and is disposed when the row is trimmed from the history, so the emulator keeps its history for the HUD. Rejected: erasing the emulator's scrollback (ED3) after each observation, which left the HUD screen nothing to scroll back through; counting scroll events into absolute line numbers, which leaving the alternate screen, DECSTBM regions, ED3 and RIS all break. |
 | Bound tty history by cells, not lines | History rows = 240000 cells / `cols`, at least one screen. Running observations warn when the marked row was evicted while history sits at that cap; a child's ED3 or RIS can also remove the marker by erasing those rows. Final metadata uses the frozen projection's retained-history capacity warning, independent of the consuming marker. Neither count claims total produced output. |
-| One process-global terminal index and `term` handler | Child activations and reloads may reuse numeric session ids. A UUID suffix and a `Symbol.for` process registry keep keys distinct and old resources readable; one scheme handler resolves the shared index at request time and is never unregistered. |
+| One process-global terminal index and `term` handler | Child activations and reloads may reuse numeric session ids. A UUID suffix and a `Symbol.for` process registry keep keys distinct and old resources readable. The router is the registration authority: reload updates the same branded handler object's complete methods in place, without registering or unregistering again. |
 | Freeze at output closure plus ordered parser completion | A process-exit event may precede trailing output. The session owns the freeze promise; the registry stores only the derived live/frozen projection, not a second process state. Final results read that projection; the emulator is released when the session leaves ownership. Rejected: log replay and retaining live emulators as final resources. |
 | Retain frozen resources for the omp process lifetime | Frozen data keeps normal physical rows and only the active styled grid, never xterm cell references or the live session graph. Memory accumulates with completed tty sessions, as logs do. LRU still sends only its existing SIGTERM: a child that ignores it retains its live emulator until actual output closure; no new escalation mechanism is introduced. |
 | HUD logic inside the omp extension; a CSS-only Tern plugin places the pill and sets the preview's output in the mono face | The sessions and their emulators live in this process; a dock widget reads them directly. A Luau plugin block would need the screen pushed to it across processes (a second copy of state) and shows as a pane, not a floating panel (owner's choice, [#17](https://github.com/mouriya-s-lab/omp-unified-exec/issues/17)). The fork's Tern plugin (`fork-features/tern-plugin/`) only injects CSS (owner's choice): a stylesheet listed in its manifest `styles`, which Tern loads with the plugin; the window entry Tern requires of every plugin is empty. |
@@ -187,6 +194,8 @@ The initiative establishes a durable output contract across these layers:
 | Page screen = `ansi`; preview output = plain `code` in the mono face | `ansi` keeps the colors and follows the newest row. Its text is the session's retained history plus the current screen (the alternate screen has no history), so its scrollbar scrolls back through the terminal's history. In the side preview Tern draws `ansi` as a mini terminal that reflows rows at the column's width, which shredded a 120-column `top` into fragments, so the preview shows only the newest 12 non-blank rows as a plain-text `code` block (`lang: "text"`, `wrap: false`, as omp sends its QR code), whose rows keep their spacing and scroll sideways. Tern draws a preview's `code` lines and `mono` spans in the UI face; the plugin's stylesheet sets the block (role `unified-exec.terminals.tail`) in the mono face and the facts' size, so columns align. Rejected: one `mono` text row per screen row, which Tern drew in the UI face with collapsed spacing and wide line gaps; restyling a truncated text's font, whose truncation Tern measures in the original face. |
 | HUD colors from cell attributes | `TerminalScreen.styledScreen()` writes SGR for palette/256/RGB colors and bold, dim, italic, underline, blink, inverse, invisible, strikethrough and overline. Child OSC, cursor and mode sequences cannot pass, because nothing is copied from the byte stream. |
 | Answer OSC 10/11 with the host's appearance | xterm answers DSR and DA1 itself but not the default-colour queries, so a child that picks its palette from them (omp probes OSC 11 with a DA1 sentinel) got no answer and fell back to dark, drawing dark blocks on a light Tern page. The emulator answers `?` queries inside the parse, before a following DA1, with white on black for a dark host and black on white for a light one. On omp the appearance is read at each query from omp's theme (`isLightTheme(getCurrentThemeName())` from `@oh-my-pi/pi-tui/theme`, loaded with the other omp modules so a reshaped omp fails plugin loading); Pi has no such signal and answers dark, as omp's Console responder does. Colour sets (`OSC 11;rgb:…`) are ignored. |
+| Screenshot cells through the host rasterizer and read pipeline | Each active grid becomes an in-memory SVG with XML-safe, individually positioned glyphs on an 8×16 logical cell grid, then `@oh-my-pi/pi-natives.rasterizeSvg` produces PNG bytes. Uniform scaling keeps the entire grid within 16,777,216 pixels. A file-backed handler locates a fresh private PNG; non-image targets still resolve as text. No image dependency with install scripts, second parser, screenshot cache or new tool-result option is introduced. |
+| Retain successful screenshot files for OS cleanup | The host opens a located file after the plugin returns and supplies no read-complete acknowledgement. Each read therefore writes an exclusive 0600 PNG in a private temporary directory; failed writes clean their directory, successful files remain for OS cleanup like logs. Repeated screenshots consume disk space; a timer or overwrite-per-key would race readers. |
 | Mount only while native and a tty session exists | omp's `isNativeRendering`/`onNativeRenderingChange` (`@oh-my-pi/pi-tui/native/state`) gate the widget, so the ANSI TUI never gets the widget container's spacer row. Store membership and native changes re-evaluate the gate; a missing module fails omp plugin loading before anything registers, like the bash renderer. |
 | Watch screens only while the sheet or page is open | The pill re-describes on store membership only; the open sheet or page watches every listed session's exit (its dot or state) and only the shown session's parsed-output notifications, and each re-description reads the current screens, so a closed HUD costs nothing per chunk. |
 
@@ -197,6 +206,7 @@ The initiative establishes a durable output contract across these layers:
 | Terminal-control scanner | `src/output-safety.ts` |
 | tty terminal emulator, serialized observations/projections/disposal, snapshots, styled screens, parse notifications | `src/terminal-screen.ts`, owned by `ExecSession` (`src/session.ts`); session-owned freeze after output closure, release from `src/session-store.ts` |
 | Process-global terminal keys, live/frozen projections, physical paging and omp internal URL handler | `fork-features/terminal-resource.ts`, `fork-features/terminal-url.ts`; initialized by `withHostPresentation` before activation |
+| Terminal cell SVG, host PNG rasterization and file-backed image location | `fork-features/terminal-image.ts`, `fork-features/terminal-url.ts` |
 | Session membership notifications | `SessionStore.subscribe` in `src/session-store.ts` |
 | Shared output envelope, truncation, incremental/final terminal metadata and process/kill text | `src/tool-result.ts`; `FinalScreenOutput` in `src/collect.ts`, produced from the frozen projection by `ExecSession.collect` |
 | Codemode script schemas and projections | `src/script-result.ts`, `tests/script-result.test.ts` |
@@ -528,9 +538,9 @@ existing backlogs; they do not weaken this output contract.
 ## Non-goals
 
 - No async full-log viewer in a tool row.
-- No child ANSI styling in model/result text or in Pi/omp tool rows; the raw
-  log is the recovery surface. The Tern HUD shows colors re-encoded from the
-  emulator, never the child's bytes.
+- No child ANSI styling in result text or Pi/omp tool rows; the raw log is the
+  complete-stream recovery surface. The Tern HUD and explicit terminal images
+  show colours re-encoded from emulator cells, never the child's bytes.
 - No input from the Tern HUD to sessions beyond the terminal page's typed keys
   and Kill; neither is model-visible except through the session's own output
   and exit.

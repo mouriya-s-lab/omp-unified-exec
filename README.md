@@ -88,8 +88,8 @@ When omp renders natively in Tern and a tty session exists:
   Esc / Back returns to the sheet; Kill ends the session.
 
 The HUD reads the sessions in place and keeps no copy of them. It only exists
-while omp renders natively, so omp's ANSI TUI gains no row. Model-visible
-results stay plain text.
+while omp renders natively, so omp's ANSI TUI gains no row. Tool results stay
+plain text; explicit `read term://…/screen.png` requests return images.
 
 **The Tern plugin.** An omp extension cannot add to omp's pill line, so the
 package ships a CSS-only Tern plugin (`fork-features/tern-plugin/`). It moves
@@ -203,8 +203,8 @@ history_lines: 2                   (optional: lines scrolled off above the scree
   `/screen` for the complete screen and `/page/N` for earlier retained rows.
 - **Full-screen programs** (alternate screen, e.g. `top`, editors) are reported
   as `terminal: alternate screen …`; leaving it restores the normal screen.
-- **Plain text and cursor only.** Colours are not in model results; the raw
-  stream stays in `log_path`, and Tern's terminal page shows the colours.
+- **Plain text and cursor in tool results.** Colours stay out of exec/write/kill
+  text; Tern's terminal page and explicit `read term://…/screen.png` show them.
 - **Terminal queries are answered** on the child's input: cursor position and
   device attributes, and the default foreground/background colours (OSC 10/11).
   On omp the colours follow omp's theme (light or dark, which in Tern follows
@@ -223,6 +223,7 @@ readable independently of result consumption:
 |---|---|
 | `term://<key>` | All retained normal-screen physical rows, without trailing spaces or trailing empty rows. |
 | `term://<key>/screen` | The active screen, including an active alternate screen. |
+| `term://<key>/screen.png` | An image of the full active grid, with cell colours and attributes. |
 | `term://<key>/page/2` | The second page of retained rows; each page has the session's `rows` rows. |
 | `term://<key>/page/-1` | The last page; negative page numbers count from the end. |
 | `term://<key>:raw:1-2` / `term://<key>:raw:-3` | The existing `read` head/tail selectors, with no context rows in raw mode. |
@@ -237,6 +238,16 @@ The same URL remains readable after short-command completion, normal exit,
 confirmed kill or LRU removal, until the omp process ends. Frozen resources
 are not deleted; unfinished live projections need not survive plugin shutdown.
 Keys remain distinct across child agents and extension reloads.
+
+`read term://<key>/screen.png` uses omp's image pipeline; do not add `:img`.
+The grid uses 8×16 logical pixels per cell and a system monospace font, with
+wide glyphs spanning two cells. Live reads use the current host appearance and
+draw an outline cursor; frozen reads preserve the frozen appearance and omit
+the cursor. Large grids scale uniformly to the native rasterizer's pixel limit.
+Each image read creates a private PNG in the OS temporary directory; it is a
+point-in-time copy, not a cache, and relies on OS cleanup like session logs.
+Restart omp once when upgrading from the text-only terminal handler; subsequent
+extension reloads preserve the image handler and existing URLs.
 
 ### `write_stdin`
 

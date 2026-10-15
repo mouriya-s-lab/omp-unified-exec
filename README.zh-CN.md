@@ -44,7 +44,7 @@ Tern 更新会在这条命令成功返回前完成，无需单独执行 Tern 命
 - **Terminals 面板。** 点击计数按钮打开一个仿照 omp Agents 面板的面板：每个 tty 会话一行，带状态点、尺寸、PID 和运行时长；选中会话的命令、状态、目录、PID、尺寸、启动时间、可点击的日志路径和最新几行输出作为预览。↑/↓ 或点击选择会话，`x` / Kill 按 `kill_session` 的方式结束它，Esc / Close 关闭面板。
 - **终端页。** Enter / Open 把会话打开成一个仿照 omp Console 的全屏页：显示保留的历史和当前屏幕，带颜色、按会话自身宽度显示，跟随新输出，并可向上回滚。键入的按键会发给会话（与 `write_stdin` 的写法相同，模型能看到效果）；Esc / Back 返回面板；Kill 结束会话。
 
-HUD 直接读取会话，不保存任何副本。它只在 omp 原生渲染时存在，因此 omp 的 ANSI TUI 不会多出一行。模型看到的结果仍是纯文本。
+HUD 直接读取会话，不保存任何副本。它只在 omp 原生渲染时存在，因此 omp 的 ANSI TUI 不会多出一行。工具结果仍是纯文本；显式 `read term://…/screen.png` 请求返回图像。
 
 **Tern 插件。** omp 扩展无法往 omp 的计数器那一行里加东西，所以本包附带一个只含 CSS 的 Tern 插件（`fork-features/tern-plugin/`）。它把共享的 `belowEditor` widget 容器移到 omp 计数器上方，清除容器的间距、背景和阴影，避免与原生 HUD 边距重复叠加。同一容器中的其他 widget 也共享这个位置和重置；插件不重设药丸外观或 omp 的输入框，并让面板的输出预览使用等宽字体。
 
@@ -127,7 +127,7 @@ history_lines: 2                   (optional: lines scrolled off above the scree
 - **运行中屏幕未变。** 屏幕、光标和历史都没变化时，结果带 `screen_changed: false` 和 `(no output)`。
 - **退出只返回一屏。** 每一种 tty 退出结果（包括短命令和确认终止）都返回冻结的最终活动屏，即使屏幕没有变化。`terminal_url` 保留在结果根层；`terminal.retained_rows`、`terminal.rows` 与 `terminal.history_may_be_truncated` 描述正常屏的保留投影，最终元数据不含 `screen_changed` 或 `history_lines`。结果仍受 50 KiB / 2000 行上限约束；通过 URL 的 `/screen` 读取完整屏幕，通过 `/page/N` 读取更早的保留行。
 - **全屏程序**（备用屏幕，比如 `top`、编辑器）报告为 `terminal: alternate screen …`；退出后恢复普通屏幕。
-- **只有纯文本和光标。** 模型结果里没有颜色；原始输出在 `log_path` 里，Tern 的终端页会显示颜色。
+- **工具结果只有纯文本和光标。** exec/write/kill 文本里没有颜色；Tern 的终端页和显式 `read term://…/screen.png` 会显示颜色。
 - **终端查询会被回应**，回应写到子进程的输入上：光标位置、设备属性，以及默认前景色/背景色（OSC 10/11）。在 omp 上颜色跟随 omp 的主题（浅色或深色，在 Tern 里跟随 Tern 的外观）；在 Pi 上为深色。
 - 两次调用之间的历史受单元格预算限制（`TERMINAL_HISTORY_CELLS` 除以 `cols` 得到行数）。在被报告之前就超出预算的行会使结果带上 `history_may_be_truncated: true`；这些行只存在于日志中。
 
@@ -140,6 +140,7 @@ TTY 结果与 `list_sessions` 带有进程内唯一的 `terminal_url`，例如
 |---|---|
 | `term://<key>` | 全部保留的正常屏物理行，去掉行尾空格与末尾空行。 |
 | `term://<key>/screen` | 当前活动屏，包括正在使用的备用屏。 |
+| `term://<key>/screen.png` | 完整活动网格的图像，带单元格颜色与属性。 |
 | `term://<key>/page/2` | 保留行的第二页，每页是会话的 `rows` 行。 |
 | `term://<key>/page/-1` | 最后一页；负页码从末尾计数。 |
 | `term://<key>:raw:1-2` / `term://<key>:raw:-3` | 使用 `read` 现有的 head/tail 选择器，raw 模式不附上下文行。 |
@@ -151,6 +152,15 @@ TTY 结果与 `list_sessions` 带有进程内唯一的 `terminal_url`，例如
 尺寸、光标与当时的外观。同一 URL 在短命令结束、自然退出、确认终止或 LRU
 移除之后仍可读取，直到 omp 进程结束。冻结资源不会删除；插件关闭时不保证
 保留尚未冻结的活动投影。子 agent 与扩展重载后的键互不混淆。
+
+`read term://<key>/screen.png` 使用 omp 的图像管线，不要加 `:img`。
+网格每格为 8×16 逻辑像素，使用系统等宽字体，宽字符跨两格。
+Live 读取使用宿主当前外观并画出描边光标；Frozen 读取保留冻结时的外观，
+不画光标。大型网格按同一比例缩小到原生栅格器的像素上限。
+每次图像读取都在系统临时目录创建一个私有 PNG；它只是该时刻的副本，
+不是缓存，与会话日志一样由系统清理。
+从仅支持文本的终端处理器升级时需要重启一次 omp；之后扩展重载会保留
+图像处理器与已有 URL。
 
 ### `write_stdin`
 

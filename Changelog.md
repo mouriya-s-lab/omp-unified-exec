@@ -2,6 +2,10 @@
 
 All notable changes to this project. **Newest entries go on top.**
 
+## Unreleased
+
+- Add `read term://<key>/screen.png` on omp: the complete active grid is rendered from copied emulator cells, with ANSI/256/RGB colours, text attributes, wide glyphs and an outline Live cursor. Frozen screenshots preserve frozen appearance and omit the cursor. The host rasterizer and file-backed `read` pipeline supply images without install-script dependencies; each read creates a private temporary PNG, retained for OS cleanup like logs. Reload refreshes the same branded handler object without re-registering; upgrading an already-running text-only handler requires one restart.
+
 ## 0.14.7 - 2026-10-13
 
 - Bump the package, tracked npm lock metadata and bundled Tern plugin to 0.14.7, releasing the native HUD fixes and awaited normal-copy installation update below.

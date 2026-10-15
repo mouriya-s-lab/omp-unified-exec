@@ -18,3 +18,7 @@ declare module "@oh-my-pi/pi-tui/theme" {
 declare module "@oh-my-pi/pi-coding-agent/internal-urls" {
 	export const InternalUrlRouter: unknown;
 }
+
+declare module "@oh-my-pi/pi-natives" {
+	export function rasterizeSvg(input: Uint8Array, maxWidthPx: number, maxHeightPx: number): Promise<Uint8Array>;
+}

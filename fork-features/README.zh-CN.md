@@ -17,6 +17,7 @@
 | omp 呈现：exec_command、write_stdin 和 kill_session 通过 omp 的 bash 渲染器渲染；其他工具使用 omp 的默认卡片 | `fork-features/omp-presentation.ts`、`fork-features/omp-tools.d.ts`、`tests/omp-presentation.test.ts`；`src/index.ts` 中的 `withHostPresentation`；`src/render.ts` 导出的 `base64ByteLength`/`stringifyChars`；`package.json` `files` 和 `tsconfig.json` 中的 `fork-features` | omp 以 `renderCall(args, options, theme)` / `renderResult(result, options, theme, args)` 调用扩展渲染器，Tern 读取 `describeCall`/`describeResult`；Pi 的渲染器每次重绘都会抛错，omp 于是显示原始的模型信封。omp 由它注入的 `ExtensionAPI.arktype` 识别；bash 渲染器来自 `@oh-my-pi/pi-tui/tools` 的 `toolRenderers.bash`，缺少这项契约时 omp 让插件加载失败。Pi 上的激活方式不变。 | 仅 fork |
 | Tern 终端 HUD：一个原生的运行中工作计数器（终端图标和已存储的 tty 数量），独占一行，位于 omp 计数器上方；点击打开 Terminals sheet，仿照 omp 的 Agents sheet（会话列表带状态点和 Size / PID / Time 列，选中会话的信息、日志链接和最新输出行作为预览，Kill、Close、Open）；Open 显示一个仿照 omp Console 的全 pane 终端页，键入的按键发送给会话 | `fork-features/tern-terminal-hud.ts`、`fork-features/tern-plugin/`、`fork-features/tern-plugin-install.ts`、`fork-features/omp-tools.d.ts`、`tests/tern-terminal-hud.test.ts`、`tests/tern-plugin-install.test.ts`；`src/terminal-screen.ts` 中的 `TerminalScreen.styledScreen`/`onChange`，`src/session.ts` 中的 `ExecSession.styledScreen`/`onScreenChange`，`src/session-store.ts` 中的 `SessionStore.subscribe`；`src/index.ts` 中的 `activate` 把存储和基于 `terminateSessionById` 的 kill 交给 `withHostPresentation`；`package.json` `files` 中的 `fork-features/tern-plugin` | 工具结果只显示该次调用返回时的 tty 屏幕（[#17](https://github.com/oh-my-omp/omp-unified-exec/issues/17)）。widget 通过 `ctx.ui.setWidget`（`belowEditor`）挂载，恰好在原生渲染生效且存有 tty 会话时存在，包括已自然退出但尚未移除的 tty 会话；没有外层关闭动作，也没有隐藏的生命周期。它的行使用 `omp.hud`，带 `omp.hud.pill` / `omp.hud.seg`，所以外观以及 Reader、Spine、Console 的几何布局都由 Tern 负责。纯 CSS 插件把共享的 belowEditor 容器移到 omp 计数器上方，并清除它的 margin、padding、背景和阴影；同处的其他 widget 共享这一位置和重置。它还把预览的 `code` 输出（`unified-exec.terminals.tail`）设为等宽字体。被 await 的 omp 工厂在安装/强制校验和普通加载时同步一份正常的 Tern 副本；它校验全部三个文件和 ready 目录，通过 Tern 的 CLI 自动迁移已确认的旧 `.path` 链接，可用的 Tern 无法同步时让加载失败。不再有会话开始时的安装或开发链接。没有该插件时，pill 位于输入框下方。sheet 响应 `nativeSheet` 并使用模态 `picker`；终端页声明 `full` `nativeOverlay`，显示来自保留历史和当前屏幕的彩色、可滚动 `ansi`（[#19](https://github.com/oh-my-omp/omp-unified-exec/issues/19)）。只有终端页的键入和 sheet/终端页的 Kill 会作用于会话；模型可见的结果仍是纯文本。 | 仅 fork |
 | 进程内唯一的 tty 资源与 `read term://` | `fork-features/terminal-resource.ts`、`fork-features/terminal-url.ts`、`src/terminal-screen.ts`、`src/session.ts`、`src/session-store.ts`、`src/tool-result.ts`、`src/script-result.ts`、`src/index.ts`；在 `omp-presentation.ts` 初始化 | omp 的 `@oh-my-pi/pi-coding-agent/internal-urls` 提供进程级单例 `InternalUrlRouter.instance().register(handler)`。唯一的 `term` 处理器读取 `Symbol.for` 共享索引，带 UUID 后缀的键隔离不同激活与重载。物理行投影不消费输出；会话在输出关闭且解析完毕时冻结。冻结的行与活动屏样式单元格副本保留到进程结束；关闭时只丢弃自身尚未冻结的活动资源。 | 仅 fork |
+| 经 `read term://…/screen.png` 读取终端截图 | `fork-features/terminal-image.ts`、`fork-features/terminal-url.ts`、`fork-features/omp-tools.d.ts` | 宿主 `@oh-my-pi/pi-natives` 根导出的 `rasterizeSvg(Uint8Array, maxWidthPx, maxHeightPx)` 使用系统字体栅格化 SVG，无需安装脚本。file 型 scheme 的 `locate()` 把私有 PNG 交给生产 `read`；文本路径返回 null，仍正常 resolve。只有模拟器复制的单元格进入 SVG。Live 外观/光标和 Frozen 外观/无光标共用 K1 投影。 | 仅 fork |
 
 环境变量（`PI_UNIFIED_EXEC_*`）、工具名和源码结构保持不变，所以导入 `src/*` 的其他 omp 插件在路径从 `node_modules/pi-unified-exec` 变为 `node_modules/omp-unified-exec` 后仍能工作。
 
@@ -32,11 +33,19 @@
 `README.md` 和 `README.zh-CN.md` 归 fork 所有。同步改动到 README 时，保留 fork 的版本，只把在这里仍然成立的上游事实（工具参数、限制、语义）写进两个文件中 fork 对应的章节；两者保持逐节互译，`fork-features/README.md` 和 `fork-features/README.zh-CN.md` 也一样。
 
 omp 升级后，要重新验证 `@oh-my-pi/pi-coding-agent/internal-urls`：
-`InternalUrlRouter.instance().register(handler)` 必须与生产 `read` 共用路由，
-`{backing: "virtual", selectors: "lines", immutable: false}` 必须保留行选择器与
-raw 选择器。通过真实 `read` 验证全部保留行、`/screen`、正负 `/page/N`、
-head/tail、未知键和越界错误；确认子 agent 的同号键不混淆，退出、终止、
-LRU 后仍可读，两次重载后旧 URL 仍可读，且读取不消费观察状态。
+`InternalUrlRouter.instance().register(handler)` 必须与生产 `read` 共用路由；
+`getHandler("term")` 必须返回同一个可变对象，每次请求读取其 spec 与方法。
+最终处理器使用 `{backing: "file", selectors: "lines", immutable: false}`：
+`locate()` 仅为 `/screen.png` 返回文件路径，文本路径返回 null。
+通过真实 `read` 验证全部保留行、`/screen`、正负页码、head/tail、
+未知键与越界错误；确认子 agent 的同号键不混淆，退出、终止、LRU 后仍可读，
+两次重载后旧 URL 仍可读，既不消费观察状态也不重新注册。
+重新验证根导出 `@oh-my-pi/pi-natives.rasterizeSvg`：PNG 字节、系统字体中文、
+调色板/RGB 与属性、16,777,216 像素限制，以及真实 `read` 的 image 块。
+同一 Live 会话切换明暗主题，检查 Frozen 外观不变、Live 描边光标与 Frozen
+无光标，以及并发读取的私有 PNG 路径。
+成功截图与日志一样依赖系统临时文件清理，因为宿主只接收路径，没有读取完成回调。
+升级已运行的仅文本处理器需要重启一次 omp；最终版本之间的重载不需要。
 
 
 包改名、fork README、codemode 宿主保护、原生 Bun PTY 后端、omp 呈现和 Tern 终端 HUD 是要长期保留的 fork 定制。omp 升级后要重新验证 omp 呈现：`toolRenderers.bash` 必须仍然暴露 `renderCall`/`renderResult`/`describeCall`/`describeResult`/`mergeCallAndResult`/`inline`，并接受 `{command, cwd}` 参数和 `{exitCode, wallTimeMs, async}` details。也要重新验证 Tern HUD：`@oh-my-pi/pi-tui/native/state` 必须仍然导出 `isNativeRendering`/`onNativeRenderingChange`；widget 组件的 `describe` 必须仍能到达 Tern，`belowEditor` widget 必须仍然没有间隔，pill 的 `open` 动作必须仍能到达 widget 的 `handleNativeEvent`；响应 `nativeSheet` 的自定义 overlay 组件必须仍被挂载为它的 `picker` sheet，并收到 `select`/`activate`/`action` 事件；带 `full` `nativeOverlay` 的自定义 overlay 必须仍被画成全 pane sheet，且其 `handleInput` 收到键入；omp 的计数器必须仍使用 `omp.hud` / `omp.hud.pill` / `omp.hud.seg`。omp 或 Tern 升级后，Tern 插件的选择器必须仍然成立：共享的 `belowEditor` 容器是 dock 的最后一个 `.sf-col.gap-none` 子元素，空容器保持零尺寸且从不选中编辑器，原生 HUD 规则在 Reader、Spine 和 Console 中都匹配嵌套的终端行。`code` 节点的 role 必须仍能到达带 `.sf-code-lines` 的元素。在 Tern 中，`full` sheet 的 `ansi` 必须仍能在 `grow` 和小数 `max.h` 下填满操作栏之外的高度，并在自身内部滚动。omp 升级后，包安装校验必须仍在物化包资源之后 await 扩展工厂，并在报告成功前传播它的拒绝。普通加载使用同一个初始化函数；`session_start` 没有安装 IO。只通过 `omp plugin install URL --force` 重新验证缺失/过时的副本、同版本的资源更新、完全一致的未变副本和旧的 `.path` 注册，并在任何会话之前检查 Tern 的副本。Tern 的 `plugin dir --json`、`list --json`（`id`、`version`、`css`、`status`）、`install DIR --force --json`（`id`、`version`、绝对路径 `dir`）和 `unlink ID --json` 必须保持其契约。unlink 之前必须有精确的已链接目标冲突，加上匹配的规范注册和新的目录；无关的失败绝不能删除注册。每条命令的超时是 75 秒，覆盖 Tern 60 秒的重载等待。没有守护进程时，副本仍须安装，供下次启动使用。缺少 Tern 时跳过初始化；Tern 可用但失败时，拒绝安装校验和普通加载。在真实的 Tern 窗口里检查它（`tern --control`；插件只在窗口里加载，不在 `tern serve` 里），使用所有者的设置，带一个运行中的轮次、todos 和一个后台 agent，尺寸为 1280×800 和 700px 宽，在 Reader、Spine 和 Console 中，并在同一个活动 tty 会话里切换亮色和暗色主题。比较两个计数器的行和 pill 矩形（右边缘相差不超过 1px）、字体、高度、圆角、边框和悬停效果；在 pane 聚焦和未聚焦时检查 Spine。没有 tty 或其他 widget 时，每个输入框、计量条和活动/todo 矩形都必须与无插件运行时一致，空容器不占高度。有 tty 会话时，终端计数器只有图标和数量，没有外层 ✕、额外的底部间距或 Spine 容器底板。Terminals sheet 必须像 Agents sheet 一样打开，并能通过点击和 ↑/↓ 选择会话。Kill 和 `x` 必须只在确认退出后结束选中的运行中会话；Open / Enter 必须以会话的完整宽度显示全 pane 终端页，模型观察之后保留的历史仍可滚动，键入能到达运行中的 `cat`。Esc / Back 必须回到 sheet；Close 和 Esc 必须让进程继续运行，输入框保持可用。移除最后一个 tty 会卸载计数器；再启动一个 tty 会立即重新挂载它。
