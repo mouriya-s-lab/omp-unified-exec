@@ -67,9 +67,10 @@ type SessionEngine =
 /** Outcome of writing input to a session. */
 export type InputWrite =
 	| { readonly kind: "written" }
+	| { readonly kind: "cancelled" }
 	/** The session already exited; nothing was written. */
 	| { readonly kind: "not_running" }
-	/** The process is running but did not take the bytes (its stdin is closed). */
+	/** The write did not complete; an accepted prefix may already be in stdin. */
 	| { readonly kind: "refused"; readonly reason: string };
 
 export interface SessionState {
@@ -437,7 +438,7 @@ export class ExecSession {
 	 * accepted every byte (no buffering beyond the pipe); a process takes the
 	 * bytes synchronously as before.
 	 */
-	async writeInput(data: Uint8Array): Promise<InputWrite> {
+	async writeInput(data: Uint8Array, signal?: AbortSignal): Promise<InputWrite> {
 		if (this.state.hasExited) return { kind: "not_running" };
 		switch (this.engine.kind) {
 			case "process":
@@ -446,14 +447,16 @@ export class ExecSession {
 					? { kind: "not_running" }
 					: { kind: "refused", reason: "the child closed its stdin" };
 			case "brush": {
-				const written = await this.engine.execution.writeStdin(data);
+				const written = await this.engine.execution.writeStdin(data, signal);
 				switch (written.kind) {
 					case "written":
+						return written;
+					case "cancelled":
 						return written;
 					case "not-running":
 						return { kind: "not_running" };
 					case "refused":
-						return { kind: "refused", reason: `the command did not take the bytes (${written.reason})` };
+						return { kind: "refused", reason: `stdin write did not complete (${written.reason})` };
 				}
 			}
 		}

@@ -39,6 +39,7 @@ export type TerminateResult = "cancelled" | "already-settled";
 /** Result of {@link BrushExecution.writeStdin}. */
 export type StdinWrite =
 	| { readonly kind: "written" }
+	| { readonly kind: "cancelled" }
 	| { readonly kind: "not-running" }
 	| { readonly kind: "refused"; readonly reason: string };
 
@@ -252,14 +253,23 @@ export class BrushExecution {
 	}
 
 	/** Write to the execution's stdin, waiting until the pipe accepts every byte. */
-	async writeStdin(data: Uint8Array): Promise<StdinWrite> {
+	async writeStdin(data: Uint8Array, signal?: AbortSignal): Promise<StdinWrite> {
 		if (this.#settled) return { kind: "not-running" };
+		if (signal?.aborted) return { kind: "cancelled" };
+		// napi owns onabort on the signal it wraps. Give this write its own
+		// signal so it cannot replace a caller's handlers or cancel the run.
+		const writeAbort = signal ? new AbortController() : undefined;
+		const onAbort = () => writeAbort?.abort(signal?.reason);
+		signal?.addEventListener("abort", onAbort, { once: true });
 		try {
-			await this.#stdin.write(data);
+			await this.#stdin.write(data, writeAbort?.signal);
 			return { kind: "written" };
 		} catch (err) {
 			if (this.#settled) return { kind: "not-running" };
+			if (signal?.aborted) return { kind: "cancelled" };
 			return { kind: "refused", reason: err instanceof Error ? err.message : String(err) };
+		} finally {
+			signal?.removeEventListener("abort", onAbort);
 		}
 	}
 
@@ -285,7 +295,8 @@ export class BrushExecution {
 					return { kind: "timed-out", notice: `Command timed out after ${Math.round((timeoutMs ?? 0) / 1000)} seconds` };
 				}
 				if (result.cancelled) return { kind: "cancelled" };
-				return { kind: "exited", exitCode: result.exitCode ?? 1 };
+				if (result.exitCode === undefined) return { kind: "failed", message: "Command failed: missing exit status" };
+				return { kind: "exited", exitCode: result.exitCode };
 			},
 			(err: unknown): BrushOutcome => ({ kind: "failed", message: err instanceof Error ? err.message : String(err) }),
 		);

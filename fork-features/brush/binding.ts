@@ -20,6 +20,8 @@ export interface BoundSession {
 	readonly settings: HostSettings;
 	readonly skills: unknown;
 	readonly asyncJobManager: unknown;
+	/** The host owns this identity and may replace exposed values during a session. */
+	readonly sessionManager: unknown;
 }
 
 export type UnboundReason = "no-registry-entry" | "identity-mismatch";
@@ -29,8 +31,6 @@ export type HostBinding =
 			readonly kind: "bound";
 			readonly session: BoundSession;
 			readonly agentId: string;
-			/** The session's `sessionManager`; checked against each event's, never read by consumers. */
-			readonly identity: unknown;
 	  }
 	| { readonly kind: "unbound"; readonly reason: UnboundReason };
 
@@ -51,17 +51,12 @@ export function bindingContext(ctx: unknown): BindingContext {
 	return { agentId: typeof id === "string" ? id : undefined, sessionManager };
 }
 
-function parseSession(session: unknown): (BoundSession & { readonly sessionManager: unknown }) | undefined {
+function parseSession(session: unknown): BoundSession | undefined {
 	if (typeof session !== "object" || session === null) return undefined;
 	if (!("settings" in session) || typeof session.settings !== "object" || session.settings === null) return undefined;
-	// omp's Settings instance: read only through OmpHost's readers.
-	const settings = session.settings as HostSettings;
-	return {
-		settings,
-		skills: "skills" in session ? session.skills : undefined,
-		asyncJobManager: "asyncJobManager" in session ? session.asyncJobManager : undefined,
-		sessionManager: "sessionManager" in session ? session.sessionManager : undefined,
-	};
+	// Keep the actual AgentSession, not a record of its current property values:
+	// settings, skills and the job manager remain owned and maintained by the host.
+	return session as BoundSession;
 }
 
 /** The first `session_start` of an activation: one registry lookup. */
@@ -70,8 +65,7 @@ export function bindSession(host: OmpHost, ctx: BindingContext): HostBinding {
 	const session = registered === undefined ? undefined : parseSession(registered.session);
 	if (ctx.agentId === undefined || session === undefined) return { kind: "unbound", reason: "no-registry-entry" };
 	if (session.sessionManager !== ctx.sessionManager) return { kind: "unbound", reason: "identity-mismatch" };
-	const { sessionManager, ...bound } = session;
-	return { kind: "bound", session: bound, agentId: ctx.agentId, identity: sessionManager };
+	return { kind: "bound", session, agentId: ctx.agentId };
 }
 
 /** `session_switch` / `session_branch`: re-check identity without a lookup. */
@@ -81,6 +75,6 @@ export function recheckBinding(binding: HostBindingState, ctx: BindingContext): 
 		case "unbound":
 			return binding;
 		case "bound":
-			return binding.identity === ctx.sessionManager ? binding : { kind: "unbound", reason: "identity-mismatch" };
+			return binding.session.sessionManager === ctx.sessionManager ? binding : { kind: "unbound", reason: "identity-mismatch" };
 	}
 }

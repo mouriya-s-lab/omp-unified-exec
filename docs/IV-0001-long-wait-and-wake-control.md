@@ -19,6 +19,12 @@ Cancellation preserves buffered output and the live process. Terminal delivery
 still commits at `tool_execution_end`; failed/cancelled delivery leaves an
 armed wake eligible. Long polls use output-driven, rate-limited updates.
 
+On omp, a Brush input write also observes the calling tool's cancellation while
+waiting for the native pipe or an earlier write. Cancelling that call stops its
+pending write, releases its observation lease, and leaves the execution and
+stdin open. An incomplete write may already have delivered a prefix; cancellation
+does not roll input back or leave the remainder queued for later delivery.
+
 Pi owns cache warming, with no provider-specific polling rules here. Warming
 is not a prerequisite for long waits and this extension never overrides its
 cost policy or another extension's veto. Human-explicit absolute deadlines and

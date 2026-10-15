@@ -454,6 +454,9 @@ async function runExecCommand(
 			}),
 			sleep(EARLY_EXIT_GRACE_PERIOD_MS, signal),
 		]);
+		if (ctx.engine.kind === "omp" && ctx.shuttingDown) {
+			throw new Error("unified-exec: session is shutting down; command attachment ended.");
+		}
 
 		if (session.hasExited && Date.now() <= earlyDeadline + 20) {
 			// Fully short-lived: collect everything in the buffer + any trailing
@@ -508,6 +511,9 @@ async function runExecCommand(
 		const pollStream = startStreaming(session, onUpdate, deadlineMs, signal);
 		const collected = await session.collect({ deadlineMs, externalAbort: signal });
 		pollStream.stop();
+		if (ctx.engine.kind === "omp" && ctx.shuttingDown) {
+			throw new Error("unified-exec: session is shutting down; command attachment ended.");
+		}
 
 		session.touch();
 		const stillAlive = !session.hasExited;
@@ -619,10 +625,16 @@ async function runWriteStdin(
 	try {
 		let writeFailure: string | null = null;
 		if (writeBytes) {
-			const written = await session.writeInput(writeBytes);
+			const written = await session.writeInput(writeBytes, signal);
+			if (session.isBrush) signal?.throwIfAborted();
+			if (written.kind === "cancelled") {
+				throw new DOMException("stdin write was cancelled; some bytes may have been delivered", "AbortError");
+			}
 			if (written.kind === "refused") {
-				// Still running but stdin is gone (child closed it / EPIPE earlier).
-				writeFailure = `stdin write failed: ${written.reason}; bytes were not delivered`;
+				// Brush can accept a prefix before a native pipe write fails.
+				writeFailure = session.isBrush
+					? `stdin write did not complete: ${written.reason}; some bytes may have been delivered`
+					: `stdin write failed: ${written.reason}; bytes were not delivered`;
 			}
 			if (written.kind === "not_running" && session.isBrush) {
 				// A Brush execution's stdin ended with it: say so, with its exit
@@ -1077,8 +1089,16 @@ function startStreaming(
 }
 
 /** The tool call's own abort plus the plugin's lifetime: shutdown ends every attached wait. */
-function withLifetime(ctx: ExtensionCtx, signal: AbortSignal | undefined): AbortSignal {
+function withLifetime(ctx: ExtensionCtx, signal: AbortSignal | undefined): AbortSignal | undefined {
+	if (ctx.engine.kind === "pi") return signal;
 	return signal ? AbortSignal.any([signal, ctx.lifetime.signal]) : ctx.lifetime.signal;
+}
+
+/** Once omp starts shutdown, its session index no longer admits tool operations. */
+function assertHostSessionOpen(ctx: ExtensionCtx): void {
+	if (ctx.engine.kind === "omp" && ctx.shuttingDown) {
+		throw new Error("unified-exec: session is shutting down; not observing sessions.");
+	}
 }
 
 /** omp-only session events, absent from Pi's typings: `/new`, resume and fork; `/branch` and btw. */
@@ -1434,9 +1454,7 @@ function activate(pi: ExtensionAPI, host: HostRuntime = { kind: "pi" }): Activat
 		}),
 		async execute(toolCallId, params, signal, onUpdate, eventCtx) {
 			ctx.ui ??= eventCtx.ui;
-			if (ctx.shuttingDown && engine.kind === "omp") {
-				throw new Error("unified-exec: session is shutting down; not observing sessions.");
-			}
+			assertHostSessionOpen(ctx);
 			const shape = await runWriteStdin(ctx, params, withLifetime(ctx, signal), onUpdate, toolCallId);
 			updateRunningSessionsUi(ctx);
 			return {
@@ -1471,6 +1489,7 @@ function activate(pi: ExtensionAPI, host: HostRuntime = { kind: "pi" }): Activat
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, eventCtx) {
 			ctx.ui ??= eventCtx.ui;
+			assertHostSessionOpen(ctx);
 			const { session_id: sid, on_exit: policy } = params as { session_id: number; on_exit: OnExitPolicy };
 			const session = ctx.store.get(sid);
 			if (policy === "wake" && !session) {
@@ -1537,6 +1556,7 @@ function activate(pi: ExtensionAPI, host: HostRuntime = { kind: "pi" }): Activat
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, eventCtx) {
 			ctx.ui ??= eventCtx.ui;
+			assertHostSessionOpen(ctx);
 			const sid = (params as { session_id: number; signal?: string }).session_id;
 			const initial = normalizeSignal((params as { signal?: string }).signal);
 			const startedAt = Date.now();
@@ -1604,6 +1624,7 @@ function activate(pi: ExtensionAPI, host: HostRuntime = { kind: "pi" }): Activat
 		parameters: Type.Object({}),
 		async execute(_toolCallId, _params, _signal, _onUpdate, eventCtx) {
 			ctx.ui ??= eventCtx.ui;
+			assertHostSessionOpen(ctx);
 			// Reap any sessions that have exited silently (e.g., completed between
 			// tool calls without anyone observing them) — but report each of them
 			// one final time with exit info instead of dropping them on the floor.

@@ -60,8 +60,9 @@ export interface NativeShellRunResult {
 
 /** One run's stdin pipe; see `ShellStdin` in `crates/unified-exec-native/src/shell.rs`. */
 export interface NativeShellStdin {
-	/** Resolves once the pipe accepted every byte; rejects `stdin_closed` / `stdin_broken: …`. */
-	write(data: Uint8Array): Promise<void>;
+	/** Waits for full pipe acceptance. A cancelled/incomplete write may have delivered a prefix.
+	 * Rejects `stdin_closed`, `stdin_broken: …` or `stdin_write_cancelled`; cancellation keeps stdin open. */
+	write(data: Uint8Array, signal?: AbortSignal): Promise<void>;
 	/** Close the write end (EOF for the command). Idempotent. */
 	close(): void;
 }
