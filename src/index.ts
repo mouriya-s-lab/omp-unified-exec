@@ -389,6 +389,11 @@ async function runExecCommand(
 	if (selected.host === "omp" && ctx.shuttingDown) {
 		throw new Error("unified-exec: session is shutting down; not starting new commands.");
 	}
+	// The host owns both the mutation detector and the persistent read cache.
+	// Approval has already completed; failed execution does not restore stale rows.
+	if (plan.variant.host === "omp") {
+		plan.variant.engine.services.invalidateGithubCacheForBashCommand(plan.command);
+	}
 	const variant = plan.variant;
 	const tty = variant.kind === "pty-process";
 	if (tty && !isPtyAvailable()) {

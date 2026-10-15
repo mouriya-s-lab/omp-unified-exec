@@ -82,3 +82,7 @@ declare module "@oh-my-pi/pi-utils" {
 	export const $which: unknown;
 	export const WhichCachePolicy: unknown;
 }
+
+declare module "@oh-my-pi/pi-coding-agent/tools/gh-cache-invalidation" {
+	export const invalidateGithubCacheForBashCommand: unknown;
+}
