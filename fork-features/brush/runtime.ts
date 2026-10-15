@@ -5,8 +5,36 @@
  * the Brush engine needs.
  */
 import type { TerminalAppearance } from "../../src/terminal-screen.ts";
+import type { HostBindingState } from "./binding.ts";
+import type { BrushShells } from "./execution.ts";
 import type { NativeLoad } from "./native.ts";
-import type { OmpHost } from "./omp-host.ts";
+import type { HostSettings, OmpHost } from "./omp-host.ts";
+
+/** Mutable execution resources owned by one omp plugin activation. */
+export interface OmpEngine {
+	readonly kind: "omp";
+	readonly services: OmpHost;
+	readonly native: NativeLoad;
+	readonly warn: (message: string) => void;
+	binding: HostBindingState;
+	shells: BrushShells | undefined;
+}
+
+export type EngineHost = { readonly kind: "pi" } | OmpEngine;
+
+/** The bound inputs for one execution, including omp's process backends. */
+interface OmpExecutionContext {
+	readonly host: "omp";
+	readonly engine: OmpEngine;
+	readonly settings: HostSettings;
+}
+
+type ProcessHost = { readonly host: "pi" } | OmpExecutionContext;
+
+export type EngineVariant =
+	| ({ readonly kind: "brush" } & OmpExecutionContext)
+	| ({ readonly kind: "pipe-process" } & ProcessHost)
+	| ({ readonly kind: "pty-process" } & ProcessHost);
 
 export type HostRuntime =
 	| { readonly kind: "pi" }

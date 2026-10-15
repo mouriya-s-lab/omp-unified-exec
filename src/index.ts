@@ -29,12 +29,12 @@ import { Type, type TUnsafe } from "typebox";
 
 import { approvalCommand, approveCommand } from "../fork-features/brush/approval.ts";
 import type { CommandApproval } from "../fork-features/brush/approval.ts";
-import { bindingContext, bindSession, type HostBindingState, recheckBinding } from "../fork-features/brush/binding.ts";
+import { bindingContext, bindSession, recheckBinding } from "../fork-features/brush/binding.ts";
 import { planBrushRun } from "../fork-features/brush/environment.ts";
 import { BrushExecution, BrushShells, persistentLease } from "../fork-features/brush/execution.ts";
-import type { NativeLoad } from "../fork-features/brush/native.ts";
-import type { HostSettings, OmpHost } from "../fork-features/brush/omp-host.ts";
-import type { HostRuntime } from "../fork-features/brush/runtime.ts";
+import { createExecPlan } from "../fork-features/brush/plan.ts";
+import type { ExecPlan } from "../fork-features/brush/plan.ts";
+import type { EngineHost, EngineVariant, HostRuntime } from "../fork-features/brush/runtime.ts";
 import { type ActivatedExtension, withHostPresentation } from "../fork-features/omp-presentation.ts";
 import { type CollectResult, NO_OUTPUT } from "./collect.ts";
 import { registerCompactCodemode } from "./codemode-render.ts";
@@ -181,28 +181,6 @@ interface ExtensionCtx {
 	lifetime: AbortController;
 }
 
-/**
- * Pi runs every command as a real process, as before. omp also runs
- * `tty: false` commands without `shell` on the embedded brush shell, which
- * needs the session binding (#27 C1) and the native addon (C3).
- */
-type EngineHost = { readonly kind: "pi" } | OmpEngine;
-
-interface OmpEngine {
-	readonly kind: "omp";
-	readonly services: OmpHost;
-	readonly native: NativeLoad;
-	readonly warn: (message: string) => void;
-	binding: HostBindingState;
-	/** This activation's persistent and retained shells; recreated after a shutdown re-arms the extension. */
-	shells: BrushShells | undefined;
-}
-
-/** The engine running one exec_command (#27 C2). */
-type EngineVariant =
-	| { readonly kind: "brush"; readonly engine: OmpEngine; readonly settings: HostSettings }
-	| { readonly kind: "pipe-process" }
-	| { readonly kind: "pty-process" };
 
 /**
  * Dispatch by host, `tty` and `shell` only (#27 G1). On omp every variant
@@ -213,16 +191,18 @@ type EngineVariant =
 function selectEngine(engine: EngineHost, args: ExecCommandArgs): EngineVariant {
 	switch (engine.kind) {
 		case "pi":
-			return args.tty === true ? { kind: "pty-process" } : { kind: "pipe-process" };
+			return args.tty === true ? { kind: "pty-process", host: "pi" } : { kind: "pipe-process", host: "pi" };
 		case "omp": {
 			const binding = engine.binding;
 			if (binding.kind !== "bound") {
 				const reason = binding.kind === "unbound" ? binding.reason : "no session has started";
 				throw execError("host_binding_unavailable", `this omp session could not be bound to its host session (${reason})`);
 			}
-			if (args.tty === true) return { kind: "pty-process" };
-			if (args.shell !== undefined && args.shell.length > 0) return { kind: "pipe-process" };
-			return { kind: "brush", engine, settings: binding.session.settings };
+			if (args.tty === true) return { kind: "pty-process", host: "omp", engine, settings: binding.session.settings };
+			if (args.shell !== undefined && args.shell.length > 0) {
+				return { kind: "pipe-process", host: "omp", engine, settings: binding.session.settings };
+			}
+			return { kind: "brush", host: "omp", engine, settings: binding.session.settings };
 		}
 	}
 }
@@ -298,7 +278,7 @@ function heldOpenNote(session: ExecSession): string | undefined {
  * bash) as a real process with `process.env`, unchanged from before the
  * Brush engine.
  */
-function spawnProcessSession(ctx: ExtensionCtx, id: number, args: ExecCommandArgs, cwd: string, tty: boolean): ExecSession {
+function spawnProcessSession(ctx: ExtensionCtx, id: number, args: ExecCommandArgs, plan: ExecPlan): ExecSession {
 	let shellBin = args.shell;
 	if (!shellBin) {
 		const resolved = resolveDefaultShell();
@@ -328,15 +308,15 @@ function spawnProcessSession(ctx: ExtensionCtx, id: number, args: ExecCommandArg
 		// never reach spawn.
 		shellBin = resolveWindowsShell(shellBin);
 	}
-	const shellCommand = buildShellCommand(shellBin, args.cmd);
+	const shellCommand = buildShellCommand(shellBin, plan.command);
 	return ExecSession.spawn(id, {
 		command: shellCommand.command,
-		cwd,
+		cwd: plan.cwd,
 		env: process.env,
-		tty,
+		tty: plan.variant.kind === "pty-process",
 		cols: args.cols !== undefined ? clamp(Math.floor(args.cols), MIN_PTY_COLS, MAX_PTY_COLS) : undefined,
 		rows: args.rows !== undefined ? clamp(Math.floor(args.rows), MIN_PTY_ROWS, MAX_PTY_ROWS) : undefined,
-		displayCommand: args.cmd,
+		displayCommand: plan.rawCommand,
 		shell: shellBin,
 		windowsVerbatimArguments: shellCommand.windowsVerbatimArguments,
 		appearance: ctx.appearance,
@@ -353,8 +333,7 @@ async function startBrushSession(
 	ctx: ExtensionCtx,
 	variant: Extract<EngineVariant, { kind: "brush" }>,
 	id: number,
-	args: ExecCommandArgs,
-	cwd: string,
+	plan: ExecPlan,
 	sessionId: string,
 	signal: AbortSignal | undefined,
 ): Promise<ExecSession> {
@@ -363,24 +342,24 @@ async function startBrushSession(
 		throw execError("native_shell_unavailable", `the embedded shell's native addon could not be loaded (${engine.native.reason})`);
 	}
 	const native = engine.native.module;
-	const plan = await planBrushRun(engine.services, settings, sessionId, args.cmd, cwd, signal);
+	const launch = await planBrushRun(engine.services, settings, sessionId, plan.command, plan.cwd, signal);
 	if (ctx.shuttingDown) throw new Error("unified-exec: session is shutting down; not starting new commands.");
 	engine.shells ??= new BrushShells(native);
 	const shells = engine.shells;
 	shells.retireOtherSessions(sessionId);
 	return ExecSession.brush(id, {
-		cwd,
-		displayCommand: args.cmd,
+		cwd: plan.cwd,
+		displayCommand: plan.rawCommand,
 		start: (onOutput) =>
 			BrushExecution.start({
 				shells,
 				native,
-				key: plan.key,
-				shellOptions: plan.shellOptions,
+				key: launch.key,
+				shellOptions: launch.shellOptions,
 				persistent: persistentLease({ kind: "coordinator" }),
-				command: plan.command,
-				cwd,
-				env: plan.env,
+				command: launch.command,
+				cwd: plan.cwd,
+				env: launch.env,
 				timeoutMs: undefined,
 				onOutput,
 			}),
@@ -401,7 +380,19 @@ async function runExecCommand(
 	if (ctx.shuttingDown) {
 		throw new Error("unified-exec: session is shutting down; not starting new commands.");
 	}
-	const variant = selectEngine(ctx.engine, args);
+	const selected = selectEngine(ctx.engine, args);
+	// Pi keeps its synchronous, raw-path process launch. Only omp awaits
+	// the host's cwd stage; its async boundary must recheck shutdown.
+	const plan: ExecPlan = selected.host === "pi" ? {
+		rawCommand: args.cmd,
+		command: args.cmd,
+		cwd: args.workdir && args.workdir.length > 0 ? args.workdir : cwd,
+		variant: selected,
+	} : await createExecPlan(args, cwd, selected);
+	if (selected.host === "omp" && ctx.shuttingDown) {
+		throw new Error("unified-exec: session is shutting down; not starting new commands.");
+	}
+	const variant = plan.variant;
 	const tty = variant.kind === "pty-process";
 	if (tty && !isPtyAvailable()) {
 		throw new Error(
@@ -409,7 +400,7 @@ async function runExecCommand(
 				`Upgrade Bun to a version with Bun.Terminal, install Node optional dependencies, or call with tty: false.`,
 		);
 	}
-	const effectiveCwd = args.workdir && args.workdir.length > 0 ? args.workdir : cwd;
+	const effectiveCwd = plan.cwd;
 	const yieldTimeMs = clampYield(args.yield_time_ms, DEFAULT_EXEC_YIELD_MS);
 	const wantsWake = args.on_exit === "wake";
 
@@ -417,11 +408,11 @@ async function runExecCommand(
 	let session: ExecSession;
 	switch (variant.kind) {
 		case "brush":
-			session = await startBrushSession(ctx, variant, id, args, effectiveCwd, sessionId(), signal);
+			session = await startBrushSession(ctx, variant, id, plan, sessionId(), signal);
 			break;
 		case "pipe-process":
 		case "pty-process":
-			session = spawnProcessSession(ctx, id, args, effectiveCwd, tty);
+			session = spawnProcessSession(ctx, id, args, plan);
 			break;
 	}
 
@@ -436,7 +427,7 @@ async function runExecCommand(
 			tty,
 			logPath: undefined, // spawn failed — no log file
 			cwd: effectiveCwd,
-			command: args.cmd,
+			command: plan.rawCommand,
 			yieldTimeMs,
 		});
 	}
@@ -477,7 +468,7 @@ async function runExecCommand(
 				tty,
 				logPath: session.logPath,
 				cwd: effectiveCwd,
-				command: args.cmd,
+				command: plan.rawCommand,
 				yieldTimeMs,
 				extra: {
 					on_exit: args.on_exit,
@@ -538,7 +529,7 @@ async function runExecCommand(
 				tty,
 				logPath: session.logPath,
 				cwd: effectiveCwd,
-				command: args.cmd,
+				command: plan.rawCommand,
 				yieldTimeMs,
 				extra: {
 					on_exit: args.on_exit,
@@ -562,7 +553,7 @@ async function runExecCommand(
 			tty,
 			logPath: session.logPath,
 			cwd: effectiveCwd,
-			command: args.cmd,
+			command: plan.rawCommand,
 			yieldTimeMs,
 			extra: {
 				on_exit: args.on_exit,

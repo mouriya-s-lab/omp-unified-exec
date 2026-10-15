@@ -4,11 +4,12 @@
  *
  * Every module is a literal dynamic import: these modules exist only inside
  * omp, and compiled omp rejects variable import specifiers. A missing or
- * reshaped export fails plugin loading instead of degrading later. None of
- * them loads the host's own shell (`exec/bash-executor`, `pi-natives`).
+ * reshaped export fails plugin loading instead of degrading later. Helpers
+ * never construct or execute the host's Shell or import bash-executor.
  */
 import { getBashApprovalPatternRules } from "./approval.ts";
 import type { ApprovalHelpers, BashApprovalPatternRule } from "./approval.ts";
+import type { CwdServices } from "./plan.ts";
 
 /** omp's `Settings` for one session. Read only through the readers below. */
 export interface HostSettings {
@@ -59,6 +60,7 @@ export interface OmpHost {
 	readonly approvalRules: (settings: HostSettings) => readonly BashApprovalPatternRule[];
 	readonly allowCompoundCommands: (settings: HostSettings) => boolean;
 	readonly approval: ApprovalHelpers;
+	readonly paths: CwdServices;
 }
 
 type Fn = (...args: never[]) => unknown;
@@ -141,7 +143,7 @@ function parseDirenvDiff(value: unknown): DirenvDiff | null {
 
 /** Load and parse the host services; rejects when omp lacks any of them. */
 export async function loadOmpHost(): Promise<OmpHost> {
-	const [root, nonInteractive, snapshot, direnvModule, settings, tokenizer, approvalModule] = await Promise.all([
+	const [root, nonInteractive, snapshot, direnvModule, settings, tokenizer, approvalModule, internalUrls, pathUtils] = await Promise.all([
 		import("@oh-my-pi/pi-coding-agent"),
 		import("@oh-my-pi/pi-coding-agent/exec/non-interactive-env"),
 		import("@oh-my-pi/pi-coding-agent/utils/shell-snapshot"),
@@ -149,6 +151,8 @@ export async function loadOmpHost(): Promise<OmpHost> {
 		import("@oh-my-pi/pi-coding-agent/exec/settings"),
 		import("@oh-my-pi/pi-coding-agent/tools/shell-tokenize"),
 		import("@oh-my-pi/pi-coding-agent/tools/approval"),
+		import("@oh-my-pi/pi-coding-agent/internal-urls"),
+		import("@oh-my-pi/pi-coding-agent/tools/path-utils"),
 	]);
 	const registryClass: unknown = root.AgentRegistry;
 	const global = typeof registryClass === "function" && "global" in registryClass ? registryClass.global : undefined;
@@ -176,6 +180,18 @@ export async function loadOmpHost(): Promise<OmpHost> {
 		tokenizeShellSegments: exportedFunction(tokenizer, "tokenizeShellSegments", "tools/shell-tokenize") as ApprovalHelpers["tokenizeShellSegments"],
 		extractLiteralAndChainSegments: exportedFunction(tokenizer, "extractLiteralAndChainSegments", "tools/shell-tokenize") as ApprovalHelpers["extractLiteralAndChainSegments"],
 		truncateForPrompt: exportedFunction(approvalModule, "truncateForPrompt", "tools/approval") as ApprovalHelpers["truncateForPrompt"],
+	};
+	const routerClass: unknown = internalUrls.InternalUrlRouter;
+	const instance = typeof routerClass === "function" && "instance" in routerClass ? routerClass.instance : undefined;
+	if (typeof instance !== "function") throw new Error("omp-unified-exec: internal-urls lacks InternalUrlRouter.instance()");
+	const router: unknown = instance.call(routerClass);
+	const canHandle = property(router, "canHandle");
+	if (typeof canHandle !== "function") throw new Error("omp-unified-exec: InternalUrlRouter lacks canHandle()");
+	const paths: CwdServices = {
+		extractLeadingCdTarget: exportedFunction(tokenizer, "extractLeadingCdTarget", "tools/shell-tokenize") as CwdServices["extractLeadingCdTarget"],
+		resolveToCwd: exportedFunction(pathUtils, "resolveToCwd", "tools/path-utils") as CwdServices["resolveToCwd"],
+		canHandleInternalUrl: (path) =>
+			expect("InternalUrlRouter.canHandle()", canHandle.call(router, path), (x): x is boolean => typeof x === "boolean"),
 	};
 	return {
 		registeredSession: (agentId) => {
@@ -205,5 +221,6 @@ export async function loadOmpHost(): Promise<OmpHost> {
 		approvalRules: (s) => getBashApprovalPatternRules(approvalPatterns(s)),
 		allowCompoundCommands: (s) => expect("bash.allowCompoundCommands", allowCompoundCommands(s), (x): x is boolean => typeof x === "boolean"),
 		approval,
+		paths,
 	};
 }
