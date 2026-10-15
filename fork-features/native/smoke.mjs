@@ -7,9 +7,10 @@
 //                                                              # the plugin loads
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
+import { resolve } from "node:path";
 
 async function loadAddon(arg) {
-	if (arg !== "--installed") return createRequire(import.meta.url)(arg);
+	if (arg !== "--installed") return createRequire(import.meta.url)(resolve(arg));
 	const { loadNativeShell } = await import("../brush/native.ts");
 	const load = loadNativeShell();
 	if (load.kind !== "loaded") throw new Error(`native shell unavailable: ${load.reason}`);
