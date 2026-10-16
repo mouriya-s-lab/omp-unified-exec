@@ -39,11 +39,19 @@ export interface ShellArgs {
 export interface ShellDetails {
 	readonly exitCode?: number;
 	readonly wallTimeMs?: number;
+	readonly timedOut?: boolean;
+	readonly timeoutSeconds?: number;
 	readonly async?: HostJobFrame;
 }
 
+interface ShellImage {
+	readonly type: "image";
+	readonly data: string;
+	readonly mimeType: string;
+}
+
 export interface ShellResult {
-	readonly content: Array<{ type: "text"; text: string }>;
+	readonly content: [{ type: "text"; text: string }, ...ShellImage[]];
 	readonly details: ShellDetails;
 	readonly isError: boolean;
 }
@@ -156,6 +164,8 @@ type PersistedDetails = {
 		| "signal"
 		| "failure_message"
 		| "wall_time_seconds"
+		| "timedOut"
+		| "timeoutSeconds"
 		| "log_path"
 		| "truncation"
 		| "escalated"
@@ -335,6 +345,56 @@ export function toShellResult(view: ResultView): ShellResult {
 	}
 }
 
+/** Validate actual image blocks at the unknown host-result boundary, preserving their identity. */
+function isShellImage(value: unknown): value is ShellImage {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		"type" in value &&
+		value.type === "image" &&
+		"data" in value &&
+		typeof value.data === "string" &&
+		"mimeType" in value &&
+		typeof value.mimeType === "string"
+	);
+}
+
+/** Host-only presentation metadata stays outside the legacy ResultView adapter contract. */
+function adaptHostShellResult(result: HostResult, isPartial: boolean): ShellResult {
+	const details =
+		typeof result.details === "object" && result.details !== null ? (result.details as PersistedDetails) : undefined;
+	const timedOut = details?.timedOut === true;
+	let view = parseResultView(result, isPartial);
+	// Brush already includes its exact timeout notice in the bounded body.
+	if (timedOut && "failure" in view && view.failure !== undefined) {
+		const failure = view.failure;
+		if (view.output.split("\n").some((line) => line === `[${failure}]` || line === `[failure: ${failure}]`)) {
+			view = { ...view, failure: undefined };
+		}
+	}
+	const shell = toShellResult(view);
+	let text = shell.content[0].text;
+	const logPath = optionalString(details?.log_path);
+	// Only Brush's real session artifact can become a native bash recovery footer.
+	// Existing minimizer footers and truncation markers already carry recovery.
+	if (logPath?.startsWith("artifact://") && logPath.length > "artifact://".length && !text.includes("artifact://")) {
+		text = withNotices(text, [`[raw output: ${logPath}]`]);
+	}
+	const images = Array.isArray(result.content) ? result.content.filter(isShellImage) : [];
+	const timeoutSeconds = optionalNumber(details?.timeoutSeconds);
+	return {
+		content: [{ type: "text", text }, ...images],
+		details: {
+			...shell.details,
+			...(timedOut ? {
+				timedOut: true,
+				...(timeoutSeconds !== undefined && timeoutSeconds > 0 ? { timeoutSeconds } : {}),
+			} : {}),
+		},
+		isError: shell.isError || timedOut,
+	};
+}
+
 // ---------------- argument model ----------------
 
 /** Pure: streamed exec_command args → bash command line. */
@@ -375,7 +435,7 @@ function delegateToShell<K extends string>(
 	adaptArgs: (args: StreamedArgs<K>, result?: HostResult) => ShellArgs,
 ): OmpToolHooks<K> {
 	const adaptResult = (result: HostResult, options: RenderOptions): ShellResult =>
-		toShellResult(parseResultView(result, options.isPartial === true));
+		adaptHostShellResult(result, options.isPartial === true);
 	return {
 		renderCall: (args, options, theme) => bash.renderCall(adaptArgs(args), options, theme),
 		renderResult: (result, options, theme, args) =>
@@ -386,7 +446,9 @@ function delegateToShell<K extends string>(
 			const view = bash.describeResult(shell, options, adaptArgs(args, result)) as { readonly tone?: unknown } | undefined;
 			// Tern derives card status from the host result's isError, which stays false for a nonzero
 			// exit (an ordinary completion for the model); the view's tone is the display-side failure signal.
-			return shell.isError && view !== undefined ? { ...view, tone: view.tone ?? "error" } : view;
+			return shell.isError && view !== undefined
+				? { ...view, tone: view.tone ?? (shell.details.timedOut === true ? "warning" : "error") }
+				: view;
 		},
 		mergeCallAndResult: bash.mergeCallAndResult,
 		inline: bash.inline,

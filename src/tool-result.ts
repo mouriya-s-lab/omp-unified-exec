@@ -12,6 +12,7 @@ import type { OnExitPolicy } from "./completion.ts";
 import { sanitizeOutputText } from "./output-safety.ts";
 import type { TerminalObservation, TerminalScreenKind, TerminalView } from "./terminal-screen.ts";
 import type { HostJobFrame } from "../fork-features/brush/jobs.ts";
+import type { ImageContent, OutputAuthority } from "../fork-features/brush/output.ts";
 
 const textDecoder = new TextDecoder("utf-8", { fatal: false });
 
@@ -30,7 +31,7 @@ export interface OutputResultDetails {
 	running: boolean;
 	chunk_id: string;
 	wall_time_seconds: number;
-	/** Bounded, terminal-inert tail sent to the model and used by the TUI renderer. */
+	/** Bounded terminal-inert body; real processes/polls use tails, Brush final results use host head/tail. */
 	output: string;
 	original_token_count?: number;
 	session_id?: number;
@@ -42,6 +43,8 @@ export interface OutputResultDetails {
 	timeoutSeconds?: number;
 	timeoutNotice?: string;
 	delivery?: "pending" | "delivered" | "terminated";
+	/** Brush's bounded final projection and its sole complete-output authority. */
+	brush_output?: { readonly authority: OutputAuthority; readonly inlineByteCap: number; readonly truncated: boolean };
 	tty?: boolean;
 	log_path?: string;
 	cwd?: string;
@@ -82,6 +85,7 @@ export interface ProcessResultDetails extends OutputResultDetails {
 	status: ProcessStatus;
 	job_id?: string;
 	async?: HostJobFrame;
+	images?: ImageContent[];
 	yield_time_ms?: number;
 	wait_mode?: "relative" | "absolute";
 	wait_status?: "completed" | "relative_deadline_reached" | "absolute_deadline_reached" | "cancelled";

@@ -105,6 +105,8 @@ function oneLine(command: string): string {
 }
 
 function terminalEntry(session: ExecSession, screen: StyledScreen): TerminalEntry {
+	const logPath = session.logPath;
+	if (logPath === undefined) throw new Error("A tty session must own a process log");
 	const state: TerminalState = session.hasExited
 		? { kind: "exited", exitCode: session.exitCode, signal: session.signal, failure: session.failureMessage }
 		: { kind: "running" };
@@ -116,7 +118,7 @@ function terminalEntry(session: ExecSession, screen: StyledScreen): TerminalEntr
 		cwd: sanitizeOutputText(session.cwd),
 		pid: session.pid,
 		startedAt: session.startedAt,
-		logPath: sanitizeOutputText(session.logPath),
+		logPath: sanitizeOutputText(logPath),
 	};
 }
 

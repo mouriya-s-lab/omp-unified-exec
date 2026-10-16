@@ -27,11 +27,11 @@ const markerEncoder = new TextEncoder();
 /**
  * Marker spliced into the collected payload at the exact position where the
  * HeadTailBuffer dropped middle bytes, so the model never mistakes
- * head+tail as contiguous output. The full stream is always in the log file.
+ * head+tail as contiguous output. The caller supplies truthful recovery information.
  */
-function omissionMarker(omittedBytes: number, retentionBytes: number): Uint8Array {
+function omissionMarker(omittedBytes: number, retentionBytes: number, recovery: string): Uint8Array {
 	return markerEncoder.encode(
-		`\n[... ${omittedBytes} bytes omitted here (output exceeded the ${retentionBytes}-byte in-memory retention between polls; the full stream is in the session log file) ...]\n`,
+		`\n[... ${omittedBytes} bytes omitted here (output exceeded the ${retentionBytes}-byte in-memory retention between polls; ${recovery}) ...]\n`,
 	);
 }
 
@@ -50,6 +50,8 @@ export interface CollectInputs {
 	externalAbort?: AbortSignal;
 	/** Override the trailing-output grace after exit (ms). */
 	postExitCloseWaitMs?: number;
+	/** Backend-specific complete-output recovery; processes retain their existing log notice. */
+	recoveryNotice?: () => string;
 }
 
 /** Pipe-session payload: drained bytes plus how many middle bytes the retention cap dropped. */
@@ -156,7 +158,8 @@ export async function collectOutputUntilDeadline(inputs: CollectInputs): Promise
 			for (const chunk of drained.head) collected.push(chunk);
 			if (drained.omittedBytes > 0) {
 				omittedTotal += drained.omittedBytes;
-				collected.push(omissionMarker(drained.omittedBytes, buffer.maxBytes));
+				collected.push(omissionMarker(drained.omittedBytes, buffer.maxBytes,
+					inputs.recoveryNotice?.() ?? "the full stream is in the session log file"));
 			}
 			for (const chunk of drained.tail) collected.push(chunk);
 

@@ -20,6 +20,8 @@ declare module "@oh-my-pi/pi-tui/theme" {
 declare module "@oh-my-pi/pi-coding-agent" {
 	export const AgentRegistry: unknown;
 	export const CRITICAL_BASH_PATTERNS: unknown;
+	export const OutputSink: unknown;
+	export const enforceInlineByteCap: unknown;
 }
 
 declare module "@oh-my-pi/pi-coding-agent/exec/non-interactive-env" {
@@ -101,6 +103,7 @@ declare module "@oh-my-pi/pi-coding-agent/session/context-settings" {
 declare module "@oh-my-pi/pi-coding-agent/tools/settings" {
 	export const cfgAsyncEnabled: unknown;
 	export const cfgToolsMaxTimeout: unknown;
+	export const cfgToolsArtifactSpillThreshold: unknown;
 }
 
 declare module "@oh-my-pi/pi-coding-agent/tools/tool-timeouts" {
@@ -110,4 +113,19 @@ declare module "@oh-my-pi/pi-coding-agent/tools/tool-timeouts" {
 
 declare module "@oh-my-pi/pi-coding-agent/async" {
 	export const resolveAutoBackgroundWaitMs: unknown;
+}
+
+declare module "@oh-my-pi/pi-coding-agent/utils/terminal-graphics" {
+	export const TerminalGraphicsDecoder: unknown;
+}
+declare module "@oh-my-pi/pi-coding-agent/tools/output-meta" {
+	export const resolveOutputSinkHeadBytes: unknown;
+	export const resolveOutputMaxColumns: unknown;
+}
+declare module "@oh-my-pi/pi-tui/tools/output-meta" {
+	export const formatArtifactErrorNotice: unknown;
+}
+
+declare module "@oh-my-pi/pi-coding-agent/session/async-job-delivery" {
+	export const ASYNC_INLINE_RESULT_MAX_CHARS: unknown;
 }

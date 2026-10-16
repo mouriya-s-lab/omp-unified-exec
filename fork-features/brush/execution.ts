@@ -29,7 +29,7 @@ export type ShellLease = { readonly kind: "persistent"; readonly key: string } |
 
 /** How an execution ended. Cancellation is the termination primitive's doing; timeouts are not. */
 export type BrushOutcome =
-	| { readonly kind: "exited"; readonly exitCode: number }
+	| { readonly kind: "exited"; readonly exitCode: number; readonly minimized?: string }
 	| { readonly kind: "timed-out"; readonly notice: string }
 	| { readonly kind: "cancelled" }
 	| { readonly kind: "failed"; readonly message: string };
@@ -330,7 +330,10 @@ export class BrushExecution {
 				}
 				if (result.cancelled) return { kind: "cancelled" };
 				if (result.exitCode === undefined) return { kind: "failed", message: "Command failed: missing exit status" };
-				return { kind: "exited", exitCode: result.exitCode };
+				const minimized = result.minimized;
+				// The streamed artifact owns the original; do not retain its native capture on the session index.
+				return { kind: "exited", exitCode: result.exitCode,
+					...(minimized && minimized.text !== minimized.originalText ? { minimized: minimized.text } : {}) };
 			},
 			(err: unknown): BrushOutcome => ({ kind: "failed", message: err instanceof Error ? err.message : String(err) }),
 		);

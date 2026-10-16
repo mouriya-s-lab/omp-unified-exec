@@ -8,8 +8,9 @@
  *   - lifecycle callbacks (onData taps, onExit fan-out)
  *
  * The engine is a real process (`SpawnedChild`: pipes or PTY) or, on omp, an
- * embedded brush shell execution (`BrushExecution`, fork-features/README.md
- * "Embedded brush shell"); output, logs and exit state are handled the same.
+ * embedded brush shell execution (`BrushExecution`, fork-features/README.md).
+ * Real processes own temporary byte logs; Brush owns its host output artifact
+ * and bounded projection. Both share incremental observations and exit state.
  *
  * Mirrors codex's `UnifiedExecProcess` in `unified_exec/process.rs`, simplified
  * to the subset we need for the pi extension.
@@ -20,10 +21,11 @@ import { closeSync, createWriteStream, openSync, type WriteStream } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import type { BrushExecution, TerminateResult } from "../fork-features/brush/execution.ts";
+import type { BrushExecution, BrushOutcome, TerminateResult } from "../fork-features/brush/execution.ts";
 import type { Delivery } from "../fork-features/brush/jobs.ts";
 import type { CommandDeadline } from "../fork-features/brush/deadline.ts";
 import type { ProcessResultDetails } from "./tool-result.ts";
+import type { BrushOutput } from "../fork-features/brush/output.ts";
 import { type CollectResult, collectOutputUntilDeadline } from "./collect.ts";
 import { HeadTailBuffer } from "./head-tail-buffer.ts";
 import { Gate, Notify } from "./notify.ts";
@@ -61,11 +63,12 @@ export interface BrushSessionOptions {
 	displayCommand: string;
 	delivery: Delivery;
 	deadline: CommandDeadline;
-	finalize: (session: ExecSession) => Promise<ProcessResultDetails>;
+	output: (observe: (bytes: Uint8Array) => void) => BrushOutput;
+	finalize: (session: ExecSession, outcome: BrushOutcome, output: BrushOutput) => Promise<ProcessResultDetails>;
 	headTailMaxBytes?: number;
 	streamTailBytes?: number;
 	/** Start the execution, forwarding its output to `onOutput`. */
-	start: (onOutput: (chunk: string) => void) => BrushExecution;
+	start: (onOutput: (chunk: string) => void, output: BrushOutput) => BrushExecution;
 }
 
 /** What a session runs: a spawned process (pipes or PTY) or an embedded brush execution. */
@@ -110,8 +113,15 @@ export class ExecSession {
 	readonly cwd: string;
 	readonly startedAt: number;
 	readonly pid: number | undefined;
-	/** Path to a log file that receives the full stdout+stderr stream. */
-	readonly logPath: string;
+	/** Backend-owned complete output; Brush may explicitly have no complete archive. */
+	private archive!: { readonly kind: "process"; readonly path: string } |
+		{ readonly kind: "brush"; readonly output: BrushOutput };
+	get logPath(): string | undefined {
+		switch (this.archive.kind) {
+			case "process": return this.archive.path;
+			case "brush": return this.archive.output.logPath;
+		}
+	}
 	private logStream: WriteStream | undefined;
 	readonly delivery: Delivery;
 	readonly deadline: CommandDeadline;
@@ -171,11 +181,11 @@ export class ExecSession {
 		this.outputBuffer = new HeadTailBuffer(opts.headTailMaxBytes ?? DEFAULT_HEAD_TAIL_MAX_BYTES);
 		this.streamTailCap = opts.streamTailBytes ?? DEFAULT_STREAM_TAIL_BYTES;
 		this.pid = undefined; // set in `start`
-		this.logPath = join(tmpdir(), `pi-unified-exec-${id}-${randomBytes(4).toString("hex")}.log`);
 	}
 
 	static spawn(id: number, opts: SessionSpawnOptions): ExecSession {
 		const self = new ExecSession(id, { ...opts, displayCommand: opts.displayCommand ?? opts.command.join(" ") });
+		self.archive = { kind: "process", path: join(tmpdir(), `pi-unified-exec-${id}-${randomBytes(4).toString("hex")}.log`) };
 		if (!self.openLog()) return self;
 
 		const cols = opts.cols ?? DEFAULT_PTY_COLS;
@@ -221,23 +231,22 @@ export class ExecSession {
 	 */
 	static brush(id: number, opts: BrushSessionOptions): ExecSession {
 		const self = new ExecSession(id, { ...opts, command: [opts.displayCommand], tty: false });
-		if (!self.openLog()) return self;
-		const encoder = new TextEncoder();
+		const output = opts.output((bytes) => self.receive(bytes));
+		self.archive = { kind: "brush", output };
 		let execution: BrushExecution;
 		try {
-			execution = opts.start((chunk) => self.receive(encoder.encode(chunk)));
+			execution = opts.start((chunk) => output.push(chunk), output);
 		} catch (err) {
 			self.markFailure(err instanceof Error ? err.message : String(err));
-			self.logStream?.end();
-			self.logStream = undefined;
+			void output.dispose();
 			self.exitedAc.abort();
 			self.outputClosed.close();
 			return self;
 		}
-		const finalResult = execution.outcome.then(async () : Promise<BrushFinal> => {
+		const finalResult = execution.outcome.then(async (outcome) : Promise<BrushFinal> => {
 			await self.outputClosed.closed();
 			if (execution.terminated || self.delivery.kind === "host-job" && self.delivery.signal.aborted) return { kind: "terminated" };
-			return { kind: "result", details: await opts.finalize(self) };
+			return { kind: "result", details: await opts.finalize(self, outcome, output) };
 		});
 		self.engine = { kind: "brush", execution, finalResult };
 		void execution.outcome.then((outcome) => {
@@ -265,6 +274,10 @@ export class ExecSession {
 
 	get brushFinal(): Promise<BrushFinal> | undefined {
 		return this.engine?.kind === "brush" ? this.engine.finalResult : undefined;
+	}
+
+	get brushOutput(): BrushOutput | undefined {
+		return this.archive.kind === "brush" ? this.archive.output : undefined;
 	}
 
 	get timedOut(): boolean { return this.completion.kind === "timed-out"; }
@@ -309,9 +322,11 @@ export class ExecSession {
 	 * is then already failed and exited.
 	 */
 	private openLog(): boolean {
+		if (this.archive.kind !== "process") throw new Error("Brush output must not create a process log");
+		const path = this.archive.path;
 		try {
-			closeSync(openSync(this.logPath, "w"));
-			this.logStream = createWriteStream(this.logPath, { flags: "a" });
+			closeSync(openSync(path, "w"));
+			this.logStream = createWriteStream(path, { flags: "a" });
 			this.logStream.on("error", (err) => {
 				// Log-stream error (disk full, permissions, etc.). The child is
 				// still running: record the failure and stop mirroring writes, but
@@ -322,7 +337,7 @@ export class ExecSession {
 			});
 			return true;
 		} catch (err: any) {
-			this.markFailure(`failed to open log file ${this.logPath}: ${err?.message ?? err}`);
+			this.markFailure(`failed to open log file ${path}: ${err?.message ?? err}`);
 			this.exitedAc.abort();
 			this.outputClosed.close();
 			return false;
@@ -369,6 +384,15 @@ export class ExecSession {
 		// output gate. The tick lets any pending data-handler chunks land
 		// in the buffer+log before we declare the session fully done.
 		setImmediate(() => {
+			if (this.archive.kind === "brush") {
+				void this.archive.output.close(this.wasTerminated).catch((error: unknown) => {
+					this.recordFailure(`output finalization failed: ${error instanceof Error ? error.message : String(error)}`);
+				}).finally(() => {
+					this.outputClosed.close();
+					this.outputNotify.notifyAll();
+				});
+				return;
+			}
 			this.outputNotify.notifyAll();
 			const stream = this.logStream;
 			this.logStream = undefined;
@@ -496,6 +520,9 @@ export class ExecSession {
 			deadlineMs: opts.deadlineMs,
 			externalAbort: opts.externalAbort,
 			postExitCloseWaitMs: opts.postExitCloseWaitMs,
+			recoveryNotice: this.archive.kind === "brush"
+				? () => this.logPath ? `complete output: ${this.logPath}` : "complete output is not saved"
+				: undefined,
 		});
 		if (!this.screen) return drained;
 		return { kind: "screen", observation: await this.screen.observe() };
@@ -616,7 +643,7 @@ export class ExecSession {
 	}
 
 	get totalBytesSeen(): number {
-		return this.totalOutputBytes;
+		return this.archive?.kind === "brush" ? this.archive.output.totalBytes : this.totalOutputBytes;
 	}
 
 	get lastUsed(): number {

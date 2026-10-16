@@ -77,7 +77,7 @@ interface SessionListItem {
 	signal?: string;
 	failure_message?: string;
 	output_bytes_total: number;
-	log_path: string;
+	log_path?: string;
 }
 
 interface ListSessionsDetails {
@@ -476,7 +476,7 @@ export function renderListSessionsResult(
 					const command = safeOneLine(session.command, 100);
 					const line = `#${session.session_id} pid=${session.pid ?? "?"} ${session.tty ? "tty" : "pipe"} ${(session.elapsed_ms / 1000).toFixed(1)}s ${state}${wake} ${command}`;
 					lines.push(truncateToWidth(line, width, "..."));
-					if (options.expanded) {
+					if (options.expanded && session.log_path) {
 						lines.push(
 							truncateToWidth(theme.fg("muted", `  log: ${safeOneLine(tildify(session.log_path))}`), width, "..."),
 						);

@@ -19,10 +19,12 @@ expandable was not true for every tool.
 
 The initiative establishes a durable output contract across these layers:
 
-1. **Capture:** the child stream is mirrored to its session log.
-2. **Model/session result:** every output-bearing result is a bounded,
-   terminal-inert plain-text tail with explicit truncation/omission metadata and
-   a recovery path.
+1. **Capture:** real processes mirror their byte stream to a session log. omp
+   Brush preserves its complete native UTF-8 text in one session artifact when
+   available; otherwise it explicitly provides only a bounded inline projection.
+2. **Model/session result:** output text is bounded and terminal-inert, with
+   explicit omission and recovery information. Brush final results may also
+   contain terminal images extracted by the host decoder.
 3. **TUI:** the bounded result is collapsed to five visual lines by default and
    expands through Pi's configured `app.tools.expand` binding.
 4. **Scripts (0.12.0):** Pi codemode scripts receive `structuredContent`
@@ -80,14 +82,14 @@ The initiative establishes a durable output contract across these layers:
   metadata scans/headers that sit outside the output body.
 - Keep the full retained stream out of result details; `details.output` is the
   canonical bounded body for exec, write, and kill.
-- Strip ANSI/VT sequences and unsafe C0/C1 controls before child text reaches
-  model content, persisted details, partial updates, or custom renderers. Pipe
-  text is stripped directly; tty bytes are first interpreted by the session's
-  terminal emulator and only its rendered plain text (sanitized again) leaves
-  it. Keep exact raw bytes only in the session log and sanitize again while
-  rendering legacy/fallback details. The one styled projection, the Tern HUD
-  screen, is re-encoded from the emulator's cell attributes as SGR only; no
-  child byte reaches it.
+- Strip ANSI/VT sequences and unsafe C0/C1 controls before text reaches model
+  content, persisted details, partial updates, or custom renderers. Pipe text is
+  stripped directly; tty bytes are interpreted by the session emulator before
+  their rendered plain text leaves it. Brush graphics are extracted before its
+  host sink sanitizes text. Real-process raw bytes stay only in their log;
+  Brush's pre-projection native text stays only in its artifact. The styled
+  Tern HUD projection is re-encoded from emulator cell attributes as SGR; no
+  child control sequence reaches it. Legacy/fallback text is sanitized again.
 - tty observations are consuming and serialized per session; a cancelled empty
   poll does not observe. Streaming snapshots and HUD screens never consume. The
   emulator is read only after every written chunk is parsed (HUD screens may lag
@@ -116,8 +118,9 @@ The initiative establishes a durable output contract across these layers:
   sessions, and the HUD keeps no copy of session or screen state.
 - Count collapsed child output in visual lines after terminal wrapping.
 - Keep truncation and log-recovery warnings visible while collapsed.
-- Do not synchronously load an arbitrary log file when expanded. Expanded mode
-  shows the complete bounded result; `log_path` owns complete-stream recovery.
+- Do not synchronously load an arbitrary log or artifact when expanded.
+  Expanded mode shows the bounded result; `log_path` names complete-stream
+  recovery only when capture succeeded.
 - Preserve native codemode definition fields/schema by reference, inactive
   default, settings/loadout, MCP auto-activation, model helpers and store/load.
 - Unwrap cached native components before calling the original renderer; Pi
@@ -139,7 +142,7 @@ The initiative establishes a durable output contract across these layers:
 | Make result text terminal-inert; preserve raw logs | PTY output can contain clipboard, alternate-screen, keyboard-mode, and cursor controls. Models need text, not executable terminal state; forensic bytes remain recoverable by path. |
 | Project script results from details, not a second serializer | `structuredContent` inherits the bounds and terminal safety of `details.output`; metadata strings reuse `safeMeta`. Model `content` stays byte-identical. |
 | Require Pi 0.99.1 for 0.12.0 | `outputSchema`/`structuredContent` do not exist in earlier Pi types. Older Pi users stay on 0.11.x. |
-| Keep complete logs for now | Archive bounding/retention is a separate policy change and remains follow-up work. |
+| Keep complete process logs and available Brush artifacts | Archive quotas and retention are separate policies; bounded inline projections never imply bounded disk usage. |
 | Bundle the native codemode display fix by default in 0.12.1 | Owner requested the fix here, not a separate package. It applies globally to nested tools while unified-exec is loaded; no Pi core patch or executor fork. |
 | Register codemode at session start in 0.12.2 | Load-time registration made Pi skip `builtin:codemode` and warn every package user. Session-start registration is Pi's documented dynamic-tool pattern; load order keeps this definition first, the built-in stays as fallback, and precedence is checked at runtime. |
 | Wrap the public factory via a receiver-bound API proxy | Keep native execution/schema/loadout/persistence and method receivers intact; intercept only tool registration and result rendering. |
@@ -148,7 +151,7 @@ The initiative establishes a durable output contract across these layers:
 | Present on omp through omp's exported bash renderer | omp's `toolRenderers.bash` (`@oh-my-pi/pi-tui/tools`) already owns collapse, expansion, exit/background status and both ANSI and Tern views; reimplementing them on omp's native view primitives would couple deeper. Only a pure display adapter is plugin code. omp is identified by its injected `ExtensionAPI.arktype`; on omp a missing or reshaped bash renderer fails plugin loading instead of silently re-registering Pi renderers. Pi activation stays synchronous and unchanged. |
 | Show write/kill actions as bash comments | `# poll session N`, `# stdin → session N: "…"`, `# kill session N (SIGTERM)` name the action without presenting input bytes as an executable command; base64 input shows only its byte count. |
 | Append the truncation marker to the omp display text | The marker and `log_path` live outside `details.output`; appending `truncationMarker()` keeps recovery visible as the last collapsed line without claiming the log is an omp artifact. |
-| Mark omp Tern failures with view tone, not result `isError` | Tern derives card status from the host result's `isError`, which stays false for a nonzero exit because that is an ordinary completion for the model. The describe view sets `tone: "error"` for failed exits, signals, start failures and failed or unknown kills; the exit chip comes from omp's bash head. |
+| Distinguish process completion from Brush failure classification | Existing real-process nonzero exits retain their model semantics. Brush nonzero exits and timeouts are error results; timeout metadata reaches omp's warning presentation rather than ordinary failure red. |
 | Render tty output through `@xterm/headless` | Proven identical under Node, Bun and a `bun build --compile` binary, with no DOM, assets or native code. Rejected: Codex's `TERM=dumb`/`NO_COLOR`/`PAGER=cat` mitigation (openai/codex `core/src/unified_exec/process_manager.rs:94-104`), which cannot stop programs that force redraws ([openai/codex#32325](https://github.com/openai/codex/issues/32325)). |
 | tty result = unseen history + full current screen + cursor | A self-contained screen matches what a human sees and does not ask the model to splice earlier results. Rejected: a first-changed-row delta, which leaves full-screen redraws without context. Lines scrolled off since the last observation that equal the previous screen's rows at the same position were already reported and are skipped; an unchanged screen reports `screen_changed: false`. Results represent only plain text and the cursor (owner's choice); styling stays in the log and, on Tern, in the HUD. |
 | Align history with an xterm marker on the observed screen's top row | Each observation registers a marker at the screen's top row; the next observation's history starts there, so positional comparison with the previous screen is exact. The marker follows the row as it scrolls and is disposed when the row is trimmed from the history, so the emulator keeps its history for the HUD. Rejected: erasing the emulator's scrollback (ED3) after each observation, which left the HUD screen nothing to scroll back through; counting scroll events into absolute line numbers, which leaving the alternate screen, DECSTBM regions, ED3 and RIS all break. |
@@ -165,6 +168,97 @@ The initiative establishes a durable output contract across these layers:
 | Mount only while native and a tty session exists | omp's `isNativeRendering`/`onNativeRenderingChange` (`@oh-my-pi/pi-tui/native/state`) gate the widget, so the ANSI TUI never gets the widget container's spacer row. Store membership and native changes re-evaluate the gate; a missing module fails omp plugin loading before anything registers, like the bash renderer. |
 | Watch screens only while the sheet or page is open | The pill re-describes on store membership only; the open sheet or page watches every listed session's exit (its dot or state) and only the shown session's parsed-output notifications, and each re-description reads the current screens, so a closed HUD costs nothing per chunk. |
 
+## Brush output ownership
+
+This contract applies only to omp Brush. PipeProcess and PtyProcess retain their
+existing logs, terminal observations, limits and recovery behavior. The output
+contract is tracked in [issue 35](https://github.com/oh-my-omp/omp-unified-exec/issues/35).
+
+The native bridge delivers Unicode strings, not arbitrary subprocess bytes.
+An original Brush transcript means the exact UTF-8 encoding of those strings,
+before graphics extraction, control stripping, carriage-return normalization,
+column limits, minimization or truncation. Invalid UTF-8 lost before that native
+boundary cannot be recovered by this plugin.
+
+The execution captures its actual caller's artifact allocator. After successful
+environment preparation and before native launch, that allocator reserves one
+path and id. Small and zero-output commands also create their session artifact.
+Brush never creates an `os.tmpdir()` process log or a second `bash-original`
+artifact. The artifact has no disk cap because it promises the complete native
+transcript; the host's bounded sink is a derived inline view, not another archive.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Preparing
+    Preparing --> Writing: Caller allocates and opens artifact
+    Preparing --> InlineOnly: Artifact unavailable
+    Writing --> ArtifactBacked: Native stream ends and close succeeds
+    Writing --> InlineOnly: Artifact open, write or close fails
+    Writing --> Cancelled: Execution is terminated
+    Preparing --> Cancelled: Preparation is terminated
+    InlineOnly --> Cancelled: Execution is terminated
+    ArtifactBacked --> Final: One bounded final projection
+    InlineOnly --> Final: Unminimized bounded projection and capture notice
+    Cancelled --> [*]: Close resources without a deliverable final result
+    Final --> [*]
+```
+
+Every accepted native chunk reaches the transcript before the decoder and sink.
+Artifact writes preserve order and backpressure the existing bounded native
+bridge; the plugin does not enqueue a second unbounded stream. One decoder
+spans chunk boundaries and finishes before output closure. The sink's sanitized
+incremental chunks feed the existing consuming observation buffer. Polling
+never reads the sink's cumulative preview or modifies the artifact.
+
+Only successful transcript closure permits native minimizer text to replace the
+inline view. The replacement references the same original artifact, not the
+native minimizer's separate original-text copy. Decoded images accompany the
+one final result and its HostJob final progress report. Polls remain incremental
+text and never replay that final body or its images.
+
+Inline-only output never claims recovery or applies a lossy minimizer replacement.
+An unavailable artifact produces an explicit unsaved-output notice without
+failing the command. Failed artifact I/O uses the host's
+`formatArtifactErrorNotice`; it stops further writes, but observation, decoding
+and command execution continue. The command's exit/deadline still determines
+error classification. The plugin closes but does not unlink a partial allocation
+and never advertises its URL as complete. The host has no abandon/incomplete
+state or automatic cleanup guarantee; directory scans or a caller holding its
+id may still find that unadvertised partial file. A cancelled run likewise has no
+deliverable final result or complete-archive link.
+
+Output closure precedes final construction. The final body uses the host sink's
+head/tail selection, not the old process tail-only envelope. The complete text
+envelope, including headers, is capped against the configured host spill budget.
+Brush kill results use that cap too; the old process body cap alone cannot stop
+the outer extension wrapper from archiving a reduced kill tail.
+
+HostJobs have a second host delivery boundary:
+`ASYNC_INLINE_RESULT_MAX_CHARS`. The plugin imports that limit and conservatively
+uses the lesser of its character limit and the configured byte budget for the
+one HostJob final, whether returned in the foreground or delivered later.
+The complete envelope cannot exceed the shared character threshold. This is an
+intentional smaller HostJob inline budget: it prevents the host from saving an
+already-reduced result as another “Full output” artifact. The plugin does not
+invent truncation/column metadata or artifact errors just to carry an archive id.
+Coordinator output keeps the configured budget.
+
+Late chunks after the execution's output-close anchor are ignored, as in the
+host executor; retained ordinary `&` jobs do not reopen the finished archive.
+
+The final result is independent of the observation cursor and is built once.
+Foreground completion and HostJob follow-up use that result; terminal polling
+uses only new cursor content plus classification and a successful archive link.
+Compiled omp 18.11.1 qualification on macOS arm64 recovered the 1,288,895-byte
+sequence transcript exactly through its session artifact, returned foreground
+and background PNG content, and distinguished timeout warning from exit-3 error
+on the actual ANSI surface. A real first-write EBADF left one zero-byte partial
+allocation, returned unminimized output and the host capture notice once, and
+advertised no recovery link. Fresh 1 KiB/50 KiB runs preserved giant-line suffixes
+and concurrent observation ownership without creating a second preview artifact.
+These observations qualify the native UTF-8 boundary above, not arbitrary bytes,
+Windows output behavior or native Tern background-card retention.
+
 ## Implementation map
 
 | Area | Location |
@@ -173,6 +267,8 @@ The initiative establishes a durable output contract across these layers:
 | tty terminal emulator, observations, snapshots, styled screens, parse notifications | `src/terminal-screen.ts`, owned by `ExecSession` (`src/session.ts`); released by `src/session-store.ts`; tests `tests/terminal-screen.test.ts` |
 | Session membership notifications | `SessionStore.subscribe` in `src/session-store.ts` |
 | Shared output envelope, truncation, process/kill text | `src/tool-result.ts` |
+| Brush native transcript, bounded host sink, graphics and output authority | `fork-features/brush/output.ts`, `output-host.ts`; lifecycle in `src/session.ts` |
+| Brush one-time final projection and complete-envelope cap | `fork-features/brush/result.ts`; foreground and HostJob delivery in `src/index.ts` |
 | Codemode script schemas and projections | `src/script-result.ts`, `tests/script-result.test.ts` |
 | Kill collection, partial sanitization, and tool registration | `src/index.ts` (`TerminateOutcome`, `buildStreamUpdate`, `kill_session`) |
 | Explicit Pi renderers and shared five-line preview | `src/render.ts` |
@@ -470,8 +566,9 @@ app.tools.expand again: five-line tail restored
 
 ### Output archive safety
 
-The current session log is complete but unbounded and relies on OS `/tmp`
-cleanup. A separate initiative should decide and test:
+Process logs and available Brush transcripts are complete but unbounded. Process
+logs rely on OS temporary-directory cleanup; Brush artifacts follow the host
+session's artifact lifecycle. A separate initiative should decide and test:
 
 - a configurable per-session archive cap with explicit unlimited opt-in;
 - `log_status: complete | partial | unavailable`, bytes written, and bounded
@@ -502,9 +599,9 @@ existing backlogs; they do not weaken this output contract.
 ## Non-goals
 
 - No async full-log viewer in a tool row.
-- No child ANSI styling in model/result text or in Pi/omp tool rows; the raw
-  log is the recovery surface. The Tern HUD shows colors re-encoded from the
-  emulator, never the child's bytes.
+- No child ANSI styling in text model/results or Pi/omp tool rows. Logs and
+  successful Brush artifacts are recovery surfaces; Brush may return extracted
+  terminal images. The Tern HUD re-encodes colors from the emulator.
 - No input from the Tern HUD to sessions beyond the terminal page's typed keys
   and Kill; neither is model-visible except through the session's own output
   and exit.
