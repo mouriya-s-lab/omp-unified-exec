@@ -35,6 +35,11 @@ import { BrushExecution, BrushShells, persistentLease } from "../fork-features/b
 import { createExecPlan, resolveExecutionPlan, rewriteWorktreePlan } from "../fork-features/brush/plan.ts";
 import type { ExecPlan } from "../fork-features/brush/plan.ts";
 import { resolveUrlCwd } from "../fork-features/brush/url-filesystem.ts";
+import { commandDeadline } from "../fork-features/brush/deadline.ts";
+import type { CommandDeadline } from "../fork-features/brush/deadline.ts";
+import { hostJobManager, registerHostJob, terminalDelivery } from "../fork-features/brush/jobs.ts";
+import type { Delivery, TerminalDelivery } from "../fork-features/brush/jobs.ts";
+import { deadlineDetails, finalizeBrushSession, finalizeSessionResult } from "../fork-features/brush/result.ts";
 import type { EngineHost, EngineSelection, EngineVariant, HostRuntime } from "../fork-features/brush/runtime.ts";
 import { type ActivatedExtension, withHostPresentation } from "../fork-features/omp-presentation.ts";
 import { type CollectResult, NO_OUTPUT } from "./collect.ts";
@@ -209,7 +214,7 @@ function selectEngine(engine: EngineHost, args: ExecCommandArgs): EngineSelectio
 }
 
 /** Typed tool error: the model sees `<code>: <detail>`. */
-function execError(code: "host_binding_unavailable" | "native_shell_unavailable" | "session_not_running", detail: string): Error {
+function execError(code: "host_binding_unavailable" | "native_shell_unavailable" | "session_not_running" | "async_requires_brush" | "on_exit_requires_coordinator", detail: string): Error {
 	return new Error(`${code}: ${detail}`);
 }
 
@@ -222,6 +227,8 @@ type ExecCommandArgs = {
 	rows?: number;
 	yield_time_ms?: number;
 	on_exit?: OnExitPolicy;
+	timeout?: number;
+	async?: boolean;
 };
 
 type WriteStdinArgs = {
@@ -281,7 +288,7 @@ function heldOpenNote(session: ExecSession): string | undefined {
  */
 function spawnProcessSession(
 	ctx: ExtensionCtx, id: number, args: ExecCommandArgs, plan: ExecPlan,
-	variant: Extract<EngineVariant, { readonly kind: "pipe-process" | "pty-process" }>,
+	variant: Extract<EngineVariant, { readonly kind: "pipe-process" | "pty-process" }>, deadline: CommandDeadline,
 ): ExecSession {
 	const selection = variant.host === "omp" ? variant.shell : selectProcessShell(args.shell);
 	const shellBin = processShellPath(selection);
@@ -317,6 +324,7 @@ function spawnProcessSession(
 		displayCommand: plan.command,
 		shell: shellBin,
 		windowsVerbatimArguments: shellCommand.windowsVerbatimArguments,
+		deadline,
 		appearance: ctx.appearance,
 	});
 }
@@ -327,43 +335,247 @@ function spawnProcessSession(
  * non-interactive env, Git Guard), on the session's persistent shell when the
  * host would run it directly (#27 C2).
  */
-async function startBrushSession(
+function createBrushSession(
 	ctx: ExtensionCtx,
 	variant: Extract<EngineVariant, { kind: "brush" }>,
 	id: number,
 	plan: ExecPlan,
 	sessionId: string,
-	signal: AbortSignal | undefined,
-): Promise<ExecSession> {
+	delivery: Delivery,
+	deadline: CommandDeadline,
+	autoBackground: boolean,
+	asyncRequested: boolean,
+): ExecSession {
 	const { engine, binding } = variant;
 	const settings = binding.session.settings;
 	if (engine.native.kind === "unavailable") {
 		throw execError("native_shell_unavailable", `the embedded shell's native addon could not be loaded (${engine.native.reason})`);
 	}
 	const native = engine.native.module;
-	const launch = await planBrushRun(engine.services, settings, sessionId, plan.command, plan.cwd, signal);
-	if (ctx.shuttingDown) throw new Error("unified-exec: session is shutting down; not starting new commands.");
 	engine.shells ??= new BrushShells(native);
 	const shells = engine.shells;
 	shells.retireOtherSessions(sessionId);
 	return ExecSession.brush(id, {
 		cwd: plan.cwd,
 		displayCommand: plan.command,
+		delivery,
+		deadline,
+		finalize: finalizeBrushSession,
 		start: (onOutput) =>
-			BrushExecution.start({
+			BrushExecution.create({
 				shells,
 				native,
-				key: launch.key,
-				shellOptions: launch.shellOptions,
-				persistent: persistentLease({ kind: "coordinator" }),
-				command: launch.command,
-				cwd: plan.cwd,
-				env: launch.env,
-				timeoutMs: undefined,
+				persistent: persistentLease(delivery, autoBackground, asyncRequested),
+				prepare: async (signal) => {
+					const launch = await planBrushRun(engine.services, settings, sessionId, plan.command, plan.cwd, signal);
+					signal.throwIfAborted();
+					if (ctx.shuttingDown) throw new Error("unified-exec: session is shutting down; not starting new commands.");
+					return { ...launch, cwd: plan.cwd };
+				},
+				timeoutMs: deadline.kind === "deadline" ? deadline.milliseconds : undefined,
 				filesystem: (signal) => variant.filesystem(signal).nativeFilesystem(),
 				onOutput,
 			}),
 	});
+}
+
+/** Serial, output-driven host progress; it owns no output cursor or delivery state. */
+async function reportHostProgress(
+	session: ExecSession, delivery: Extract<Delivery, { kind: "host-job" }>,
+	onUpdate: AgentToolUpdateCallback<ProcessUpdateDetails> | undefined,
+): Promise<void> {
+	const closed = session.outputClosed.closed();
+	let reportedBytes = -1;
+	while (!session.outputClosed.isClosed && !delivery.signal.aborted) {
+		const next = session.outputNotify.notified();
+		if (reportedBytes !== session.totalBytesSeen) {
+			reportedBytes = session.totalBytesSeen;
+			const frame = { state: "running" as const, jobId: delivery.jobId, type: "bash" as const };
+			const foreground = delivery.manager.getJob(delivery.jobId)?.foreground === true;
+			const update = buildStreamUpdate(session, foreground ? undefined : { job_id: delivery.jobId, async: frame });
+			await delivery.reportProgress(update.details.output, { ...update.details, async: frame });
+			onUpdate?.(update);
+		}
+		if (session.outputClosed.isClosed || delivery.signal.aborted) return;
+		await Promise.race([next, closed]);
+		if (!session.outputClosed.isClosed && !delivery.signal.aborted) await sleep(200, delivery.signal);
+	}
+}
+
+/** Resolve the manager's sole run relay; never await its own job promise here. */
+async function finishHostJob(
+	session: ExecSession, delivery: Extract<Delivery, { kind: "host-job" }>,
+	onUpdate: AgentToolUpdateCallback<ProcessUpdateDetails> | undefined,
+): Promise<void> {
+	const progress = reportHostProgress(session, delivery, onUpdate);
+	void progress.catch(() => undefined);
+	try {
+		const final = await session.brushFinal;
+		await progress;
+		if (!final || final.kind === "terminated" || delivery.signal.aborted) throw new Error("The command was terminated.");
+		// The command remains in final details/process metadata, not a second copy in the delivered body.
+		const text = renderProcessResultText(final.details);
+		const failed = Boolean(final.details.timedOut || final.details.failure_message || final.details.exit_code !== 0);
+		const frame = { state: failed ? "failed" as const : "completed" as const, jobId: delivery.jobId, type: "bash" as const };
+		await delivery.reportProgress(text, {
+			...final.details, async: frame,
+			...(final.details.exit_code !== undefined ? { exitCode: final.details.exit_code } : {}),
+		});
+		if (delivery.manager.getJob(delivery.jobId)?.foreground !== true) onUpdate?.({
+			content: [{ type: "text", text }],
+			details: { ...final.details, job_id: delivery.jobId, async: frame, output: text },
+		});
+		if (failed) throw new Error(text);
+		delivery.resolve(text);
+	} catch (error) { delivery.reject(error); }
+}
+
+type BrushWait = { readonly kind: "until-exit" } | { readonly kind: "finite"; readonly milliseconds: number };
+
+async function waitForBrush(session: ExecSession, wait: BrushWait, signal: AbortSignal | undefined): Promise<LongWaitOutcome> {
+	if (wait.kind === "finite") return waitForExitOrDeadline({ exited: session.exited, externalAbort: signal, durationMs: wait.milliseconds });
+	if (session.hasExited) return "exit";
+	if (signal?.aborted) return "cancelled";
+	const done = Promise.withResolvers<LongWaitOutcome>();
+	const onAbort = () => done.resolve("cancelled");
+	const onExit = () => done.resolve("exit");
+	signal?.addEventListener("abort", onAbort, { once: true });
+	session.exited.addEventListener("abort", onExit, { once: true });
+	try {
+		if (session.hasExited) return "exit";
+		if (signal?.aborted) return "cancelled";
+		return await done.promise;
+	} finally {
+		signal?.removeEventListener("abort", onAbort);
+		session.exited.removeEventListener("abort", onExit);
+	}
+}
+
+async function hostTerminalTail(session: ExecSession): Promise<{ collected: CollectResult; delivery: TerminalDelivery }> {
+	const delivery = session.delivery;
+	if (delivery.kind !== "host-job") throw new Error("Host terminal observation requires a HostJob");
+	await delivery.jobPromise;
+	await session.outputClosed.closed();
+	const state = terminalDelivery(delivery, session.wasTerminated);
+	if (state === "pending") delivery.manager.consumeJobResults([delivery.jobId]);
+	return {
+		delivery: state,
+		collected: state === "delivered" ? NO_OUTPUT : await session.collect({ deadlineMs: Date.now() + 100 }),
+	};
+}
+
+async function observeHostTerminal(
+	ctx: ExtensionCtx, session: ExecSession, operation: "exec_command" | "write_stdin",
+	wallTimeSec: number, extra: Partial<ProcessResultDetails> = {}, failure?: string,
+): Promise<ResponseShape> {
+	const observed = await hostTerminalTail(session);
+	removeSession(ctx, session.id);
+	return finalizeSessionResult(session, {
+		operation, wallTimeSec, collected: observed.collected, totalBytes: session.totalBytesSeen,
+		sessionId: undefined, exitCode: session.exitCode, signal: session.signal,
+		failure: observed.delivery === "terminated" ? "The command was terminated." : failure ?? session.failureMessage,
+		tty: false, logPath: session.logPath, cwd: session.cwd, command: session.displayCommand,
+		extra: { ...extra, delivery: observed.delivery, ...(session.delivery.kind === "host-job" ? { job_id: session.delivery.jobId } : {}) },
+	});
+}
+
+async function runBrushCommand(
+	ctx: ExtensionCtx, variant: Extract<EngineVariant, { kind: "brush" }>, plan: ExecPlan,
+	args: ExecCommandArgs, signal: AbortSignal | undefined,
+	onUpdate: AgentToolUpdateCallback<ProcessUpdateDetails> | undefined, sessionId: string, deadline: CommandDeadline,
+): Promise<ResponseShape> {
+	const manager = hostJobManager(variant.binding.session.asyncJobManager);
+	const services = variant.engine.services;
+	const autoBackground = services.autoBackgroundEnabled(variant.binding.session.settings);
+	let session: ExecSession | undefined;
+	let delivery: Delivery = { kind: "coordinator" };
+	if (manager && (!manager.atCapacity || args.async === true)) {
+		if (args.on_exit === "wake" && !manager.atCapacity) {
+			throw execError("on_exit_requires_coordinator", 'HostJob commands deliver through the host; on_exit: "wake" is unavailable.');
+		}
+		try {
+			delivery = registerHostJob(manager, variant.binding.agentId, plan.command, plan.cwd, () => session?.brushPids() ?? []);
+		} catch (error) {
+			if (args.async === true || !(error instanceof Error) || !error.message.startsWith("Background job limit reached")) throw error;
+		}
+	} else if (args.async === true) {
+		throw new Error("Async job manager unavailable for this session.");
+	}
+	const id = ctx.store.allocateId();
+	try {
+		session = createBrushSession(ctx, variant, id, plan, sessionId, delivery, deadline, autoBackground, args.async === true);
+		if (session.failureMessage) throw new Error(session.failureMessage);
+		const active = session;
+		if (delivery.kind === "host-job") {
+			const job = delivery;
+			const abort = () => active.terminateBrush();
+			job.signal.addEventListener("abort", abort, { once: true });
+			if (job.signal.aborted) abort();
+			void job.jobPromise.then(() => job.signal.removeEventListener("abort", abort));
+		}
+		const { pruned, count } = ctx.store.insert(active);
+		watchSessionExit(ctx, active);
+		if (pruned) {
+			unwatchSessionExit(ctx, pruned.id);
+			if (pruned.delivery.kind === "coordinator") ctx.coordinator.handleEviction(pruned);
+			ctx.ui?.notify(`unified-exec: evicted session ${pruned.id} (LRU, over cap ${ctx.store.maxSessions})`, "warning");
+		}
+		if (count >= WARNING_SESSIONS) ctx.ui?.notify(`unified-exec: ${count}/${ctx.store.maxSessions} sessions open`, "warning");
+		if (delivery.kind === "host-job") void finishHostJob(active, delivery, onUpdate);
+		active.beginBrush();
+		const startedAt = performance.now();
+		const wait: BrushWait = args.async === true ? { kind: "finite", milliseconds: 0 }
+			: args.yield_time_ms !== undefined ? { kind: "finite", milliseconds: clampYield(args.yield_time_ms, DEFAULT_EXEC_YIELD_MS) }
+			: delivery.kind === "host-job" && autoBackground ? {
+				kind: "finite", milliseconds: services.autoBackgroundWaitMs(
+					Math.floor(services.autoBackgroundThresholdMs(variant.binding.session.settings)),
+					deadline.kind === "deadline" ? deadline.milliseconds : undefined),
+			} : { kind: "until-exit" };
+		const stream = onUpdate && delivery.kind === "coordinator" ? startRateLimitedStream({
+			outputNotify: active.outputNotify, minIntervalMs: OUTPUT_POLL_INTERVAL_MS,
+			emit: () => onUpdate(buildStreamUpdate(active)),
+		}) : undefined;
+		try {
+			await waitForBrush(active, wait, signal);
+			const wallTimeSec = (performance.now() - startedAt) / 1000;
+			if (active.hasExited) {
+				if (delivery.kind === "host-job") {
+					delivery.manager.releaseForegroundJob(delivery.jobId);
+					if (active.wasTerminated) return observeHostTerminal(ctx, active, "exec_command", wallTimeSec);
+				}
+				const final = await active.brushFinal;
+				removeSession(ctx, active.id);
+				if (!final || final.kind === "terminated") {
+					return finalizeSessionResult(active, {
+						operation: "exec_command", wallTimeSec, collected: await active.collect({ deadlineMs: Date.now() + 100 }),
+						sessionId: undefined, exitCode: active.exitCode, signal: active.signal, failure: "The command was terminated.",
+						tty: false, logPath: active.logPath, cwd: active.cwd, command: active.displayCommand,
+					});
+				}
+				return final.details;
+			}
+			if (delivery.kind === "host-job") delivery.manager.backgroundJob(delivery.jobId);
+			else if (args.on_exit === "wake") ctx.coordinator.register(active);
+			return finalizeSessionResult(active, {
+				operation: "exec_command", wallTimeSec,
+				collected: await active.collect({ deadlineMs: Date.now(), externalAbort: signal }),
+				totalBytes: active.totalBytesSeen, sessionId: active.id, exitCode: undefined, signal: null, failure: null,
+				tty: false, logPath: active.logPath, cwd: active.cwd, command: active.displayCommand,
+				yieldTimeMs: wait.kind === "finite" ? wait.milliseconds : undefined,
+				extra: delivery.kind === "host-job" ? {
+					job_id: delivery.jobId, async: { state: "running", jobId: delivery.jobId, type: "bash" },
+				} : { on_exit: args.on_exit, ...(args.on_exit === "wake" ? { completion_notification: "armed" as const } : {}) },
+			});
+		} finally { stream?.stop(); }
+	} catch (error) {
+		if (delivery.kind === "host-job") {
+			delivery.manager.cancel(delivery.jobId);
+			delivery.reject(error);
+			delivery.manager.releaseForegroundJob(delivery.jobId);
+		}
+		if (session) { session.terminateBrush(); removeSession(ctx, session.id); }
+		throw error;
+	}
 }
 
 async function runExecCommand(
@@ -377,12 +589,16 @@ async function runExecCommand(
 	/** Exact per-call host context; only omp's Brush context parser reads it. */
 	caller?: unknown,
 ): Promise<ResponseShape> {
-	const finalizeResponse = (input: FinalizeInput): ResponseShape =>
-		finalizeProcessResult({ ...input, operation: "exec_command" });
 	if (ctx.shuttingDown) {
 		throw new Error("unified-exec: session is shutting down; not starting new commands.");
 	}
 	const selected = selectEngine(ctx.engine, args);
+	if (selected.host === "omp" && args.async === true) {
+		if (!selected.engine.services.asyncEnabled(selected.binding.session.settings)) {
+			throw new Error("Async bash execution is disabled. Enable async.enabled to use async mode.");
+		}
+		if (selected.kind !== "brush") throw execError("async_requires_brush", "async mode requires the embedded Brush backend.");
+	}
 	// Pi keeps its synchronous, raw-path process launch. Only omp awaits
 	// the host's cwd stage; its async boundary must recheck shutdown.
 	let plan: ExecPlan = selected.host === "pi" ? {
@@ -404,6 +620,9 @@ async function runExecCommand(
 		}
 	}
 	const variant = plan.variant;
+	const deadline: CommandDeadline = variant.host === "pi" ? { kind: "unlimited" }
+		: commandDeadline(variant.engine.services, variant.binding.session.settings, variant.kind === "brush", args.timeout);
+	if (variant.kind === "brush") return runBrushCommand(ctx, variant, plan, args, signal, onUpdate, sessionId(), deadline);
 	const tty = variant.kind === "pty-process";
 	if (tty && !isPtyAvailable()) {
 		throw new Error(
@@ -416,16 +635,9 @@ async function runExecCommand(
 	const wantsWake = args.on_exit === "wake";
 
 	const id = ctx.store.allocateId();
-	let session: ExecSession;
-	switch (variant.kind) {
-		case "brush":
-			session = await startBrushSession(ctx, variant, id, plan, sessionId(), signal);
-			break;
-		case "pipe-process":
-		case "pty-process":
-			session = spawnProcessSession(ctx, id, args, plan, variant);
-			break;
-	}
+	const session = spawnProcessSession(ctx, id, args, plan, variant, deadline);
+	const finalizeResponse = (input: FinalizeInput): ResponseShape =>
+		finalizeSessionResult(session, { ...input, operation: "exec_command" });
 
 	if (session.failureMessage) {
 		return finalizeResponse({
@@ -578,6 +790,58 @@ async function runExecCommand(
 	}
 }
 
+async function runHostAttachedWait(
+	ctx: ExtensionCtx, session: ExecSession, durationMs: number, signal: AbortSignal | undefined,
+	onUpdate: AgentToolUpdateCallback<ProcessUpdateDetails> | undefined,
+	waitFields: Partial<ProcessResultDetails>, input?: Uint8Array,
+): Promise<ResponseShape> {
+	const delivery = session.delivery;
+	if (delivery.kind !== "host-job") throw new Error("Host attachment requires a HostJob");
+	const startedAt = performance.now();
+	session.touch();
+	let writeFailure: string | undefined;
+	if (input) {
+		const written = await session.writeInput(input, signal);
+		signal?.throwIfAborted();
+		switch (written.kind) {
+			case "cancelled": throw new DOMException("stdin write was cancelled; some bytes may have been delivered", "AbortError");
+			case "not_running":
+				return observeHostTerminal(ctx, session, "write_stdin", (performance.now() - startedAt) / 1000, waitFields,
+					`session_not_running: session_id ${session.id} has already exited; nothing was written and the session is now closed.`);
+			case "refused": writeFailure = `stdin write did not complete: ${written.reason}; some bytes may have been delivered`; break;
+			case "written": break;
+		}
+	}
+	const streamer = onUpdate ? startRateLimitedStream({
+		outputNotify: session.outputNotify, minIntervalMs: LONG_WAIT_UPDATE_INTERVAL_MS,
+		emit: () => onUpdate(buildStreamUpdate(session, waitFields)),
+	}) : undefined;
+	try {
+		const outcome = await waitForExitOrDeadline({
+			exited: session.exited, externalAbort: signal,
+			durationMs: Math.max(0, durationMs - (performance.now() - startedAt)),
+		});
+		const wallTimeSec = (performance.now() - startedAt) / 1000;
+		if (session.hasExited) return observeHostTerminal(ctx, session, "write_stdin", wallTimeSec, {
+			...waitFields, wait_status: "completed", completion_delivery: "direct", tool_time_utc: nowUtcIso(),
+		}, writeFailure);
+		return finalizeSessionResult(session, {
+			operation: "write_stdin", wallTimeSec,
+			collected: outcome === "cancelled" ? NO_OUTPUT : await session.collect({ deadlineMs: Date.now() }),
+			totalBytes: session.totalBytesSeen, sessionId: session.id, exitCode: undefined,
+			signal: null, failure: writeFailure ?? null, tty: false, logPath: session.logPath,
+			cwd: session.cwd, command: session.displayCommand,
+			extra: {
+				...waitFields, job_id: delivery.jobId,
+				async: { state: "running", jobId: delivery.jobId, type: "bash" },
+				wait_status: outcome === "cancelled" ? "cancelled" :
+					waitFields.wait_mode === "absolute" ? "absolute_deadline_reached" : "relative_deadline_reached",
+				effective_wait_ms: wallTimeSec * 1000, tool_time_utc: nowUtcIso(),
+			},
+		});
+	} finally { streamer?.stop(); }
+}
+
 async function runWriteStdin(
 	ctx: ExtensionCtx,
 	args: WriteStdinArgs,
@@ -585,12 +849,12 @@ async function runWriteStdin(
 	onUpdate: AgentToolUpdateCallback<ProcessUpdateDetails> | undefined,
 	toolCallId: string,
 ): Promise<ResponseShape> {
-	const finalizeResponse = (input: FinalizeInput): ResponseShape =>
-		finalizeProcessResult({ ...input, operation: "write_stdin" });
 	const session = ctx.store.get(args.session_id);
 	if (!session) {
 		throw new Error(`unknown session_id: ${args.session_id}`);
 	}
+	const finalizeResponse = (input: FinalizeInput): ResponseShape =>
+		finalizeSessionResult(session, { ...input, operation: "write_stdin" });
 	const writeBytes = resolveWriteInput(args);
 	const isEmptyPoll = writeBytes === undefined || writeBytes.length === 0;
 	const hasYieldUntil = typeof args.yield_until === "string" && args.yield_until.length > 0;
@@ -619,6 +883,9 @@ async function runWriteStdin(
 	}
 
 	const yieldTimeMs = clampYield(args.yield_time_ms, DEFAULT_WRITE_STDIN_YIELD_MS);
+	if (session.delivery.kind === "host-job") {
+		return runHostAttachedWait(ctx, session, yieldTimeMs, signal, onUpdate, { yield_time_ms: yieldTimeMs }, writeBytes);
+	}
 
 	const start = Date.now();
 	session.touch();
@@ -768,6 +1035,9 @@ async function runAttachedWait(
 	onUpdate: AgentToolUpdateCallback<ProcessUpdateDetails> | undefined,
 	toolCallId: string,
 ): Promise<ResponseShape> {
+	if (session.delivery.kind === "host-job") return runHostAttachedWait(ctx, session, wait.durationMs, signal, onUpdate,
+		wait.mode === "absolute" ? { wait_mode: wait.mode, yield_until: wait.yieldUntil } :
+			{ wait_mode: wait.mode, yield_time_ms: wait.durationMs });
 	const startedAt = performance.now();
 	const waitFields: Partial<ResponseShape> =
 		wait.mode === "absolute"
@@ -815,7 +1085,7 @@ async function runAttachedWait(
 				extra.completion_notification = "armed";
 			}
 		}
-		const shape = finalizeProcessResult({
+		const shape = finalizeSessionResult(session, {
 			operation: "write_stdin",
 			wallTimeSec: elapsedMs / 1000,
 			collected,
@@ -850,12 +1120,33 @@ interface TerminateOutcome {
 	session: ExecSession;
 	escalated: boolean;
 	collected: CollectResult;
+	delivery?: TerminalDelivery;
 	/**
 	 * `killed`: confirmed dead; `kill_failed`: the kill did NOT land;
 	 * `already_exited`: a Brush execution had already ended, so nothing was
 	 * terminated (#27 C2).
 	 */
 	outcome: KillStatus;
+}
+
+/** A human control has no output consumer; a model tool result is an observation. */
+type TerminationIntent = "control" | "observe";
+
+async function terminationOutput(
+	session: ExecSession, intent: TerminationIntent,
+): Promise<{ collected: CollectResult; delivery?: TerminalDelivery }> {
+	switch (intent) {
+		case "control":
+			return {
+				collected: NO_OUTPUT,
+				...(session.delivery.kind === "host-job"
+					? { delivery: terminalDelivery(session.delivery, session.wasTerminated) } : {}),
+			};
+		case "observe":
+			if (session.delivery.kind === "host-job") return hostTerminalTail(session);
+			if (session.hasExited) await session.outputClosed.closed();
+			return { collected: await session.collect({ deadlineMs: Date.now() + 100 }) };
+	}
 }
 
 /**
@@ -869,11 +1160,24 @@ const BRUSH_TERMINATE_WAIT_MS = IS_WINDOWS ? 8000 : 5000;
  * (#27 C2), which reaps the processes the run spawned. An execution that had
  * already ended is reported as such — observed, not killed.
  */
-async function terminateBrushSession(ctx: ExtensionCtx, session: ExecSession): Promise<TerminateOutcome> {
+async function terminateBrushSession(
+	ctx: ExtensionCtx, session: ExecSession, intent: TerminationIntent,
+): Promise<TerminateOutcome> {
 	const sid = session.id;
+	if (session.delivery.kind === "host-job") {
+		const outcome = session.terminateBrush();
+		await waitForExitOrDeadline({ exited: session.exited, durationMs: BRUSH_TERMINATE_WAIT_MS });
+		if (!session.hasExited) return { session, collected: NO_OUTPUT, escalated: false, outcome: "kill_failed" };
+		const observed = await terminationOutput(session, intent);
+		removeSession(ctx, sid);
+		return {
+			session, ...observed, escalated: false,
+			outcome: outcome === "cancelled" ? "killed" : "already_exited",
+		};
+	}
 	const observeEnded = async (): Promise<TerminateOutcome> => {
-		const collected = await session.collect({ deadlineMs: Date.now() + 100 });
-		ctx.coordinator.observeViaListing(sid);
+		const { collected } = await terminationOutput(session, intent);
+		if (intent === "observe") ctx.coordinator.observeViaListing(sid);
 		removeSession(ctx, sid);
 		return { session, escalated: false, collected, outcome: "already_exited" };
 	};
@@ -886,7 +1190,7 @@ async function terminateBrushSession(ctx: ExtensionCtx, session: ExecSession): P
 		return observeEnded();
 	}
 	await waitForExitOrDeadline({ exited: session.exited, durationMs: BRUSH_TERMINATE_WAIT_MS });
-	const collected = await session.collect({ deadlineMs: Date.now() + 100 });
+	const { collected } = await terminationOutput(session, intent);
 	if (!session.hasExited) {
 		ctx.coordinator.restoreAfterFailedKill(sid);
 		return { session, escalated: false, collected, outcome: "kill_failed" };
@@ -910,10 +1214,11 @@ async function terminateSessionById(
 	ctx: ExtensionCtx,
 	sid: number,
 	initial: NodeJS.Signals,
+	intent: TerminationIntent,
 ): Promise<TerminateOutcome | undefined> {
 	const session = ctx.store.get(sid);
 	if (!session) return undefined;
-	if (session.isBrush) return terminateBrushSession(ctx, session);
+	if (session.isBrush) return terminateBrushSession(ctx, session, intent);
 	// Explicit kill (model tool or human slash command): suppress the wake
 	// BEFORE signaling so the induced exit can never race a wake enqueue.
 	ctx.coordinator.suppress(sid);
@@ -1008,6 +1313,7 @@ function updateRunningSessionsUi(ctx: ExtensionCtx, opts: { showWidget?: boolean
 function watchSessionExit(ctx: ExtensionCtx, session: ExecSession): void {
 	ctx.exitUnsubscribers.get(session.id)?.();
 	const unsubscribe = session.onExit(() => {
+		if (session.delivery.kind === "host-job" && session.wasTerminated) removeSession(ctx, session.id);
 		// Preserve lazy-drain semantics: an exited session stays in the store until
 		// write_stdin/list_sessions/kill_session observes it. The UI only reflects
 		// currently running processes.
@@ -1033,11 +1339,15 @@ function clearSessionExitWatchers(ctx: ExtensionCtx): void {
 	ctx.exitUnsubscribers.clear();
 }
 
+interface StreamUpdateDetails extends ProcessUpdateDetails {
+	readonly output: string;
+}
+
 /** Shared streaming-update payload (relative polls and absolute waits). */
 function buildStreamUpdate(
 	session: ExecSession,
 	extra?: Partial<ProcessResultDetails>,
-): AgentToolResult<ProcessUpdateDetails> {
+): AgentToolResult<StreamUpdateDetails> {
 	const live = session.liveOutput();
 	const text = live.kind === "screen"
 		? sanitizeOutputText(live.snapshot.text)
@@ -1227,7 +1537,7 @@ function activate(pi: ExtensionAPI, host: HostRuntime = { kind: "pi" }): Activat
 		// activation's AgentSession, so only its identity is re-checked (#27 C1).
 		// The session id may have changed: shells keyed by another id leave the
 		// persistent table (#27 C2).
-		const onSessionBoundary = async (_event: unknown, eventCtx: ExtensionContext): Promise<void> => {
+		const onSessionBoundary = async (branch: boolean, event: unknown, eventCtx: ExtensionContext): Promise<void> => {
 			const before = engine.binding.kind;
 			const next = recheckBinding(engine.binding, bindingContext(eventCtx));
 			engine.binding = next;
@@ -1235,11 +1545,30 @@ function activate(pi: ExtensionAPI, host: HostRuntime = { kind: "pi" }): Activat
 				engine.warn(`omp-unified-exec: host session binding lost (${next.reason})`);
 			}
 			engine.shells?.retireOtherSessions(eventCtx.sessionManager.getSessionId());
+			const reason = typeof event === "object" && event !== null && "reason" in event ? event.reason : undefined;
+			const previousFile = typeof event === "object" && event !== null && "previousSessionFile" in event
+				? event.previousSessionFile : undefined;
+			const cancel = branch || reason === "new";
+			const preserve = !branch && (reason === "resume" || reason === "fork") &&
+				previousFile !== eventCtx.sessionManager.getSessionFile();
+			if (!cancel && !preserve) return;
+			for (const session of ctx.store.values()) {
+				if (session.delivery.kind === "host-job" &&
+					session.delivery.manager.getJob(session.delivery.jobId) === undefined) removeSession(ctx, session.id);
+			}
+			if (cancel || reason === "resume") ctx.coordinator.reset();
+			if (cancel) {
+				for (const session of ctx.store.values()) if (session.isBrush) {
+					session.terminateBrush();
+					removeSession(ctx, session.id);
+				}
+			}
+			updateRunningSessionsUi(ctx);
 		};
 		// These events exist only on omp; Pi's ExtensionAPI typings do not declare them.
 		const ompEvents = pi as unknown as OmpSessionEvents;
-		ompEvents.on("session_switch", onSessionBoundary);
-		ompEvents.on("session_branch", onSessionBoundary);
+		ompEvents.on("session_switch", (event, context) => onSessionBoundary(false, event, context));
+		ompEvents.on("session_branch", (event, context) => onSessionBoundary(true, event, context));
 	}
 
 	pi.on("session_shutdown", async () => {
@@ -1328,7 +1657,7 @@ function activate(pi: ExtensionAPI, host: HostRuntime = { kind: "pi" }): Activat
 			let killed = 0;
 			let failed = 0;
 			for (const s of targets) {
-				const outcome = await terminateSessionById(ctx, s.id, "SIGTERM");
+				const outcome = await terminateSessionById(ctx, s.id, "SIGTERM", "control");
 				if (outcome?.outcome === "killed") killed++;
 				else if (outcome?.outcome === "kill_failed") failed++;
 			}
@@ -1343,11 +1672,43 @@ function activate(pi: ExtensionAPI, host: HostRuntime = { kind: "pi" }): Activat
 
 	// ---------------- Tools ----------------
 
+	const execProperties = {
+		cmd: Type.String({ description: "Shell command to execute." }),
+		workdir: Type.Optional(Type.String({ description: "Working directory. Defaults to the session cwd." })),
+		shell: Type.Optional(Type.String({ description:
+			"Shell binary. Defaults to bash (on Windows: bash if on PATH, else powershell). cmd and powershell/pwsh get shell-appropriate flags." })),
+		tty: Type.Optional(Type.Boolean({ description:
+			"Allocate a PTY. Default false (plain pipes). With a PTY, output is the rendered terminal screen (plus lines that scrolled off since the last call) rather than the raw stream." })),
+		cols: Type.Optional(Type.Number({ description:
+			`PTY width in columns (tty: true only; ignored for pipes). Default 120, clamped to [${MIN_PTY_COLS}, ${MAX_PTY_COLS}].` })),
+		rows: Type.Optional(Type.Number({ description:
+			`PTY height in rows (tty: true only; ignored for pipes). Default 30, clamped to [${MIN_PTY_ROWS}, ${MAX_PTY_ROWS}].` })),
+		yield_time_ms: Type.Optional(Type.Number({ description:
+			`How long (ms) this call stays attached waiting for output before yielding — an attachment window, not the command's lifetime or completion timeout. Default ${DEFAULT_EXEC_YIELD_MS}, clamped to [${MIN_YIELD_TIME_MS}, ${MAX_YIELD_TIME_MS}].` })),
+		on_exit: Type.Optional(StringEnum(["none", "wake"] as const,
+			'"none" (default): no auto-resume; poll with write_stdin. "wake": ONE follow-up notification on unobserved exit that resumes the agent — only when the human explicitly wants auto-resume. Change later via set_on_exit. A completion observed directly by a tool result consumes the wake.')),
+	};
+	const ompExecProperties = engine.kind === "omp" ? {
+		...execProperties, timeout: Type.Optional(Type.Number({ description:
+			"Command deadline in seconds, not an attachment wait. 0 disables it; otherwise 1..3600 and tools.maxTimeout apply. Brush defaults to 300 seconds; real processes have no default deadline." })),
+		yield_time_ms: Type.Optional(Type.Number({ description:
+			`Attachment wait only. Explicit values are clamped to ${MIN_YIELD_TIME_MS}..${MAX_YIELD_TIME_MS} ms. Omitted Brush waits use the host auto-background threshold or wait until completion; omitted process waits default to ${DEFAULT_EXEC_YIELD_MS} ms.` })),
+	} : undefined;
+	const execSchemas = ompExecProperties === undefined ? {
+		kind: "pi" as const, base: Type.Object(execProperties),
+	} : {
+		kind: "omp" as const, base: Type.Object(ompExecProperties),
+		async: Type.Object({ ...ompExecProperties, async: Type.Optional(Type.Boolean({ description:
+			"Start a Brush command as a host background job immediately. Requires async.enabled and an available host job slot." })) }),
+	};
+
 	pi.registerTool({
 		name: "exec_command",
 		label: "exec_command",
 		...(engine.kind === "omp" ? {
 			readsSkillUris: true,
+			// These replace essential bash; an outer write xd:// call owns a different abort lifecycle.
+			loadMode: "essential" as const,
 			approval: (args: unknown): CommandApproval => {
 				if (engine.binding.kind !== "bound") return "exec";
 				const settings = engine.binding.session.settings;
@@ -1373,43 +1734,11 @@ function activate(pi: ExtensionAPI, host: HostRuntime = { kind: "pi" }): Activat
 			"tty: true output is the rendered terminal, as a human would see it, not the raw stream: each result shows any history_lines that scrolled off above the screen since the last call, then the full current screen, plus the cursor position. screen_changed: false means the screen is exactly as last reported. Full-screen programs (alternate screen) are shown as the whole screen. Styling (colours, reverse video) is not shown; the raw byte stream is in log_path.",
 		],
 		outputSchema: processScriptResultSchema,
-		parameters: Type.Object({
-			cmd: Type.String({ description: "Shell command to execute." }),
-			workdir: Type.Optional(Type.String({ description: "Working directory. Defaults to the session cwd." })),
-			shell: Type.Optional(
-				Type.String({
-					description:
-						"Shell binary. Defaults to bash (on Windows: bash if on PATH, else powershell). cmd and powershell/pwsh get shell-appropriate flags.",
-				}),
-			),
-			tty: Type.Optional(
-				Type.Boolean({
-					description:
-						"Allocate a PTY. Default false (plain pipes). With a PTY, output is the rendered terminal screen (plus lines that scrolled off since the last call) rather than the raw stream.",
-				}),
-			),
-			cols: Type.Optional(
-				Type.Number({
-					description: `PTY width in columns (tty: true only; ignored for pipes). Default 120, clamped to [${MIN_PTY_COLS}, ${MAX_PTY_COLS}].`,
-				}),
-			),
-			rows: Type.Optional(
-				Type.Number({
-					description: `PTY height in rows (tty: true only; ignored for pipes). Default 30, clamped to [${MIN_PTY_ROWS}, ${MAX_PTY_ROWS}].`,
-				}),
-			),
-			yield_time_ms: Type.Optional(
-				Type.Number({
-					description: `How long (ms) this call stays attached waiting for output before yielding — an attachment window, not the command's lifetime or completion timeout. Default ${DEFAULT_EXEC_YIELD_MS}, clamped to [${MIN_YIELD_TIME_MS}, ${MAX_YIELD_TIME_MS}].`,
-				}),
-			),
-			on_exit: Type.Optional(
-				StringEnum(
-					["none", "wake"] as const,
-					'"none" (default): no auto-resume; poll with write_stdin. "wake": ONE follow-up notification on unobserved exit that resumes the agent — only when the human explicitly wants auto-resume. Change later via set_on_exit. A completion observed directly by a tool result consumes the wake.',
-				),
-			),
-		}),
+		get parameters() {
+			if (execSchemas.kind === "pi") return execSchemas.base;
+			return engine.kind === "omp" && engine.binding.kind === "bound" &&
+				engine.services.asyncEnabled(engine.binding.session.settings) ? execSchemas.async : execSchemas.base;
+		},
 		async execute(_toolCallId, params, signal, onUpdate, eventCtx) {
 			ctx.ui ??= eventCtx.ui;
 			const shape = await runExecCommand(
@@ -1425,6 +1754,8 @@ function activate(pi: ExtensionAPI, host: HostRuntime = { kind: "pi" }): Activat
 			return {
 				content: [{ type: "text", text: renderProcessResultText(shape, ctx.engine.kind === "omp" ? shape.command : undefined) }],
 				details: shape,
+				...(ctx.engine.kind === "omp" && (shape.timedOut || shape.failure_message ||
+					(params.tty !== true && !params.shell && shape.exit_code !== undefined && shape.exit_code !== 0)) ? { isError: true } : {}),
 				structuredContent: processScriptResult(shape),
 			};
 		},
@@ -1435,6 +1766,7 @@ function activate(pi: ExtensionAPI, host: HostRuntime = { kind: "pi" }): Activat
 	pi.registerTool({
 		name: "write_stdin",
 		label: "write_stdin",
+		...(engine.kind === "omp" ? { loadMode: "essential" as const } : {}),
 		description:
 			"Write bytes to a running session. Omit both chars and chars_b64 to poll without writing. Use `chars` for text with C-style escapes (e.g. \\x03 Ctrl-C, \\x1b ESC, \\n newline); use `chars_b64` for raw binary. For empty polls, wait with a finite yield_time_ms (relative, no built-in maximum) or yield_until (absolute UTC deadline, only when the human explicitly asks).",
 		promptSnippet: "Send input to or poll a running session",
@@ -1475,11 +1807,14 @@ function activate(pi: ExtensionAPI, host: HostRuntime = { kind: "pi" }): Activat
 		async execute(toolCallId, params, signal, onUpdate, eventCtx) {
 			ctx.ui ??= eventCtx.ui;
 			assertHostSessionOpen(ctx);
+			const target = ctx.store.get(params.session_id);
 			const shape = await runWriteStdin(ctx, params, withLifetime(ctx, signal), onUpdate, toolCallId);
 			updateRunningSessionsUi(ctx);
 			return {
 				content: [{ type: "text", text: renderProcessResultText(shape) }],
 				details: shape,
+				...(ctx.engine.kind === "omp" && (shape.timedOut || shape.failure_message ||
+					(target?.isBrush && shape.exit_code !== undefined && shape.exit_code !== 0)) ? { isError: true } : {}),
 				structuredContent: processScriptResult(shape),
 			};
 		},
@@ -1512,6 +1847,16 @@ function activate(pi: ExtensionAPI, host: HostRuntime = { kind: "pi" }): Activat
 			assertHostSessionOpen(ctx);
 			const { session_id: sid, on_exit: policy } = params as { session_id: number; on_exit: OnExitPolicy };
 			const session = ctx.store.get(sid);
+			if (session?.delivery.kind === "host-job") {
+				if (policy === "wake") throw execError("on_exit_requires_coordinator",
+					'HostJob commands deliver through the host; on_exit: "wake" is unavailable.');
+				const value = { session_id: sid, found: true, on_exit: "none" as const,
+					status: "already_none", running: !session.hasExited, wake_armed: false };
+				return {
+					content: [{ type: "text", text: `set_on_exit session_id=${sid} on_exit=none: host delivery is unchanged.` }],
+					details: value, structuredContent: setOnExitScriptResult(value),
+				};
+			}
 			if (policy === "wake" && !session) {
 				return {
 					content: [{ type: "text", text: `No such session: ${sid}` }],
@@ -1580,7 +1925,7 @@ function activate(pi: ExtensionAPI, host: HostRuntime = { kind: "pi" }): Activat
 			const sid = (params as { session_id: number; signal?: string }).session_id;
 			const initial = normalizeSignal((params as { signal?: string }).signal);
 			const startedAt = Date.now();
-			const outcome = await terminateSessionById(ctx, sid, initial);
+			const outcome = await terminateSessionById(ctx, sid, initial, "observe");
 			if (!outcome) {
 				return {
 					content: [{ type: "text", text: `No such session: ${sid}` }],
@@ -1625,6 +1970,7 @@ function activate(pi: ExtensionAPI, host: HostRuntime = { kind: "pi" }): Activat
 				escalated,
 				outcome: outcome.outcome,
 			});
+			Object.assign(details, deadlineDetails(session), outcome.delivery ? { delivery: outcome.delivery } : {});
 			return {
 				content: [{ type: "text", text: renderKillResultText(details) }],
 				details,
@@ -1653,17 +1999,18 @@ function activate(pi: ExtensionAPI, host: HostRuntime = { kind: "pi" }): Activat
 			const reaped: ExecSession[] = [];
 			for (const s of ctx.store.values()) {
 				if (s.hasExited) {
-					// Reporting terminal completion here counts as direct observation:
-					// suppress a not-yet-queued wake (an already-queued wake stays a
-					// single notification — never a second one).
-					ctx.coordinator.observeViaListing(s.id);
-					removeSession(ctx, s.id);
+					if (s.delivery.kind === "host-job") {
+						if (terminalDelivery(s.delivery, s.wasTerminated) !== "pending") removeSession(ctx, s.id);
+					} else {
+						ctx.coordinator.observeViaListing(s.id);
+						removeSession(ctx, s.id);
+					}
 					reaped.push(s);
 				}
 			}
 			updateRunningSessionsUi(ctx);
 			const now = Date.now();
-			const live = ctx.store.values();
+			const live = ctx.store.values().filter((session) => !session.hasExited);
 			const sessions = [...live, ...reaped]
 				.sort((a, b) => a.id - b.id)
 				.map((s) => ({
@@ -1674,6 +2021,9 @@ function activate(pi: ExtensionAPI, host: HostRuntime = { kind: "pi" }): Activat
 					pid: s.pid,
 					// Brush sessions have no process of their own: while running they report the pids their run spawned.
 					pids: s.isBrush && !s.hasExited ? [...(s.brushPids() ?? [])] : undefined,
+					job_id: s.delivery.kind === "host-job" ? s.delivery.jobId : undefined,
+					delivery: s.delivery.kind === "host-job" && s.hasExited
+						? terminalDelivery(s.delivery, s.wasTerminated) : undefined,
 					started_at_ms: s.startedAt,
 					elapsed_ms: now - s.startedAt,
 					running: !s.hasExited,
@@ -1689,7 +2039,7 @@ function activate(pi: ExtensionAPI, host: HostRuntime = { kind: "pi" }): Activat
 				? sessions.map((s) => {
 						const exitedSuffix = s.running
 							? ""
-							: `  [exited${s.exit_code !== undefined && s.exit_code !== null ? ` exit_code=${s.exit_code}` : ""}${s.signal ? ` signal=${s.signal}` : ""}; removed from store]`;
+							: `  [exited${s.exit_code !== undefined && s.exit_code !== null ? ` exit_code=${s.exit_code}` : ""}${s.signal ? ` signal=${s.signal}` : ""}; ${s.delivery === "pending" ? "pending host delivery" : "removed from store"}]`;
 						const wake = s.wake_armed ? " [wake]" : "";
 						const pidLabel = s.pids ? `pids=${s.pids.join(",") || "-"}` : `pid=${String(s.pid ?? "?").padStart(6)}`;
 						return `  ${String(s.session_id).padStart(3)}  ${pidLabel}  ${
@@ -1724,7 +2074,7 @@ function activate(pi: ExtensionAPI, host: HostRuntime = { kind: "pi" }): Activat
 		store: ctx.store,
 		// A human kill from the Tern HUD: same path as the slash command.
 		kill: async (id) => {
-			const outcome = await terminateSessionById(ctx, id, "SIGTERM");
+			const outcome = await terminateSessionById(ctx, id, "SIGTERM", "control");
 			updateRunningSessionsUi(ctx);
 			return outcome?.outcome === "killed";
 		},

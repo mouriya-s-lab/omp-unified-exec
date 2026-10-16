@@ -11,6 +11,7 @@ import type { CollectResult } from "./collect.ts";
 import type { OnExitPolicy } from "./completion.ts";
 import { sanitizeOutputText } from "./output-safety.ts";
 import type { TerminalObservation, TerminalScreenKind, TerminalView } from "./terminal-screen.ts";
+import type { HostJobFrame } from "../fork-features/brush/jobs.ts";
 
 const textDecoder = new TextDecoder("utf-8", { fatal: false });
 
@@ -36,6 +37,11 @@ export interface OutputResultDetails {
 	exit_code?: number;
 	signal?: string;
 	failure_message?: string;
+	timedOut?: boolean;
+	cancelled?: boolean;
+	timeoutSeconds?: number;
+	timeoutNotice?: string;
+	delivery?: "pending" | "delivered" | "terminated";
 	tty?: boolean;
 	log_path?: string;
 	cwd?: string;
@@ -74,6 +80,8 @@ export interface TerminalDetails {
 export interface ProcessResultDetails extends OutputResultDetails {
 	operation: ProcessOperation;
 	status: ProcessStatus;
+	job_id?: string;
+	async?: HostJobFrame;
 	yield_time_ms?: number;
 	wait_mode?: "relative" | "absolute";
 	wait_status?: "completed" | "relative_deadline_reached" | "absolute_deadline_reached" | "cancelled";
@@ -307,6 +315,12 @@ function appendOutputSection(lines: string[], shape: OutputResultDetails): strin
 export function renderProcessResultText(shape: ProcessResultDetails, command?: string): string {
 	const lines: string[] = [shape.running ? "[still running]" : "[exited]"];
 	if (shape.session_id !== undefined) lines.push(`session_id: ${shape.session_id}`);
+	if (shape.job_id !== undefined) lines.push(`job_id: ${safeMeta(shape.job_id)}`);
+	if (shape.delivery !== undefined) lines.push(`delivery: ${safeMeta(shape.delivery)}`);
+	if (shape.timedOut !== undefined) lines.push(`timedOut: ${shape.timedOut}`);
+	if (shape.cancelled !== undefined) lines.push(`cancelled: ${shape.cancelled}`);
+	if (shape.timeoutSeconds !== undefined) lines.push(`timeoutSeconds: ${shape.timeoutSeconds}`);
+	if (shape.timeoutNotice !== undefined) lines.push(`timeoutNotice: ${safeMeta(shape.timeoutNotice)}`);
 	if (shape.exit_code !== undefined) lines.push(`exit_code: ${shape.exit_code}`);
 	if (shape.signal) lines.push(`signal: ${safeMeta(shape.signal)}`);
 	if (shape.failure_message) lines.push(`failure: ${safeMeta(shape.failure_message)}`);

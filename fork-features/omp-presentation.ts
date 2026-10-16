@@ -20,6 +20,7 @@ import { base64ByteLength, stringifyChars } from "../src/render.ts";
 import type { SessionStore } from "../src/session-store.ts";
 import type { TerminalAppearance } from "../src/terminal-screen.ts";
 import { truncationMarker } from "../src/tool-result.ts";
+import type { HostJobFrame } from "./brush/jobs.ts";
 import { loadNativeShell } from "./brush/native.ts";
 import { loadOmpHost } from "./brush/omp-host.ts";
 import { type HostRuntime, ompWarn } from "./brush/runtime.ts";
@@ -38,7 +39,7 @@ export interface ShellArgs {
 export interface ShellDetails {
 	readonly exitCode?: number;
 	readonly wallTimeMs?: number;
-	readonly async?: { readonly state: "running"; readonly jobId: string; readonly type: "bash" };
+	readonly async?: HostJobFrame;
 }
 
 export interface ShellResult {
@@ -106,10 +107,12 @@ function parseShellRenderer(value: unknown): OmpShellRenderer {
 /** What a unified-exec result means for display, parsed from persisted details. */
 export type ResultView =
 	| { readonly kind: "streaming"; readonly output: string }
+	| { readonly kind: "job-progress"; readonly output: string; readonly frame: HostJobFrame }
 	| {
 			readonly kind: "backgrounded";
 			readonly output: string;
 			readonly sessionId: number;
+			readonly jobId: string | undefined;
 			readonly wallTimeMs: number | undefined;
 			readonly marker: string | null;
 	  }
@@ -146,7 +149,9 @@ type PersistedDetails = {
 		| "operation"
 		| "status"
 		| "output"
+		| "async"
 		| "session_id"
+		| "job_id"
 		| "exit_code"
 		| "signal"
 		| "failure_message"
@@ -177,6 +182,22 @@ function optionalNumber(value: unknown): number | undefined {
 	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
+function isHostJobFrame(value: unknown): value is HostJobFrame {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		"state" in value &&
+		(value.state === "running" ||
+			value.state === "completed" ||
+			value.state === "failed" ||
+			value.state === "cancelled") &&
+		"jobId" in value &&
+		typeof value.jobId === "string" &&
+		"type" in value &&
+		value.type === "bash"
+	);
+}
+
 /** Pure: unified-exec result (any persisted shape) → display meaning. */
 export function parseResultView(result: HostResult, isPartial: boolean): ResultView {
 	const details =
@@ -185,8 +206,11 @@ export function parseResultView(result: HostResult, isPartial: boolean): ResultV
 	if (details?.operation === "kill_session" && details.found === false) return messageView(result, true);
 	if (typeof details?.output !== "string") return messageView(result, result.isError === true);
 	const output = sanitizeOutputText(details.output);
-	// Partial updates carry only the cumulative tail; terminal fields arrive with the final result.
-	if (isPartial) return { kind: "streaming", output };
+	// Host job updates include lifecycle state; legacy partials carry only the cumulative tail.
+	if (isPartial) {
+		const frame = details.async;
+		return isHostJobFrame(frame) ? { kind: "job-progress", output, frame } : { kind: "streaming", output };
+	}
 
 	const wallSeconds = optionalNumber(details.wall_time_seconds);
 	const wallTimeMs = wallSeconds === undefined ? undefined : wallSeconds * 1000;
@@ -202,7 +226,7 @@ export function parseResultView(result: HostResult, isPartial: boolean): ResultV
 		case "write_stdin": {
 			const sessionId = optionalNumber(details.session_id);
 			if (details.status === "running" && sessionId !== undefined) {
-				return { kind: "backgrounded", output, sessionId, wallTimeMs, marker };
+				return { kind: "backgrounded", output, sessionId, jobId: optionalString(details.job_id), wallTimeMs, marker };
 			}
 			if (details.status === "exited") {
 				return {
@@ -257,12 +281,26 @@ export function toShellResult(view: ResultView): ShellResult {
 	switch (view.kind) {
 		case "streaming":
 			return shellResult(view.output, {}, false);
+		case "job-progress": {
+			let isError: boolean;
+			switch (view.frame.state) {
+				case "running":
+				case "completed":
+					isError = false;
+					break;
+				case "failed":
+				case "cancelled":
+					isError = true;
+					break;
+			}
+			return shellResult(view.output, { async: view.frame }, isError);
+		}
 		case "backgrounded":
 			return shellResult(
 				withNotices(view.output, [view.marker]),
 				{
 					wallTimeMs: view.wallTimeMs,
-					async: { state: "running", jobId: `session ${view.sessionId}`, type: "bash" },
+					async: { state: "running", jobId: view.jobId ?? `session ${view.sessionId}`, type: "bash" },
 				},
 				false,
 			);
@@ -379,9 +417,13 @@ async function presentOnOmp(pi: ExtensionAPI): Promise<ExtensionAPI> {
 		kill_session: delegateToShell(bash, killShellArgs),
 	};
 	const registerTool: ExtensionAPI["registerTool"] = (definition) => {
-		const { renderCall: _piCall, renderResult: _piResult, ...rest } = definition;
-		const presented = isShellPresented(definition.name) ? { ...rest, ...hooks[definition.name] } : rest;
-		// omp's registerTool takes its own render signatures; Pi's ToolDefinition type cannot express them.
+		// Metadata getters must remain live (not evaluated by object spread).
+		const descriptors = Object.getOwnPropertyDescriptors(definition);
+		Reflect.deleteProperty(descriptors, "renderCall");
+		Reflect.deleteProperty(descriptors, "renderResult");
+		const presented = Object.defineProperties({ name: definition.name }, descriptors);
+		if (isShellPresented(definition.name)) Object.assign(presented, hooks[definition.name]);
+		// omp's render signatures differ from Pi's ToolDefinition.
 		pi.registerTool(presented as unknown as ToolDefinition);
 	};
 	return Object.create(pi, { registerTool: { value: registerTool } }) as ExtensionAPI;

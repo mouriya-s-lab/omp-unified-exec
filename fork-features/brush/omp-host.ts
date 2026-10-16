@@ -21,6 +21,12 @@ export interface HostSettings {
 	readonly __hostSettings: unique symbol;
 }
 
+export interface HostTimeoutLimits {
+	readonly default: number;
+	readonly min: number;
+	readonly max: number;
+}
+
 /** `Settings.getShellConfig()`: the configured shell and its session env. */
 export interface HostShellConfig {
 	readonly shell: string;
@@ -75,6 +81,13 @@ export interface OmpHost {
 	readonly createUrlFilesystem: (context: HostUrlContext, tier: HostApprovalTier) => HostUrlFilesystem;
 	readonly normalizeInternalUrl: (path: string) => string;
 	readonly isUrlFsMissing: (error: unknown) => boolean;
+	readonly asyncEnabled: (settings: HostSettings) => boolean;
+	readonly autoBackgroundEnabled: (settings: HostSettings) => boolean;
+	readonly autoBackgroundThresholdMs: (settings: HostSettings) => number;
+	readonly maxTimeout: (settings: HostSettings) => number;
+	readonly bashTimeoutLimits: HostTimeoutLimits;
+	readonly clampBashTimeout: (seconds: number | undefined, max: number) => number;
+	readonly autoBackgroundWaitMs: (threshold: number, timeoutMs: number | undefined) => number;
 }
 
 type Fn = (...args: never[]) => unknown;
@@ -157,7 +170,7 @@ function parseDirenvDiff(value: unknown): DirenvDiff | null {
 
 /** Load and parse the host services; rejects when omp lacks any of them. */
 export async function loadOmpHost(): Promise<OmpHost> {
-	const [root, nonInteractive, snapshot, direnvModule, settings, tokenizer, approvalModule, internalUrls, pathUtils, worktree, taskSettings, utils, githubCache, urlFilesystem, contextSettings] = await Promise.all([
+	const [root, nonInteractive, snapshot, direnvModule, settings, tokenizer, approvalModule, internalUrls, pathUtils, worktree, taskSettings, utils, githubCache, urlFilesystem, contextSettings, toolSettings, timeouts, asyncHelpers] = await Promise.all([
 		import("@oh-my-pi/pi-coding-agent"),
 		import("@oh-my-pi/pi-coding-agent/exec/non-interactive-env"),
 		import("@oh-my-pi/pi-coding-agent/utils/shell-snapshot"),
@@ -173,6 +186,9 @@ export async function loadOmpHost(): Promise<OmpHost> {
 		import("@oh-my-pi/pi-coding-agent/tools/gh-cache-invalidation"),
 		import("@oh-my-pi/pi-coding-agent/internal-urls/url-filesystem"),
 		import("@oh-my-pi/pi-coding-agent/session/context-settings"),
+		import("@oh-my-pi/pi-coding-agent/tools/settings"),
+		import("@oh-my-pi/pi-coding-agent/tools/tool-timeouts"),
+		import("@oh-my-pi/pi-coding-agent/async"),
 	]);
 	const registryClass: unknown = root.AgentRegistry;
 	const global = typeof registryClass === "function" && "global" in registryClass ? registryClass.global : undefined;
@@ -196,6 +212,21 @@ export async function loadOmpHost(): Promise<OmpHost> {
 	const allowCompoundCommands = settingReader(settings, "cfgBashAllowCompoundCommands");
 	const worktreeClone = settingReader(taskSettings, "cfgWorktreeClone");
 	const experimentalContextManagement = settingReader(contextSettings, "cfgCompactionExperimentalContextManagement");
+	const asyncEnabled = settingReader(toolSettings, "cfgAsyncEnabled");
+	const maxTimeout = settingReader(toolSettings, "cfgToolsMaxTimeout");
+	const autoBackgroundEnabled = settingReader(settings, "cfgBashAutoBackgroundEnabled");
+	const autoBackgroundThreshold = settingReader(settings, "cfgBashAutoBackgroundThresholdMs");
+	const clampTimeout = exportedFunction(timeouts, "clampTimeout", "tools/tool-timeouts") as
+		(tool: "bash", seconds: number | undefined, max: number) => unknown;
+	const autoWait = exportedFunction(asyncHelpers, "resolveAutoBackgroundWaitMs", "async") as
+		(threshold: number, timeoutMs: number | undefined) => unknown;
+	const timeoutConfig = property(property(timeouts, "TOOL_TIMEOUTS"), "bash");
+	const number = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value);
+	const bashTimeoutLimits: HostTimeoutLimits = {
+		default: expect("TOOL_TIMEOUTS.bash.default", property(timeoutConfig, "default"), number),
+		min: expect("TOOL_TIMEOUTS.bash.min", property(timeoutConfig, "min"), number),
+		max: expect("TOOL_TIMEOUTS.bash.max", property(timeoutConfig, "max"), number),
+	};
 	const isCompiledBinary = exportedFunction(utils, "isCompiledBinary", "pi-utils");
 	const stripPrefix = exportedFunction(utils, "stripWindowsExtendedLengthPathPrefix", "pi-utils") as (path: string) => unknown;
 	const isExecutable = exportedFunction(utils, "isExecutable", "pi-utils") as (path: string) => unknown;
@@ -292,5 +323,12 @@ export async function loadOmpHost(): Promise<OmpHost> {
 		createUrlFilesystem: (context, tier) => parseHostUrlFilesystem(new Filesystem({ context, tier })),
 		normalizeInternalUrl: (path) => expect("InternalUrlRouter.normalize()", normalize.call(router, path), string),
 		isUrlFsMissing: (error) => error instanceof urlErrorClass && property(error, "code") === "ENOENT",
+		asyncEnabled: (s) => expect("async.enabled", asyncEnabled(s), boolean),
+		autoBackgroundEnabled: (s) => expect("bash.autoBackground.enabled", autoBackgroundEnabled(s), boolean),
+		autoBackgroundThresholdMs: (s) => expect("bash.autoBackground.thresholdMs", autoBackgroundThreshold(s), number),
+		maxTimeout: (s) => expect("tools.maxTimeout", maxTimeout(s), number),
+		bashTimeoutLimits,
+		clampBashTimeout: (seconds, max) => expect("clampTimeout()", clampTimeout("bash", seconds, max), number),
+		autoBackgroundWaitMs: (threshold, timeoutMs) => expect("resolveAutoBackgroundWaitMs()", autoWait(threshold, timeoutMs), number),
 	};
 }
