@@ -16,6 +16,7 @@
  * activation and are disposed when it shuts down.
  */
 import type { NativeFilesystem, NativeShell, NativeShellModule, NativeShellOptions, NativeShellRunResult, NativeShellStdin } from "./native.ts";
+import type { Delivery } from "./jobs.ts";
 
 /** How often a retained shell re-reads its live background job count (upstream `RETAIN_REAP_INTERVAL_MS`). */
 const RETAIN_REAP_INTERVAL_MS = 5_000;
@@ -175,126 +176,153 @@ export class BrushShells {
 	}
 }
 
-export interface BrushExecutionStart {
-	readonly shells: BrushShells;
-	readonly native: NativeShellModule;
+export interface PreparedBrushRun {
 	readonly key: string;
 	readonly shellOptions: NativeShellOptions;
-	/** Whether the host would run this directly (persistent shell); see {@link persistentLease}. */
-	readonly persistent: boolean;
 	readonly command: string;
 	readonly cwd: string;
 	readonly env: Record<string, string>;
-	/** Native deadline in ms; undefined runs without one. */
+}
+
+export interface BrushExecutionStart {
+	readonly shells: BrushShells;
+	readonly native: NativeShellModule;
+	readonly persistent: boolean;
+	/** Preparation begins only after the owning session has been indexed. */
+	readonly prepare: (signal: AbortSignal) => Promise<PreparedBrushRun>;
 	readonly timeoutMs: number | undefined;
-	/** Per-run bridge; the execution, not its observing tool call, owns its signal. */
 	readonly filesystem?: (signal: AbortSignal) => NativeFilesystem;
 	readonly onOutput: (chunk: string) => void;
 }
 
-/** Who delivers an execution's completion (#27 G4). Host-job delivery arrives with #34. */
-export type Delivery = { readonly kind: "coordinator" };
-
-/** Upstream's persistent-shell rule: the executions the host would run directly. */
-export function persistentLease(delivery: Delivery): boolean {
-	switch (delivery.kind) {
-		case "coordinator":
-			return true;
-	}
+/** Upstream's direct-execution lease rule, after delivery/admission is fixed. */
+export function persistentLease(delivery: Delivery, autoBackground: boolean, asyncRequested: boolean): boolean {
+	return !asyncRequested && (!autoBackground || delivery.kind === "coordinator");
 }
+
+type ExecutionPhase =
+	| { readonly kind: "pending" }
+	| { readonly kind: "preparing" }
+	| { readonly kind: "running"; readonly shell: NativeShell; readonly stdin: NativeShellStdin }
+	| { readonly kind: "ended"; readonly outcome: BrushOutcome };
 
 /** One Brush session's execution: lease, stdin, outcome and the termination primitive. */
 export class BrushExecution {
-	readonly lease: ShellLease;
-	/** Settles once with how the execution ended; never rejects. */
-	readonly outcome: Promise<BrushOutcome>;
-	readonly #shell: NativeShell;
-	readonly #stdin: NativeShellStdin;
+	readonly #start: BrushExecutionStart;
 	readonly #abort = new AbortController();
-	#settled = false;
-	#cancelled = false;
+	readonly #completion = Promise.withResolvers<BrushOutcome>();
+	readonly #ready = Promise.withResolvers<void>();
+	readonly outcome = this.#completion.promise;
+	#phase: ExecutionPhase = { kind: "pending" };
+	#lease: ShellLease | undefined;
 
-	private constructor(start: BrushExecutionStart) {
-		// Validate/create before leasing: a host adapter failure must not strand a busy shell.
-		const filesystem = start.filesystem?.(this.#abort.signal);
-		const { shell, lease } = start.shells.lease(start.key, start.shellOptions, start.persistent);
-		this.#shell = shell;
-		this.lease = lease;
-		this.#stdin = new start.native.ShellStdin();
-		const run = shell.run(
-			{
-				command: start.command,
-				cwd: start.cwd,
-				env: start.env,
-				timeoutMs: start.timeoutMs,
-				signal: this.#abort.signal,
-				filesystem,
-			},
-			this.#stdin,
-			(error, chunk) => {
-				if (!error) start.onOutput(chunk);
-			},
-		);
-		const raced = this.#race(run, start.timeoutMs);
-		this.outcome = raced.then((outcome) => {
-			this.#settled = true;
+	private constructor(start: BrushExecutionStart) { this.#start = start; }
+
+	static create(start: BrushExecutionStart): BrushExecution { return new BrushExecution(start); }
+
+	/** Called once, synchronously after the outer HostJob and session index exist. */
+	begin(): void {
+		if (this.#phase.kind !== "pending") throw new Error("Brush execution was already started");
+		this.#phase = { kind: "preparing" };
+		void this.#run().then((outcome) => {
 			if (outcome.kind !== "exited") this.#abort.abort();
-			this.#stdin.close();
-			start.shells.settle(shell, lease, outcome.kind === "exited", run.catch(() => undefined));
-			return outcome;
+			this.#phase = { kind: "ended", outcome };
+			this.#ready.resolve();
+			this.#completion.resolve(outcome);
 		});
 	}
 
-	static start(start: BrushExecutionStart): BrushExecution {
-		return new BrushExecution(start);
+	get lease(): ShellLease | undefined { return this.#lease; }
+	get settled(): boolean { return this.#phase.kind === "ended"; }
+	get terminated(): boolean {
+		return this.#phase.kind === "ended" ? this.#phase.outcome.kind === "cancelled" : this.#abort.signal.aborted;
 	}
 
-	get settled(): boolean {
-		return this.#settled;
+	pids(): number[] { return this.#phase.kind === "running" ? this.#phase.shell.pids() : []; }
+
+	async #run(): Promise<BrushOutcome> {
+		const start = this.#start;
+		try {
+			const aborted = Promise.withResolvers<undefined>();
+			const onAbort = () => aborted.resolve(undefined);
+			this.#abort.signal.addEventListener("abort", onAbort, { once: true });
+			let prepared: PreparedBrushRun | undefined;
+			try {
+				if (this.#abort.signal.aborted) return { kind: "cancelled" };
+				prepared = await Promise.race([start.prepare(this.#abort.signal), aborted.promise]);
+			} finally {
+				this.#abort.signal.removeEventListener("abort", onAbort);
+			}
+			if (!prepared || this.#abort.signal.aborted) return { kind: "cancelled" };
+			const filesystem = start.filesystem?.(this.#abort.signal);
+			if (this.#abort.signal.aborted) return { kind: "cancelled" };
+			const { shell, lease } = start.shells.lease(prepared.key, prepared.shellOptions, start.persistent);
+			this.#lease = lease;
+			let stdin: NativeShellStdin;
+			try { stdin = new start.native.ShellStdin(); }
+			catch (error) {
+				start.shells.settle(shell, lease, false, Promise.resolve());
+				throw error;
+			}
+			this.#phase = { kind: "running", shell, stdin };
+			this.#ready.resolve();
+			let run: Promise<NativeShellRunResult>;
+			try {
+				run = shell.run({
+					command: prepared.command, cwd: prepared.cwd, env: prepared.env,
+					timeoutMs: start.timeoutMs, signal: this.#abort.signal, filesystem,
+				}, stdin, (error, chunk) => { if (!error) start.onOutput(chunk); });
+			} catch (error) {
+				stdin.close();
+				start.shells.settle(shell, lease, false, Promise.resolve());
+				throw error;
+			}
+			const outcome = await this.#race(run, start.timeoutMs, shell);
+			if (outcome.kind !== "exited") this.#abort.abort();
+			stdin.close();
+			start.shells.settle(shell, lease, outcome.kind === "exited", run.catch(() => undefined));
+			return outcome;
+		} catch (error) {
+			return this.#abort.signal.aborted ? { kind: "cancelled" }
+				: { kind: "failed", message: error instanceof Error ? error.message : String(error) };
+		}
 	}
 
-	/** Pids of the processes the running execution spawned; empty once it ended. */
-	pids(): number[] {
-		return this.#settled ? [] : this.#shell.pids();
-	}
-
-	/** Write to the execution's stdin, waiting until the pipe accepts every byte. */
+	/** Preparation has no input queue: wait for this execution's actual stdin. */
 	async writeStdin(data: Uint8Array, signal?: AbortSignal): Promise<StdinWrite> {
-		if (this.#settled) return { kind: "not-running" };
 		if (signal?.aborted) return { kind: "cancelled" };
-		// napi owns onabort on the signal it wraps. Give this write its own
-		// signal so it cannot replace a caller's handlers or cancel the run.
+		const cancelled = Promise.withResolvers<void>();
+		const onCancel = () => cancelled.resolve();
+		signal?.addEventListener("abort", onCancel, { once: true });
+		try { await Promise.race([this.#ready.promise, cancelled.promise]); }
+		finally { signal?.removeEventListener("abort", onCancel); }
+		if (signal?.aborted) return { kind: "cancelled" };
+		const phase = this.#phase;
+		if (phase.kind !== "running") return { kind: "not-running" };
 		const writeAbort = signal ? new AbortController() : undefined;
 		const onAbort = () => writeAbort?.abort(signal?.reason);
 		signal?.addEventListener("abort", onAbort, { once: true });
 		try {
-			await this.#stdin.write(data, writeAbort?.signal);
+			await phase.stdin.write(data, writeAbort?.signal);
 			return { kind: "written" };
-		} catch (err) {
-			if (this.#settled) return { kind: "not-running" };
+		} catch (error) {
+			if (this.settled) return { kind: "not-running" };
 			if (signal?.aborted) return { kind: "cancelled" };
-			return { kind: "refused", reason: err instanceof Error ? err.message : String(err) };
-		} finally {
-			signal?.removeEventListener("abort", onAbort);
-		}
+			return { kind: "refused", reason: error instanceof Error ? error.message : String(error) };
+		} finally { signal?.removeEventListener("abort", onAbort); }
 	}
 
-	/**
-	 * The termination primitive: cancel the execution if it is still running.
-	 * Idempotent; the native shell then reaps the processes this run spawned
-	 * (its spawn registry) within its cancellation grace.
-	 */
+	/** The one cancellation primitive, including during preparation. */
 	terminate(): TerminateResult {
-		if (this.#settled) return "already-settled";
-		if (!this.#cancelled) {
-			this.#cancelled = true;
+		if (this.#phase.kind === "ended") return "already-settled";
+		if (!this.#abort.signal.aborted) {
 			this.#abort.abort();
-			void this.#shell.abort().catch(() => undefined);
+			if (this.#phase.kind === "running") void this.#phase.shell.abort().catch(() => undefined);
 		}
 		return "cancelled";
 	}
 
-	async #race(run: Promise<NativeShellRunResult>, timeoutMs: number | undefined): Promise<BrushOutcome> {
+	async #race(run: Promise<NativeShellRunResult>, timeoutMs: number | undefined, shell: NativeShell): Promise<BrushOutcome> {
 		const settled = run.then(
 			(result): BrushOutcome => {
 				if (result.timedOut) {
@@ -314,7 +342,7 @@ export class BrushExecution {
 		const { promise: backstop, resolve } = Promise.withResolvers<BrushOutcome>();
 		const timer = setTimeout(() => {
 			this.#abort.abort();
-			void this.#shell.abort().catch(() => undefined);
+			void shell.abort().catch(() => undefined);
 			const seconds = Math.round(deadlineMs / 1000);
 			resolve({
 				kind: "timed-out",

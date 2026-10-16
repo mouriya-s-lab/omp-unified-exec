@@ -21,10 +21,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { BrushExecution, TerminateResult } from "../fork-features/brush/execution.ts";
+import type { Delivery } from "../fork-features/brush/jobs.ts";
+import type { CommandDeadline } from "../fork-features/brush/deadline.ts";
+import type { ProcessResultDetails } from "./tool-result.ts";
 import { type CollectResult, collectOutputUntilDeadline } from "./collect.ts";
 import { HeadTailBuffer } from "./head-tail-buffer.ts";
 import { Gate, Notify } from "./notify.ts";
-import { DEFAULT_PTY_COLS, DEFAULT_PTY_ROWS, type SpawnedChild, spawnChild } from "./pty.ts";
+import { DEFAULT_PTY_COLS, DEFAULT_PTY_ROWS, type SpawnedChild, spawnChild, signalDeadlineGroup } from "./pty.ts";
+import type { DeadlineSignalResult } from "./pty.ts";
 import { type StyledScreen, type TerminalAppearance, TerminalScreen, type TerminalSnapshot } from "./terminal-screen.ts";
 
 /** Default per-session output retention. */
@@ -47,12 +51,17 @@ export interface SessionSpawnOptions {
 	windowsVerbatimArguments?: boolean; // Windows cmd.exe quoting (see shell.ts)
 	/** tty only: the background the session's screen is shown on (default dark), answered to OSC 10/11. */
 	appearance?: () => TerminalAppearance;
+	/** omp only; omitted process deadlines remain unlimited. */
+	deadline?: CommandDeadline;
 }
 
 /** A Brush session: an embedded brush shell execution instead of a spawned process. */
 export interface BrushSessionOptions {
 	cwd: string;
 	displayCommand: string;
+	delivery: Delivery;
+	deadline: CommandDeadline;
+	finalize: (session: ExecSession) => Promise<ProcessResultDetails>;
 	headTailMaxBytes?: number;
 	streamTailBytes?: number;
 	/** Start the execution, forwarding its output to `onOutput`. */
@@ -62,7 +71,11 @@ export interface BrushSessionOptions {
 /** What a session runs: a spawned process (pipes or PTY) or an embedded brush execution. */
 type SessionEngine =
 	| { readonly kind: "process"; readonly child: SpawnedChild }
-	| { readonly kind: "brush"; readonly execution: BrushExecution };
+	| {
+			readonly kind: "brush";
+			readonly execution: BrushExecution;
+			readonly finalResult: Promise<BrushFinal>;
+	  };
 
 /** Outcome of writing input to a session. */
 export type InputWrite =
@@ -72,6 +85,10 @@ export type InputWrite =
 	| { readonly kind: "not_running" }
 	/** The write did not complete; an accepted prefix may already be in stdin. */
 	| { readonly kind: "refused"; readonly reason: string };
+
+export type BrushFinal =
+	| { readonly kind: "terminated" }
+	| { readonly kind: "result"; readonly details: ProcessResultDetails };
 
 export interface SessionState {
 	hasExited: boolean;
@@ -96,6 +113,12 @@ export class ExecSession {
 	/** Path to a log file that receives the full stdout+stderr stream. */
 	readonly logPath: string;
 	private logStream: WriteStream | undefined;
+	readonly delivery: Delivery;
+	readonly deadline: CommandDeadline;
+	private completion: { readonly kind: "normal" } | { readonly kind: "timed-out"; readonly notice: string } |
+		{ readonly kind: "terminated" } = { kind: "normal" };
+	private deadlineTimer: NodeJS.Timeout | undefined;
+	private deadlineKillTimer: NodeJS.Timeout | undefined;
 
 	/** Head+tail buffer drained by each collectOutputUntilDeadline() call (pipe sessions). */
 	readonly outputBuffer: HeadTailBuffer;
@@ -132,12 +155,16 @@ export class ExecSession {
 		opts: Pick<SessionSpawnOptions, "cwd" | "tty" | "headTailMaxBytes" | "streamTailBytes"> & {
 			command: string[];
 			displayCommand: string;
+			delivery?: Delivery;
+			deadline?: CommandDeadline;
 		},
 	) {
 		this.id = id;
 		this.command = opts.command;
 		this.displayCommand = opts.displayCommand;
 		this.cwd = opts.cwd;
+		this.delivery = opts.delivery ?? { kind: "coordinator" };
+		this.deadline = opts.deadline ?? { kind: "unlimited" };
 		this.tty = opts.tty;
 		this.startedAt = Date.now();
 		this.lastUsedAt = this.startedAt;
@@ -183,6 +210,7 @@ export class ExecSession {
 
 		child.onData((chunk) => self.receive(chunk));
 		child.onExit((exitCode, signal, failureMessage) => self.finish(exitCode, signal, failureMessage ?? null));
+		self.armDeadline(child);
 		return self;
 	}
 
@@ -206,20 +234,71 @@ export class ExecSession {
 			self.outputClosed.close();
 			return self;
 		}
-		self.engine = { kind: "brush", execution };
+		const finalResult = execution.outcome.then(async () : Promise<BrushFinal> => {
+			await self.outputClosed.closed();
+			if (execution.terminated || self.delivery.kind === "host-job" && self.delivery.signal.aborted) return { kind: "terminated" };
+			return { kind: "result", details: await opts.finalize(self) };
+		});
+		self.engine = { kind: "brush", execution, finalResult };
 		void execution.outcome.then((outcome) => {
 			switch (outcome.kind) {
 				case "exited":
 					return self.finish(outcome.exitCode, null, null);
 				case "timed-out":
+					self.completion = { kind: "timed-out", notice: outcome.notice };
 					return self.finish(null, null, outcome.notice);
 				case "cancelled":
+					self.completion = { kind: "terminated" };
 					return self.finish(null, null, "the command was terminated");
 				case "failed":
 					return self.finish(null, null, outcome.message);
 			}
 		});
 		return self;
+	}
+
+	/** The caller indexes this inert session before beginning host preparation. */
+	beginBrush(): void {
+		if (this.engine?.kind !== "brush") throw new Error("cannot begin a non-Brush session");
+		this.engine.execution.begin();
+	}
+
+	get brushFinal(): Promise<BrushFinal> | undefined {
+		return this.engine?.kind === "brush" ? this.engine.finalResult : undefined;
+	}
+
+	get timedOut(): boolean { return this.completion.kind === "timed-out"; }
+	get wasTerminated(): boolean {
+		return this.completion.kind === "terminated" || this.delivery.kind === "host-job" && this.delivery.signal.aborted;
+	}
+
+	private armDeadline(child: SpawnedChild): void {
+		if (this.deadline.kind === "unlimited") return;
+		const deadline = this.deadline;
+		this.deadlineTimer = setTimeout(() => {
+			if (this.hasExited) return;
+			const notice = `Command timed out after ${deadline.seconds} seconds`;
+			this.completion = { kind: "timed-out", notice };
+			this.recordFailure(notice);
+			const term = this.signalDeadline(child, "SIGTERM");
+			if (term.kind === "gone" || term.kind === "unavailable") return;
+			this.deadlineKillTimer = setTimeout(() => {
+				if (!this.hasExited) this.signalDeadline(child, "SIGKILL");
+			}, 2000);
+		}, deadline.milliseconds);
+	}
+
+	private signalDeadline(child: SpawnedChild, signal: NodeJS.Signals): DeadlineSignalResult {
+		const result = signalDeadlineGroup(child, signal);
+		let reason: string;
+		switch (result.kind) {
+			case "requested":
+			case "gone": return result;
+			case "unavailable": reason = result.reason; break;
+			case "failed": reason = result.error.message; break;
+		}
+		this.state = { ...this.state, failureMessage: `${this.state.failureMessage ?? "Command deadline reached"}; ${signal}: ${reason}` };
+		return result;
 	}
 
 	/**
@@ -267,14 +346,23 @@ export class ExecSession {
 
 	/** The engine ended: record the exit, wake waiters, then flush the log and close the output gate. */
 	private finish(exitCode: number | null, signal: NodeJS.Signals | null, failureMessage: string | null): void {
+		clearTimeout(this.deadlineTimer);
+		clearTimeout(this.deadlineKillTimer);
 		this.state = {
 			hasExited: true,
 			exitCode,
 			signal,
 			failureMessage: this.state.failureMessage ?? failureMessage,
 		};
-		this.exitedAc.abort();
-		this.notifyExitListeners();
+		const publishExit = () => {
+			this.exitedAc.abort();
+			this.notifyExitListeners();
+			this.outputNotify.notifyAll();
+		};
+		// HostJob completion is the manager run settling, not merely native exit.
+		// Output closure below remains independent, so its finalizer cannot await itself.
+		if (this.delivery.kind === "host-job") void this.delivery.jobPromise.then(publishExit, publishExit);
+		else publishExit();
 		// Fire a notify so any parked waiters wake up and see the exit.
 		this.outputNotify.notifyAll();
 		// A short tick later, flush the log stream to disk, then close the
@@ -468,20 +556,19 @@ export class ExecSession {
 	 * exited (the primitive is never called for an ended execution).
 	 */
 	kill(signal: NodeJS.Signals = "SIGTERM"): void {
+		if (this.engine?.kind === "brush") { this.terminateBrush(); return; }
 		if (this.state.hasExited) return;
-		switch (this.engine.kind) {
-			case "process":
-				this.engine.child.kill(signal);
-				return;
-			case "brush":
-				this.engine.execution.terminate();
-				return;
-		}
+		if (this.engine?.kind === "process") this.engine.child.kill(signal);
 	}
 
 	/** The Brush execution's termination primitive; undefined for process sessions. */
 	terminateBrush(): TerminateResult | undefined {
-		return this.engine?.kind === "brush" ? this.engine.execution.terminate() : undefined;
+		if (this.engine?.kind !== "brush") return undefined;
+		if (this.delivery.kind === "coordinator") return this.engine.execution.terminate();
+		const cancelled = this.delivery.signal.aborted || this.delivery.manager.cancel(this.delivery.jobId);
+		if (!cancelled) return "already-settled";
+		this.engine.execution.terminate();
+		return "cancelled";
 	}
 
 	/** Whether this session runs on the embedded brush shell. */
@@ -495,7 +582,7 @@ export class ExecSession {
 	}
 
 	get hasExited(): boolean {
-		return this.state.hasExited;
+		return this.delivery.kind === "host-job" ? this.exitedAc.signal.aborted : this.state.hasExited;
 	}
 
 	/**

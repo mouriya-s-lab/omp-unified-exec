@@ -39,6 +39,8 @@ declare module "@oh-my-pi/pi-coding-agent/exec/settings" {
 	export const cfgBashDirenv: unknown;
 	export const cfgBashDirenvLoadTimeoutMs: unknown;
 	export const cfgShellMinimizer: unknown;
+	export const cfgBashAutoBackgroundEnabled: unknown;
+	export const cfgBashAutoBackgroundThresholdMs: unknown;
 	export const cfgBashPatterns: unknown;
 	export const cfgBashAllowCompoundCommands: unknown;
 }
@@ -94,4 +96,18 @@ declare module "@oh-my-pi/pi-coding-agent/internal-urls/url-filesystem" {
 
 declare module "@oh-my-pi/pi-coding-agent/session/context-settings" {
 	export const cfgCompactionExperimentalContextManagement: unknown;
+}
+
+declare module "@oh-my-pi/pi-coding-agent/tools/settings" {
+	export const cfgAsyncEnabled: unknown;
+	export const cfgToolsMaxTimeout: unknown;
+}
+
+declare module "@oh-my-pi/pi-coding-agent/tools/tool-timeouts" {
+	export const clampTimeout: unknown;
+	export const TOOL_TIMEOUTS: unknown;
+}
+
+declare module "@oh-my-pi/pi-coding-agent/async" {
+	export const resolveAutoBackgroundWaitMs: unknown;
 }

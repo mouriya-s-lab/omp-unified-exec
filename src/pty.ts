@@ -260,6 +260,38 @@ function killPosixProcessGroup(pid: number, signal: NodeJS.Signals): void {
 	}
 }
 
+export type DeadlineSignalResult =
+	| { readonly kind: "requested" }
+	| { readonly kind: "gone" }
+	| { readonly kind: "unavailable"; readonly reason: string }
+	| { readonly kind: "failed"; readonly error: Error };
+
+const GROUP_SIGNAL_REQUESTED: DeadlineSignalResult = { kind: "requested" };
+const GROUP_SIGNAL_GONE: DeadlineSignalResult = { kind: "gone" };
+const GROUP_SIGNAL_NO_PID: DeadlineSignalResult = { kind: "unavailable", reason: "the session has no owned process id" };
+const GROUP_SIGNAL_ROOT_EXITED: DeadlineSignalResult = {
+	kind: "unavailable", reason: "cannot safely signal a Windows process tree after its root exited",
+};
+
+/** Deadline-only group signaling. A reaped leader must never become a bare-PID fallback target. */
+export function signalDeadlineGroup(child: SpawnedChild, signal: NodeJS.Signals): DeadlineSignalResult {
+	const pid = child.pid;
+	if (pid === undefined) return GROUP_SIGNAL_NO_PID;
+	if (IS_WINDOWS) {
+		// taskkill cannot safely rediscover a dead root's tree from a possibly recycled PID.
+		if (child.processExited) return GROUP_SIGNAL_ROOT_EXITED;
+		child.kill(signal);
+		return GROUP_SIGNAL_REQUESTED;
+	}
+	try {
+		process.kill(-pid, signal);
+		return GROUP_SIGNAL_REQUESTED;
+	} catch (error) {
+		if (typeof error === "object" && error !== null && "code" in error && error.code === "ESRCH") return GROUP_SIGNAL_GONE;
+		return { kind: "failed", error: error instanceof Error ? error : new Error(String(error)) };
+	}
+}
+
 /**
  * Windows: node-pty's conpty connection holds a worker thread and named-pipe
  * sockets that keep the Node event loop alive even after the child exits.

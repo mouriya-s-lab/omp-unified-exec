@@ -43,6 +43,8 @@ const terminalSchema = Type.Object(
 	{ description: "tty sessions only: output is the rendered terminal (history lines, then the full current screen)." },
 );
 
+const deliverySchema = Type.Union([Type.Literal("pending"), Type.Literal("delivered"), Type.Literal("terminated")]);
+
 const outputFields = {
 	output: Type.String({
 		description:
@@ -53,6 +55,11 @@ const outputFields = {
 	exit_code: Type.Optional(Type.Number({ description: "Exit code once the process has exited." })),
 	signal: Type.Optional(Type.String({ description: "Signal that terminated the process, if any." })),
 	failure_message: Type.Optional(Type.String()),
+	timedOut: Type.Optional(Type.Boolean()),
+	cancelled: Type.Optional(Type.Boolean()),
+	timeoutSeconds: Type.Optional(Type.Number()),
+	timeoutNotice: Type.Optional(Type.String()),
+	delivery: Type.Optional(deliverySchema),
 	log_path: Type.Optional(Type.String({ description: "File containing the complete output stream." })),
 	wall_time_seconds: Type.Number(),
 	terminal: Type.Optional(terminalSchema),
@@ -68,6 +75,7 @@ export const processScriptResultSchema = Type.Object({
 	session_id: Type.Optional(
 		Type.Number({ description: "Present while the process is still running; drive it with write_stdin." }),
 	),
+	job_id: Type.Optional(Type.String({ description: "The host-owned background job id, when assigned." })),
 	...outputFields,
 	note: Type.Optional(Type.String()),
 	wait_status: Type.Optional(Type.String()),
@@ -81,12 +89,18 @@ export function processScriptResult(shape: ProcessResultDetails): ProcessScriptR
 		status: shape.status,
 		running: shape.running,
 		session_id: shape.session_id,
+		job_id: shape.job_id === undefined ? undefined : safeMeta(shape.job_id),
 		output: shape.output,
 		truncated: wasTruncated(shape),
 		omitted_bytes: shape.omitted_bytes || undefined,
 		exit_code: shape.exit_code,
 		signal: optionalMeta(shape.signal),
 		failure_message: optionalMeta(shape.failure_message),
+		timedOut: shape.timedOut,
+		cancelled: shape.cancelled,
+		timeoutSeconds: shape.timeoutSeconds,
+		timeoutNotice: shape.timeoutNotice === undefined ? undefined : safeMeta(shape.timeoutNotice),
+		delivery: shape.delivery,
 		log_path: optionalMeta(shape.log_path),
 		wall_time_seconds: shape.wall_time_seconds,
 		terminal: shape.terminal,
@@ -124,6 +138,11 @@ export function killScriptResult(shape: KillResultDetails): KillScriptResult {
 		exit_code: shape.exit_code,
 		signal: optionalMeta(shape.signal),
 		failure_message: optionalMeta(shape.failure_message),
+		timedOut: shape.timedOut,
+		cancelled: shape.cancelled,
+		timeoutSeconds: shape.timeoutSeconds,
+		timeoutNotice: shape.timeoutNotice === undefined ? undefined : safeMeta(shape.timeoutNotice),
+		delivery: shape.delivery,
 		log_path: optionalMeta(shape.log_path),
 		wall_time_seconds: shape.wall_time_seconds,
 		terminal: shape.terminal,
@@ -169,6 +188,8 @@ export const listSessionsScriptResultSchema = Type.Object({
 	sessions: Type.Array(
 		Type.Object({
 			session_id: Type.Number(),
+			job_id: Type.Optional(Type.String({ description: "The host-owned background job id, when assigned." })),
+			delivery: Type.Optional(deliverySchema),
 			command: Type.String(),
 			cwd: Type.Optional(Type.String()),
 			tty: Type.Boolean(),
@@ -177,7 +198,7 @@ export const listSessionsScriptResultSchema = Type.Object({
 				Type.Array(Type.Number(), { description: "Embedded-shell sessions: pids the running command spawned (they have no pid)." }),
 			),
 			elapsed_ms: Type.Number(),
-			running: Type.Boolean({ description: "False for sessions that just exited; they are removed after this listing." }),
+			running: Type.Boolean({ description: "False once execution has ended; a host job may remain pending delivery." }),
 			wake_armed: Type.Boolean(),
 			exit_code: Type.Optional(Type.Number()),
 			signal: Type.Optional(Type.String()),
@@ -193,6 +214,8 @@ export type ListSessionsScriptResult = Static<typeof listSessionsScriptResultSch
 export function listSessionsScriptResult(value: {
 	sessions: ReadonlyArray<{
 		session_id: number;
+		job_id?: string;
+		delivery?: ProcessResultDetails["delivery"];
 		command: string;
 		cwd?: string;
 		tty: boolean;
@@ -213,6 +236,8 @@ export function listSessionsScriptResult(value: {
 		sessions: value.sessions.map((s) =>
 			compact({
 				session_id: s.session_id,
+				job_id: s.job_id === undefined ? undefined : safeMeta(s.job_id),
+				delivery: s.delivery,
 				command: safeMeta(s.command),
 				cwd: optionalMeta(s.cwd),
 				tty: s.tty,
