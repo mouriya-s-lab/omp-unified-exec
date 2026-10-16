@@ -86,3 +86,12 @@ declare module "@oh-my-pi/pi-utils" {
 declare module "@oh-my-pi/pi-coding-agent/tools/gh-cache-invalidation" {
 	export const invalidateGithubCacheForBashCommand: unknown;
 }
+
+declare module "@oh-my-pi/pi-coding-agent/internal-urls/url-filesystem" {
+	export const InternalUrlFilesystem: unknown;
+	export const UrlFsError: unknown;
+}
+
+declare module "@oh-my-pi/pi-coding-agent/session/context-settings" {
+	export const cfgCompactionExperimentalContextManagement: unknown;
+}

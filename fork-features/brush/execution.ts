@@ -15,7 +15,7 @@
  * upstream's process-global tables, the shells belong to one plugin
  * activation and are disposed when it shuts down.
  */
-import type { NativeShell, NativeShellModule, NativeShellOptions, NativeShellRunResult, NativeShellStdin } from "./native.ts";
+import type { NativeFilesystem, NativeShell, NativeShellModule, NativeShellOptions, NativeShellRunResult, NativeShellStdin } from "./native.ts";
 
 /** How often a retained shell re-reads its live background job count (upstream `RETAIN_REAP_INTERVAL_MS`). */
 const RETAIN_REAP_INTERVAL_MS = 5_000;
@@ -187,6 +187,8 @@ export interface BrushExecutionStart {
 	readonly env: Record<string, string>;
 	/** Native deadline in ms; undefined runs without one. */
 	readonly timeoutMs: number | undefined;
+	/** Per-run bridge; the execution, not its observing tool call, owns its signal. */
+	readonly filesystem?: (signal: AbortSignal) => NativeFilesystem;
 	readonly onOutput: (chunk: string) => void;
 }
 
@@ -213,6 +215,8 @@ export class BrushExecution {
 	#cancelled = false;
 
 	private constructor(start: BrushExecutionStart) {
+		// Validate/create before leasing: a host adapter failure must not strand a busy shell.
+		const filesystem = start.filesystem?.(this.#abort.signal);
 		const { shell, lease } = start.shells.lease(start.key, start.shellOptions, start.persistent);
 		this.#shell = shell;
 		this.lease = lease;
@@ -224,6 +228,7 @@ export class BrushExecution {
 				env: start.env,
 				timeoutMs: start.timeoutMs,
 				signal: this.#abort.signal,
+				filesystem,
 			},
 			this.#stdin,
 			(error, chunk) => {
@@ -233,6 +238,7 @@ export class BrushExecution {
 		const raced = this.#race(run, start.timeoutMs);
 		this.outcome = raced.then((outcome) => {
 			this.#settled = true;
+			if (outcome.kind !== "exited") this.#abort.abort();
 			this.#stdin.close();
 			start.shells.settle(shell, lease, outcome.kind === "exited", run.catch(() => undefined));
 			return outcome;

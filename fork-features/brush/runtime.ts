@@ -6,10 +6,11 @@
  */
 import type { TerminalAppearance } from "../../src/terminal-screen.ts";
 import type { ProcessShell } from "../../src/shell.ts";
-import type { HostBindingState } from "./binding.ts";
+import type { HostBindingState, HostBinding } from "./binding.ts";
 import type { BrushShells } from "./execution.ts";
 import type { NativeLoad } from "./native.ts";
-import type { HostSettings, OmpHost } from "./omp-host.ts";
+import type { OmpHost } from "./omp-host.ts";
+import type { HostUrlFilesystem } from "./url-filesystem.ts";
 
 /** Mutable execution resources owned by one omp plugin activation. */
 export interface OmpEngine {
@@ -27,7 +28,7 @@ export type EngineHost = { readonly kind: "pi" } | OmpEngine;
 interface OmpExecutionContext {
 	readonly host: "omp";
 	readonly engine: OmpEngine;
-	readonly settings: HostSettings;
+	readonly binding: Extract<HostBinding, { readonly kind: "bound" }>;
 }
 
 type ProcessHost = { readonly host: "pi" } | OmpExecutionContext;
@@ -39,7 +40,10 @@ export type EngineSelection =
 	| ({ readonly kind: "pty-process" } & ProcessHost);
 
 export type EngineVariant =
-	| Extract<EngineSelection, { readonly kind: "brush" } | { readonly host: "pi" }>
+	| Extract<EngineSelection, { readonly host: "pi" }>
+	| (Extract<EngineSelection, { readonly kind: "brush" }> & {
+		readonly filesystem: (signal: AbortSignal | undefined) => HostUrlFilesystem;
+	})
 	| (Extract<EngineSelection, { readonly host: "omp"; readonly kind: "pipe-process" | "pty-process" }> &
 		{ readonly shell: ProcessShell });
 
