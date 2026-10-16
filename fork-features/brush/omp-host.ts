@@ -13,6 +13,8 @@ import type { CwdServices } from "./plan.ts";
 import type { CliResolutionHelpers } from "./cli.ts";
 import { resolveCliEntryCmd } from "./cli.ts";
 import type { FlatShellSegment } from "./worktree.ts";
+import { parseHostUrlFilesystem } from "./url-filesystem.ts";
+import type { HostApprovalTier, HostUrlContext, HostUrlFilesystem } from "./url-filesystem.ts";
 
 /** omp's `Settings` for one session. Read only through the readers below. */
 export interface HostSettings {
@@ -69,6 +71,10 @@ export interface OmpHost {
 	readonly resolveCliEntryCmd: () => Promise<readonly string[]>;
 	readonly extractFlatShellCommandSegments: (command: string) => readonly FlatShellSegment[];
 	readonly invalidateGithubCacheForBashCommand: (command: string) => void;
+	readonly experimentalContextManagement: (settings: HostSettings) => boolean;
+	readonly createUrlFilesystem: (context: HostUrlContext, tier: HostApprovalTier) => HostUrlFilesystem;
+	readonly normalizeInternalUrl: (path: string) => string;
+	readonly isUrlFsMissing: (error: unknown) => boolean;
 }
 
 type Fn = (...args: never[]) => unknown;
@@ -151,7 +157,7 @@ function parseDirenvDiff(value: unknown): DirenvDiff | null {
 
 /** Load and parse the host services; rejects when omp lacks any of them. */
 export async function loadOmpHost(): Promise<OmpHost> {
-	const [root, nonInteractive, snapshot, direnvModule, settings, tokenizer, approvalModule, internalUrls, pathUtils, worktree, taskSettings, utils, githubCache] = await Promise.all([
+	const [root, nonInteractive, snapshot, direnvModule, settings, tokenizer, approvalModule, internalUrls, pathUtils, worktree, taskSettings, utils, githubCache, urlFilesystem, contextSettings] = await Promise.all([
 		import("@oh-my-pi/pi-coding-agent"),
 		import("@oh-my-pi/pi-coding-agent/exec/non-interactive-env"),
 		import("@oh-my-pi/pi-coding-agent/utils/shell-snapshot"),
@@ -165,6 +171,8 @@ export async function loadOmpHost(): Promise<OmpHost> {
 		import("@oh-my-pi/pi-coding-agent/task/settings"),
 		import("@oh-my-pi/pi-utils"),
 		import("@oh-my-pi/pi-coding-agent/tools/gh-cache-invalidation"),
+		import("@oh-my-pi/pi-coding-agent/internal-urls/url-filesystem"),
+		import("@oh-my-pi/pi-coding-agent/session/context-settings"),
 	]);
 	const registryClass: unknown = root.AgentRegistry;
 	const global = typeof registryClass === "function" && "global" in registryClass ? registryClass.global : undefined;
@@ -187,6 +195,7 @@ export async function loadOmpHost(): Promise<OmpHost> {
 	const approvalPatterns = settingReader(settings, "cfgBashPatterns");
 	const allowCompoundCommands = settingReader(settings, "cfgBashAllowCompoundCommands");
 	const worktreeClone = settingReader(taskSettings, "cfgWorktreeClone");
+	const experimentalContextManagement = settingReader(contextSettings, "cfgCompactionExperimentalContextManagement");
 	const isCompiledBinary = exportedFunction(utils, "isCompiledBinary", "pi-utils");
 	const stripPrefix = exportedFunction(utils, "stripWindowsExtendedLengthPathPrefix", "pi-utils") as (path: string) => unknown;
 	const isExecutable = exportedFunction(utils, "isExecutable", "pi-utils") as (path: string) => unknown;
@@ -229,6 +238,15 @@ export async function loadOmpHost(): Promise<OmpHost> {
 	const router: unknown = instance.call(routerClass);
 	const canHandle = property(router, "canHandle");
 	if (typeof canHandle !== "function") throw new Error("omp-unified-exec: InternalUrlRouter lacks canHandle()");
+	const normalize = property(router, "normalize");
+	if (typeof normalize !== "function") throw new Error("omp-unified-exec: InternalUrlRouter lacks normalize()");
+	const filesystemClass: unknown = urlFilesystem.InternalUrlFilesystem;
+	const urlErrorClass: unknown = urlFilesystem.UrlFsError;
+	if (typeof filesystemClass !== "function" || typeof urlErrorClass !== "function") {
+		throw new Error("omp-unified-exec: internal-urls/url-filesystem lacks its filesystem or error class");
+	}
+	// Constructor exports are validated once, then their opaque results are parsed below.
+	const Filesystem = filesystemClass as new (options: { context: HostUrlContext; tier: HostApprovalTier }) => unknown;
 	const paths: CwdServices = {
 		extractLeadingCdTarget: exportedFunction(tokenizer, "extractLeadingCdTarget", "tools/shell-tokenize") as CwdServices["extractLeadingCdTarget"],
 		resolveToCwd: exportedFunction(pathUtils, "resolveToCwd", "tools/path-utils") as CwdServices["resolveToCwd"],
@@ -269,5 +287,10 @@ export async function loadOmpHost(): Promise<OmpHost> {
 		resolveCliEntryCmd: () => resolveCliEntryCmd(cliHelpers),
 		extractFlatShellCommandSegments: exportedFunction(tokenizer, "extractFlatShellCommandSegments", "tools/shell-tokenize") as OmpHost["extractFlatShellCommandSegments"],
 		invalidateGithubCacheForBashCommand: exportedFunction(githubCache, "invalidateGithubCacheForBashCommand", "tools/gh-cache-invalidation") as OmpHost["invalidateGithubCacheForBashCommand"],
+		experimentalContextManagement: (s) =>
+			expect("compaction.experimentalContextManagement", experimentalContextManagement(s), boolean),
+		createUrlFilesystem: (context, tier) => parseHostUrlFilesystem(new Filesystem({ context, tier })),
+		normalizeInternalUrl: (path) => expect("InternalUrlRouter.normalize()", normalize.call(router, path), string),
+		isUrlFsMissing: (error) => error instanceof urlErrorClass && property(error, "code") === "ENOENT",
 	};
 }

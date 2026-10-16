@@ -34,6 +34,7 @@ import { planBrushRun } from "../fork-features/brush/environment.ts";
 import { BrushExecution, BrushShells, persistentLease } from "../fork-features/brush/execution.ts";
 import { createExecPlan, resolveExecutionPlan, rewriteWorktreePlan } from "../fork-features/brush/plan.ts";
 import type { ExecPlan } from "../fork-features/brush/plan.ts";
+import { resolveUrlCwd } from "../fork-features/brush/url-filesystem.ts";
 import type { EngineHost, EngineSelection, EngineVariant, HostRuntime } from "../fork-features/brush/runtime.ts";
 import { type ActivatedExtension, withHostPresentation } from "../fork-features/omp-presentation.ts";
 import { type CollectResult, NO_OUTPUT } from "./collect.ts";
@@ -198,11 +199,11 @@ function selectEngine(engine: EngineHost, args: ExecCommandArgs): EngineSelectio
 				const reason = binding.kind === "unbound" ? binding.reason : "no session has started";
 				throw execError("host_binding_unavailable", `this omp session could not be bound to its host session (${reason})`);
 			}
-			if (args.tty === true) return { kind: "pty-process", host: "omp", engine, settings: binding.session.settings };
+			if (args.tty === true) return { kind: "pty-process", host: "omp", engine, binding };
 			if (args.shell !== undefined && args.shell.length > 0) {
-				return { kind: "pipe-process", host: "omp", engine, settings: binding.session.settings };
+				return { kind: "pipe-process", host: "omp", engine, binding };
 			}
-			return { kind: "brush", host: "omp", engine, settings: binding.session.settings };
+			return { kind: "brush", host: "omp", engine, binding };
 		}
 	}
 }
@@ -334,7 +335,8 @@ async function startBrushSession(
 	sessionId: string,
 	signal: AbortSignal | undefined,
 ): Promise<ExecSession> {
-	const { engine, settings } = variant;
+	const { engine, binding } = variant;
+	const settings = binding.session.settings;
 	if (engine.native.kind === "unavailable") {
 		throw execError("native_shell_unavailable", `the embedded shell's native addon could not be loaded (${engine.native.reason})`);
 	}
@@ -358,6 +360,7 @@ async function startBrushSession(
 				cwd: plan.cwd,
 				env: launch.env,
 				timeoutMs: undefined,
+				filesystem: (signal) => variant.filesystem(signal).nativeFilesystem(),
 				onOutput,
 			}),
 	});
@@ -371,6 +374,8 @@ async function runExecCommand(
 	cwd: string,
 	/** The host session id, read only by Brush (it keys the persistent shell). */
 	sessionId: () => string,
+	/** Exact per-call host context; only omp's Brush context parser reads it. */
+	caller?: unknown,
 ): Promise<ResponseShape> {
 	const finalizeResponse = (input: FinalizeInput): ResponseShape =>
 		finalizeProcessResult({ ...input, operation: "exec_command" });
@@ -380,12 +385,12 @@ async function runExecCommand(
 	const selected = selectEngine(ctx.engine, args);
 	// Pi keeps its synchronous, raw-path process launch. Only omp awaits
 	// the host's cwd stage; its async boundary must recheck shutdown.
-	const plan: ExecPlan = selected.host === "pi" ? {
+	let plan: ExecPlan = selected.host === "pi" ? {
 		rawCommand: args.cmd,
 		command: args.cmd,
 		cwd: args.workdir && args.workdir.length > 0 ? args.workdir : cwd,
 		variant: selected,
-	} : await rewriteWorktreePlan(resolveExecutionPlan(await createExecPlan(args, cwd, selected), args.shell));
+	} : await rewriteWorktreePlan(resolveExecutionPlan(await createExecPlan(args, cwd, selected), args.shell, caller));
 	if (selected.host === "omp" && ctx.shuttingDown) {
 		throw new Error("unified-exec: session is shutting down; not starting new commands.");
 	}
@@ -393,6 +398,10 @@ async function runExecCommand(
 	// Approval has already completed; failed execution does not restore stale rows.
 	if (plan.variant.host === "omp") {
 		plan.variant.engine.services.invalidateGithubCacheForBashCommand(plan.command);
+		if (plan.variant.engine.services.paths.canHandleInternalUrl(plan.cwd)) {
+			plan = await resolveUrlCwd(plan, signal);
+			if (ctx.shuttingDown) throw new Error("unified-exec: session is shutting down; not starting new commands.");
+		}
 	}
 	const variant = plan.variant;
 	const tty = variant.kind === "pty-process";
@@ -1338,6 +1347,7 @@ function activate(pi: ExtensionAPI, host: HostRuntime = { kind: "pi" }): Activat
 		name: "exec_command",
 		label: "exec_command",
 		...(engine.kind === "omp" ? {
+			readsSkillUris: true,
 			approval: (args: unknown): CommandApproval => {
 				if (engine.binding.kind !== "bound") return "exec";
 				const settings = engine.binding.session.settings;
@@ -1409,6 +1419,7 @@ function activate(pi: ExtensionAPI, host: HostRuntime = { kind: "pi" }): Activat
 				onUpdate,
 				eventCtx.cwd,
 				() => eventCtx.sessionManager.getSessionId(),
+				eventCtx,
 			);
 			updateRunningSessionsUi(ctx);
 			return {

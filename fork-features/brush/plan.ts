@@ -3,13 +3,14 @@
  * Behavior follows can1357/oh-my-pi@c2cb79e4c227aa4b22c4ccb933ff72fd88bceba4,
  * packages/coding-agent/src/tools/bash.ts (leading cd and local cwd checks).
  * The exported host tokenizer/path resolver and shared URL router are imported
- * by the adapter, not copied. URL normalization/stat belongs to #33.
+ * by the adapter, not copied. URL normalization/stat follows in its own C4 stage.
  */
 import type { Stats } from "node:fs";
 import { stat } from "node:fs/promises";
 import { processShellPath, selectProcessShell, shellSyntax } from "../../src/shell.ts";
 import type { EngineSelection, EngineVariant } from "./runtime.ts";
 import { rewriteForShell } from "./worktree.ts";
+import { filesystemFactory } from "./url-filesystem.ts";
 
 export interface CwdServices {
 	readonly extractLeadingCdTarget: (command: string) => { readonly path: string; readonly rest: string } | null;
@@ -72,9 +73,12 @@ export async function createExecPlan(
 }
 
 /** Resolve once after cwd validation; dispatch and rewriting share this selection. */
-export function resolveExecutionPlan(plan: CwdPlan, shell: string | undefined): ExecPlan {
+export function resolveExecutionPlan(plan: CwdPlan, shell: string | undefined, caller?: unknown): ExecPlan {
 	const variant = plan.variant;
-	if (variant.host === "pi" || variant.kind === "brush") return { ...plan, variant };
+	if (variant.host === "pi") return { ...plan, variant };
+	if (variant.kind === "brush") {
+		return { ...plan, variant: { ...variant, filesystem: filesystemFactory(variant, caller, plan.rawCommand) } };
+	}
 	return { ...plan, variant: { ...variant, shell: selectProcessShell(shell) } };
 }
 
@@ -83,7 +87,7 @@ export async function rewriteWorktreePlan(plan: ExecPlan): Promise<ExecPlan> {
 	const variant = plan.variant;
 	if (variant.host === "pi") return plan;
 	const services = variant.engine.services;
-	if (!services.worktreeClone(variant.settings)) return plan;
+	if (!services.worktreeClone(variant.binding.session.settings)) return plan;
 	const cli = await services.resolveCliEntryCmd();
 	const syntax = variant.kind === "brush" ? "command-c" : shellSyntax(processShellPath(variant.shell));
 	return { ...plan, command: rewriteForShell(plan.command, cli, syntax, services) };

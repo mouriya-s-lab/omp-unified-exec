@@ -25,12 +25,17 @@ export interface NativeMinimizerOptions {
 	legacyFilters?: boolean;
 }
 
+/** Host-owned callback bridge. Only the host adapter parses this opaque value. */
+export interface NativeFilesystem {
+	readonly __nativeFilesystem: unique symbol;
+}
+
 export interface NativeShellOptions {
 	sessionEnv?: Record<string, string>;
 	snapshotPath?: string;
 	minimizer?: NativeMinimizerOptions;
 	/** Host filesystem bridge (`shell/vfs.rs`); supplied by internal-URL support. */
-	filesystem?: unknown;
+	filesystem?: NativeFilesystem;
 }
 
 export interface NativeShellRunOptions {
@@ -39,7 +44,7 @@ export interface NativeShellRunOptions {
 	env?: Record<string, string>;
 	timeoutMs?: number;
 	signal?: AbortSignal;
-	filesystem?: unknown;
+	filesystem?: NativeFilesystem;
 }
 
 export interface NativeMinimizerResult {
