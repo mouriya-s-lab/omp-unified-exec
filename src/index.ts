@@ -1,9 +1,9 @@
 /**
  * unified-exec — pi extension that ports codex's unified_exec session model,
- * with pi's built-in `bash` tool's on-disk retention layered on top.
+ * with real-process log retention and omp-specific Brush integration.
  *
  * Tools exposed to the LLM:
- *   - exec_command(cmd, workdir?, shell?, tty?, yield_time_ms?, on_exit?)
+ *   - exec_command(cmd, workdir?, shell?, tty?, yield_time_ms?, on_exit?; omp: timeout?, async?)
  *   - write_stdin(session_id, chars?, yield_time_ms?, yield_until?)
  *   - set_on_exit(session_id, on_exit)            [disarm/re-arm wake without kill]
  *   - kill_session(session_id, signal?)          [pi-flavor; codex has no equivalent]
@@ -18,9 +18,9 @@
  *   - Aborting the tool call (Esc) breaks the wait but does not kill the
  *     session; the next turn can still drive it.
  *   - Sessions are terminated on session_shutdown (codex parity).
- *   - Every byte the child writes goes to a per-session log file at
- *     /tmp/pi-unified-exec-<sid>-<random>.log. The LLM sees the last ~50 KiB
- *     / 2000 lines per call and the full file is available via `read`.
+ *   - Real-process bytes go to /tmp/pi-unified-exec-<sid>-<random>.log.
+ *     Brush preserves native UTF-8 text in one caller-owned artifact when
+ *     available; otherwise its bounded result explicitly reports inline-only.
  */
 
 import { constants as osConstants } from "node:os";
