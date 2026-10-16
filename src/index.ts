@@ -1,9 +1,9 @@
 /**
  * unified-exec — pi extension that ports codex's unified_exec session model,
- * with pi's built-in `bash` tool's on-disk retention layered on top.
+ * with real-process log retention and omp-specific Brush integration.
  *
  * Tools exposed to the LLM:
- *   - exec_command(cmd, workdir?, shell?, tty?, yield_time_ms?, on_exit?)
+ *   - exec_command(cmd, workdir?, shell?, tty?, yield_time_ms?, on_exit?; omp: timeout?, async?)
  *   - write_stdin(session_id, chars?, yield_time_ms?, yield_until?)
  *   - set_on_exit(session_id, on_exit)            [disarm/re-arm wake without kill]
  *   - kill_session(session_id, signal?)          [pi-flavor; codex has no equivalent]
@@ -18,9 +18,9 @@
  *   - Aborting the tool call (Esc) breaks the wait but does not kill the
  *     session; the next turn can still drive it.
  *   - Sessions are terminated on session_shutdown (codex parity).
- *   - Every byte the child writes goes to a per-session log file at
- *     /tmp/pi-unified-exec-<sid>-<random>.log. The LLM sees the last ~50 KiB
- *     / 2000 lines per call and the full file is available via `read`.
+ *   - Real-process bytes go to /tmp/pi-unified-exec-<sid>-<random>.log.
+ *     Brush preserves native UTF-8 text in one caller-owned artifact when
+ *     available; otherwise its bounded result explicitly reports inline-only.
  */
 
 import { constants as osConstants } from "node:os";
@@ -42,6 +42,7 @@ import type { Delivery, TerminalDelivery } from "../fork-features/brush/jobs.ts"
 import { brushKillResultContent, brushResultContent, deadlineDetails, finalizeBrushSession, finalizeSessionResult } from "../fork-features/brush/result.ts";
 import { BrushOutput, outputArtifactOwner } from "../fork-features/brush/output.ts";
 import type { OutputServices } from "../fork-features/brush/output.ts";
+import { execDescription } from "../fork-features/brush/metadata.ts";
 import type { EngineHost, EngineSelection, EngineVariant, HostRuntime } from "../fork-features/brush/runtime.ts";
 import { type ActivatedExtension, withHostPresentation } from "../fork-features/omp-presentation.ts";
 import { type CollectResult, NO_OUTPUT } from "./collect.ts";
@@ -1522,12 +1523,14 @@ function activate(pi: ExtensionAPI, host: HostRuntime = { kind: "pi" }): Activat
 		// if --keep-builtin-bash was passed. Flag lookup uses the registered
 		// name without leading dashes.
 		const keep = pi.getFlag("keep-builtin-bash");
-		if (keep !== true) {
-			const active = pi.getActiveTools();
-			const filtered = active.filter((name) => name !== "bash");
-			if (filtered.length !== active.length) {
-				pi.setActiveTools(filtered);
-			}
+		const active = pi.getActiveTools();
+		const filtered = keep === true ? active : active.filter((name) => name !== "bash");
+		if (engine.kind === "omp") {
+			// Await the public refresh after binding, even if bash was already absent or kept.
+			// Essential descriptions participate in the host's fresh-prompt signature.
+			await pi.setActiveTools(filtered);
+		} else if (filtered.length !== active.length) {
+			pi.setActiveTools(filtered);
 		}
 		if (!isPtyAvailable() && eventCtx.hasUI) {
 			// Non-fatal: pipes mode still works.
@@ -1701,8 +1704,15 @@ function activate(pi: ExtensionAPI, host: HostRuntime = { kind: "pi" }): Activat
 			'"none" (default): no auto-resume; poll with write_stdin. "wake": ONE follow-up notification on unobserved exit that resumes the agent — only when the human explicitly wants auto-resume. Change later via set_on_exit. A completion observed directly by a tool result consumes the wake.')),
 	};
 	const ompExecProperties = engine.kind === "omp" ? {
-		...execProperties, timeout: Type.Optional(Type.Number({ description:
-			"Command deadline in seconds, not an attachment wait. 0 disables it; otherwise 1..3600 and tools.maxTimeout apply. Brush defaults to 300 seconds; real processes have no default deadline." })),
+		...execProperties,
+		shell: Type.Optional(Type.String({ description:
+			"Omit or use an empty string for the embedded Brush shell when tty:false. A nonempty shell selects a real pipe process and disables Brush-only Git Guard, internal URLs and minimization. With tty:true this chooses the real PTY shell." })),
+		tty: Type.Optional(Type.Boolean({ description:
+			"Allocate a real PTY for interactive programs, REPLs, ssh, sudo and password prompts. Default false selects Brush unless a nonempty shell was given. PTY output is rendered terminal state, not raw bytes." })),
+		on_exit: Type.Optional(StringEnum(["none", "wake"] as const,
+			'"none" (default). "wake" requests one unobserved-exit follow-up only for Coordinator delivery and only at the human’s request; HostJob rejects wake and delivers automatically.')),
+		timeout: Type.Optional(Type.Number({ description:
+			"Command deadline in seconds, not an attachment wait. 0 disables it; otherwise host per-tool bounds and tools.maxTimeout apply. Brush defaults to the host's configured/capped deadline; real processes have no default deadline." })),
 		yield_time_ms: Type.Optional(Type.Number({ description:
 			`Attachment wait only. Explicit values are clamped to ${MIN_YIELD_TIME_MS}..${MAX_YIELD_TIME_MS} ms. Omitted Brush waits use the host auto-background threshold or wait until completion; omitted process waits default to ${DEFAULT_EXEC_YIELD_MS} ms.` })),
 	} : undefined;
@@ -1734,10 +1744,30 @@ function activate(pi: ExtensionAPI, host: HostRuntime = { kind: "pi" }): Activat
 			formatApprovalDetails: (args: unknown): string[] =>
 				[`Command: ${engine.services.approval.truncateForPrompt(approvalCommand(args, "(missing)"))}`],
 		} : {}),
-		description:
-			'Run a command in a persistent session. Returns `session_id` if still running (drive with write_stdin) or `exit_code` if it finished within yield_time_ms. on_exit defaults to "none". Only pass on_exit: "wake" when the human explicitly wants auto-resume on unobserved exit — stale wakes interrupt later work. Use set_on_exit to disarm or re-arm a running session.',
-		promptSnippet: "Run a shell command; long-running ones yield a session_id",
-		promptGuidelines: [
+		get description() {
+			if (engine.kind === "pi") return 'Run a command in a persistent session. Returns `session_id` if still running (drive with write_stdin) or `exit_code` if it finished within yield_time_ms. on_exit defaults to "none". Only pass on_exit: "wake" when the human explicitly wants auto-resume on unobserved exit — stale wakes interrupt later work. Use set_on_exit to disarm or re-arm a running session.';
+			if (engine.binding.kind !== "bound") return execDescription({ kind: "unbound" });
+			const services = engine.services;
+			const settings = engine.binding.session.settings;
+			return execDescription({
+				kind: "bound",
+				asyncEnabled: services.asyncEnabled(settings),
+				autoBackgroundEnabled: services.autoBackgroundEnabled(settings),
+				autoBackgroundSeconds: services.autoBackgroundThresholdMs(settings) / 1000,
+				defaultTimeoutSeconds: services.clampBashTimeout(undefined, services.maxTimeout(settings)),
+				hasEval: pi.getActiveTools().includes("eval"),
+			});
+		},
+		promptSnippet: engine.kind === "omp" ? "Run a Brush command or an interactive real PTY session"
+			: "Run a shell command; long-running ones yield a session_id",
+		promptGuidelines: engine.kind === "omp" ? [
+			"Use dedicated file tools for reading, discovery and edits. Omit shell with tty:false to use Brush; a nonempty shell or tty:true disables Brush-only Git Guard, internal URL paths and output minimization.",
+			"Use tty:true for REPLs, ssh, sudo and password prompts. Use timeout:0 for indefinite noninteractive Brush commands; real processes have no default deadline. Do not confuse yield_time_ms attachment waits with timeout execution deadlines.",
+			"HostJobs deliver their results automatically; do not poll or use on_exit:wake for them. Poll only returned Coordinator sessions. Request Coordinator wake only when the human explicitly wants auto-resume.",
+			"Cancellation of an attachment leaves its execution alive. kill_session terminates it. Empty write_stdin polls preserve unobserved output when cancelled.",
+			"Brush final output is bounded head/tail text and images; read its real artifact:// URL for original native text when saved. An inline-only notice means complete output is unavailable. Real processes retain their log_path behavior.",
+			"tty:true returns rendered history, screen and cursor. Use write_stdin with \\r to submit a terminal line. Full-screen programs return the full current screen; screen_changed:false means no change.",
+		] : [
 			"Prefer dedicated file tools when available (read/grep/find/ls). Otherwise use exec_command with fast shell tools: rg for content search, fd if available (or find) for file names, and ls for directories.",
 			"Use a small yield_time_ms (~500ms) for quick one-shots and the 10s default for most commands; long-running or interactive processes (dev servers, REPLs, ssh, sudo) return a session_id you then drive with write_stdin.",
 			"For a long non-interactive command, start with a short yield to obtain a session_id, then use an empty write_stdin poll with a finite yield_time_ms suited to its expected duration. There is no built-in empty-poll maximum; an operator may configure one. Keep waits short for interactive or indefinite processes. Pi manages cache warming independently.",

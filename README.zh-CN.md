@@ -3,9 +3,9 @@
 [English](README.md) | 简体中文
 
 为 [oh-my-pi](https://github.com/can1357/oh-my-pi)（omp）提供长时间运行的 shell
-会话，并在 Tern 里带一个终端 HUD。模型执行的每条命令都会成为一个会话，由模型通过写入和轮询来驱动，而不是一次阻塞到底的调用：开发服务器、REPL、`ssh`、`sudo`、全屏程序和长时间任务在多轮对话之间持续运行，人也可以在 Tern 里查看它们、向它们输入。
+会话，并在 Tern 里带一个 tty 终端 HUD。交互程序、REPL、`ssh`、`sudo` 和全屏程序使用真实 PTY 会话，在多次调用之间持续可用。非交互命令默认使用嵌入式 Brush shell；omp 可以拥有它们的后台任务并自动回送最终输出。
 
-本仓库 fork 自 [iamwrm/pi-unified-exec](https://github.com/iamwrm/pi-unified-exec)，后者是 codex `unified_exec` 的 Pi 移植。工具接口（`exec_command`、`write_stdin`、`set_on_exit`、`kill_session`、`list_sessions`）及其语义来自上游；fork 补上了 omp 和 Tern 需要的部分。fork 的全部改动、每项改动的原因，以及 omp/Tern 升级后如何重新验证，见 [fork-features/README.zh-CN.md](fork-features/README.zh-CN.md)。
+本仓库 fork 自 [iamwrm/pi-unified-exec](https://github.com/iamwrm/pi-unified-exec)，后者是 codex `unified_exec` 的 Pi 移植。本包保留五个工具（`exec_command`、`write_stdin`、`set_on_exit`、`kill_session`、`list_sessions`）。Pi 保持上游的真实进程语义；omp 增加 Brush 执行、宿主任务、截止时间、内部 URL 与输出 artifact。差异及升级检查见 [fork-features/README.zh-CN.md](fork-features/README.zh-CN.md)。
 
 ## 安装
 
@@ -27,10 +27,10 @@ Tern 更新会在这条命令成功返回前完成，无需单独执行 Tern 命
 
 ## 功能
 
-- **会话，而不是调用。** `exec_command` 启动进程，在等待窗口内返回已有输出和一个 `session_id`；之后的轮次里，`write_stdin` 可以向它写入、轮询它，或发送控制字节（`\x03` Ctrl-C、方向键）。取消调用永远不会杀掉进程。
+- **执行独立于连接等待。** 返回的 `session_id` 仍可通过 `write_stdin` 写入。取消调用不会杀掉执行。Brush HostJob 自动回送完成结果；Coordinator 会话使用轮询或人明确要求的完成唤醒。
 - **PTY 输出就是终端上看到的内容。** `tty: true` 的会话经过一个无头终端模拟器，进度条、重绘和全屏程序返回的是当前屏幕（加上自上次调用以来滚出屏幕的行和光标位置），而不是把每次重绘都追加起来。模拟器会像真实终端一样回应终端查询（光标位置、设备属性、默认颜色），因此等待这些回应、或根据回应选择浅色/深色配色的程序，表现与在真实终端里一致。
-- **输出有上限，完整内容可找回。** 模型看到的每个结果都从尾部截取，最多 50 KiB / 2000 行，并去掉终端控制序列；每个会话的完整原始输出都写入 `log_path`。
-- **可选的完成唤醒。** `on_exit: "wake"` 让后台进程在无人观察时退出后唤醒一次 agent；`set_on_exit` 可以取消。
+- **输出有上限，恢复信息如实。** 真实进程结果保留 50 KiB / 2000 行的终端安全尾部与完整原始日志。Brush 最终输出使用宿主有界首尾 sink 和提取出的终端图像；有条件时完整原生文本存入真实会话 artifact，否则明确说明完整输出不可恢复。
+- **只有一个完成交付方。** omp HostJob 经实际会话的任务管理器回送。Coordinator 会话支持可选 `on_exit: "wake"`；`set_on_exit` 可以在不杀执行的情况下取消唤醒。
 - **omp 原生呈现。** `exec_command`、`write_stdin` 和 `kill_session` 用 omp 自己的 bash 卡片渲染（命令行、输出、退出码标签、错误配色），在 ANSI TUI 和 Tern 里都是如此。
 - **Tern 里的终端 HUD。** 不用调用工具，就能查看、回滚、输入并结束模型的 tty 会话。
 
@@ -44,7 +44,7 @@ Tern 更新会在这条命令成功返回前完成，无需单独执行 Tern 命
 - **Terminals 面板。** 点击计数按钮打开一个仿照 omp Agents 面板的面板：每个 tty 会话一行，带状态点、尺寸、PID 和运行时长；选中会话的命令、状态、目录、PID、尺寸、启动时间、可点击的日志路径和最新几行输出作为预览。↑/↓ 或点击选择会话，`x` / Kill 按 `kill_session` 的方式结束它，Esc / Close 关闭面板。
 - **终端页。** Enter / Open 把会话打开成一个仿照 omp Console 的全屏页：显示保留的历史和当前屏幕，带颜色、按会话自身宽度显示，跟随新输出，并可向上回滚。键入的按键会发给会话（与 `write_stdin` 的写法相同，模型能看到效果）；Esc / Back 返回面板；Kill 结束会话。
 
-HUD 直接读取会话，不保存任何副本。它只在 omp 原生渲染时存在，因此 omp 的 ANSI TUI 不会多出一行。模型看到的结果仍是纯文本。
+HUD 直接读取会话，不保存副本。它只在 omp 原生渲染时存在，因此 ANSI TUI 不会多出一行。PTY 的模型输出仍是无终端控制的文本；Brush 图像提取与此 HUD 无关。
 
 **Tern 插件。** omp 扩展无法往 omp 的计数器那一行里加东西，所以本包附带一个只含 CSS 的 Tern 插件（`fork-features/tern-plugin/`）。它把共享的 `belowEditor` widget 容器移到 omp 计数器上方，清除容器的间距、背景和阴影，避免与原生 HUD 边距重复叠加。同一容器中的其他 widget 也共享这个位置和重置；插件不重设药丸外观或 omp 的输入框，并让面板的输出预览使用等宽字体。
 
@@ -59,20 +59,30 @@ CLI 继承 omp 的环境，由 Tern 决定目标目录并负责重新加载。da
 
 ### `exec_command`
 
-在一个持久会话里运行命令。
+在 omp 上，省略/空 `shell` 且 `tty: false` 选择 **Brush**；非空 `shell` 选择真实 **PipeProcess**；`tty: true` 总是选择真实 **PtyProcess**。Git Guard、内置命令、内部 URL 路径与原生压缩只在 Brush 下生效。Pi 保持原有真实进程选择。
 
 | 参数 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
-| `cmd` | string | — | Shell 命令。必填。 |
-| `workdir` | string | 当前轮次的 cwd | 工作目录。 |
-| `shell` | string | `bash` | Shell 程序。Windows 上找得到 `bash` 就用它，否则用 `powershell`。`cmd` / `powershell` / `pwsh` 会带上各自对应的参数。 |
-| `tty` | boolean | `false` | 分配 PTY。此时输出是渲染后的终端屏幕；见 [PTY 会话](#pty-sessions)。 |
-| `cols` | number | `120` | PTY 宽度（仅 `tty: true`）。限制在 [20, 500]。 |
-| `rows` | number | `30` | PTY 高度（仅 `tty: true`）。限制在 [5, 300]。 |
-| `yield_time_ms` | number | `10_000` | 本次调用保持连接、等待输出的时长（不是命令的生命期），限制在 [250, 30_000]。 |
-| `on_exit` | `"none"` \| `"wake"` | `"none"` | 无人观察时进程退出的处理策略。`"wake"`：发一条后续提示唤醒 agent——仅在人明确希望自动恢复时使用。之后可用 `set_on_exit` 修改。 |
+| `cmd` | string | — | 必填 shell 命令；审批检查原始请求，执行/结果使用计划后的生效命令。 |
+| `workdir` | string | 调用方 cwd | 相对路径按调用会话解析。Brush 还接受受支持的内部 URL 目录，真实进程拒绝 URL workdir。 |
+| `shell` | string | 省略 | omp 中省略/为空时选择 Brush，除非 `tty: true`；非空则选择真实进程。真实进程默认 bash，Windows 没有 bash 时用 PowerShell。 |
+| `tty` | boolean | `false` | 给交互程序、REPL、ssh、sudo 和密码提示使用真实 PTY；输出是渲染后的终端状态。 |
+| `cols` | number | `120` | PTY 宽度，限制在 [20, 500]；Brush 与管道忽略。 |
+| `rows` | number | `30` | PTY 高度，限制在 [5, 300]；Brush 与管道忽略。 |
+| `yield_time_ms` | number | 取决于后端 | 连接等待，不是执行期限。显式值限制在 [250, 30000]。真实进程默认 10000 ms。Brush HostJob 在自动后台开启时使用绑定会话阈值，否则省略时等到完成/截止；Coordinator Brush 同样等到完成/截止。 |
+| `timeout` | number | Brush 为宿主默认；进程无限 | 仅 omp，单位秒。Brush 宿主默认 300，受 `tools.maxTimeout` 封顶。显式正数受宿主 1..3600 与全局上限限制；`0` 禁用期限。返回会话 id 不会取消期限。 |
+| `async` | boolean | `false` | 仅 omp，且只在 `async.enabled` 为真时出现在 schema。立即将 Brush 转为 HostJob；manager 缺失/已满时拒绝且不启动。真实进程变体拒绝 async。 |
+| `on_exit` | `"none"` \| `"wake"` | `"none"` | 只有 Coordinator 支持人明确要求的唤醒。HostJob `"wake"` 是类型化错误；`"none"` 不改变宿主交付。 |
 
-响应体（输出较短、未截断时）：
+Brush 的说明与稳定 base/async schema 读取绑定会话的当前设置。绑定先于被 await 的首次活动工具刷新，包括 `--keep-builtin-bash`。数值在宿主下一次重建提示词时重新读取；仅修改数字不保证立即触发重建。未绑定的 omp 执行报告 `host_binding_unavailable`，不使用其他会话的设置。Pi 的说明与参数保持不变。
+
+HostJob 在达到配置阈值、显式连接等待到期或发起调用被取消时转后台。`job_id` 指向宿主任务，最终结果自动回送；不要为了该结果轮询。没有宿主任务槽时，普通 Brush 使用 Coordinator，可轮询。交互会话用 `tty: true`；无限期的非交互 Brush 工作用 `timeout: 0`。插件没有 service/ready API。
+
+Brush 只有成功关闭后才报告 `log_path: artifact://<id>`。artifact 保存图像/压缩转换之前原生文本的精确 UTF-8 编码；String 原生桥不保留任意非法 UTF-8 进程字节。只有该文本保存成功，压缩结果才替换内联文本，并附 `[raw output: artifact://<id>]`。捕获缺失/失败时保留有界原文投影，说明完整输出未保存，不提供恢复链接。Brush 不写临时进程日志。图像随前台最终结果与 HostJob 回送交付；轮询（包括终态观察）只返回新增文本。
+
+HostJob 的前台/后台最终结果共用配置溢出预算与宿主异步内联门槛中的较小值（当前为 12000 字符，保守地限制 UTF-8 字节数）。即使关闭自动后台，前台 Brush 输出也可能更短；这样避免把已减缩结果再保存为第二个 artifact。Coordinator Brush 保持配置的内联预算。
+
+真实进程响应体（输出较短、未截断时）：
 
 ```
 [still running]                     (or [exited])
@@ -91,13 +101,13 @@ tty: false
 <captured stdout+stderr>
 ```
 
-管道会话在两次轮询之间输出超过 1 MiB 内存保留量时，中间部分会被丢弃，并在丢弃处插入标记（完整输出始终在 `log_path` 里）：
+真实管道进程两次轮询间超过 1 MiB 保留量时，中间内容被丢弃，并在该位置插入标记。Brush 共用增量保留机制，但报告它实际的 artifact/inline-only 恢复状态：
 
 ```
 [... 3145728 bytes omitted here (output exceeded the 1048576-byte in-memory retention between polls; the full stream is in the session log file) ...]
 ```
 
-输出超过上限（50 KiB / 2000 行）时，末尾会附上一行说明：
+真实进程的输出超过 50 KiB / 2000 行时，末尾附上说明：
 
 ```
 ...tail of output...
@@ -149,7 +159,7 @@ history_lines: 2                   (optional: lines scrolled off above the scree
 3. `on_exit` 默认 `"none"`。只有人明确希望自动恢复时才用 `"wake"`；`set_on_exit(session_id, on_exit: "none")` 可在不杀进程的情况下取消。
 4. 被工具结果直接观察到的退出会消耗掉唤醒；到期或取消则保留唤醒。
 
-两种空轮询使用同一套基于单调时钟的事件驱动等待。管道会话把输出保存在有上限的首尾缓冲区里，tty 会话保存在终端屏幕里；日志始终收到原始输出。流式更新由输出驱动（短轮询每秒最多四次，长等待和绝对等待每 30 秒最多一次），安静时没有心跳。等待期间的缓存预热由宿主负责，与本包无关。原始日志在磁盘上不设上限；归档配额是[后续工作](docs/IV-0002-output-lifecycle-and-rendering.md#output-archive-safety)。
+两种空轮询共用事件驱动的单调时钟等待。管道/Brush 保留有界游标内容，tty 保留渲染后的屏幕。进程日志接收原始字节；Brush 使用会话 artifact 或明示 inline-only 状态。流式更新由输出驱动，安静时没有心跳。缓存预热归宿主负责。进程日志与可用的 Brush artifact 在磁盘上不设上限；归档配额仍是[后续工作](docs/IV-0002-output-lifecycle-and-rendering.md#output-archive-safety)。
 
 | 环境变量 | 默认值 | 说明 |
 |---|---|---|
@@ -194,9 +204,11 @@ write_stdin chars_b64="G3s6wgo="  → exact 5 decoded bytes
 
 状态标记：`disarmed`、`already_none`、`armed`、`already_armed`、`too_late`；未知 id 返回 `found: false`。取消无法撤回已经排队交给宿主的后续提示。
 
+对于 HostJob，`"none"` 不改变自动宿主交付；`"wake"` 返回 `on_exit_requires_coordinator`。
+
 ### `on_exit: "wake"`——完成通知
 
-> 终端的完成要么通过一个已定稿的工具结果送达，**要么**触发一条合成的模型提示——绝不会两者都有。
+> Coordinator 的完成要么经已定稿工具结果交付，要么触发一次合成模型提示，绝不两者都有。HostJob 只经宿主交付。
 
 - 在 `write_stdin` 观察期间发生的退出由该调用返回，结果定稿时消耗唤醒。结果以错误或取消定稿时，唤醒仍然有效。
 - 到期或被取消的调用保留唤醒；进程之后退出时，恰好发送一条后续提示（`deliverAs: "followUp"`，不会打断正在进行的轮次）。同时发生的多个完成会合并成一条提示。
@@ -210,11 +222,11 @@ write_stdin chars_b64="G3s6wgo="  → exact 5 decoded bytes
 | `session_id` | number | — | 必填。 |
 | `signal` | string | `"SIGTERM"` | 2 秒后升级为 SIGKILL。`"SIGKILL"` 跳过等待。Windows 上任何信号都会强制结束进程树。 |
 
-信号名会被规范化（`term`、`INT`、`sigkill` 都可以）；未知名称会被拒绝。结果使用与其他工具相同的有上限包装，带 `killed`、`escalated`、请求的/实际的信号和 `running`。kill 失败的会话保留在存储中，并报告 `running: true`。Tern HUD 的 Kill 走同一条路径。
+真实进程信号名会被规范化（`term`、`INT`、`sigkill`），未知名称被拒绝；kill 失败时保留会话并报告 `running: true`。Brush 不区分信号，只走唯一终止原语。隐藏的 slash 控制保留观察游标；模型可见的 `kill_session` 返回未观察尾部，并发观察对每段尾部只消费一次。已结算的 Brush 报告 `already_exited`；HostJob 不重放已交付正文。仅 tty 的 HUD 使用真实进程 kill 路径。
 
 ### `list_sessions`
 
-列出存活的会话，并把每个已退出的会话最后报告一次（带 `running: false`、`exit_code`/`signal` 和 `log_path`）后再移除。每条记录带 `wake_armed`；响应带 `tool_time_utc`，用于计算 `yield_until` 截止时间。
+真实进程退出后最后报告一次再移除。已结束的 Brush HostJob 带 `delivery: pending | delivered | terminated`：pending 结果保留供观察，delivered/terminated 的索引移除，但结果归宿主所有。每条记录报告 `wake_armed` 和真实的 `log_path`；Brush 运行期间报告原生 `pids`，而不是 shell `pid`。响应包含 `tool_time_utc`。
 
 ## 命令和参数
 
@@ -227,7 +239,7 @@ write_stdin chars_b64="G3s6wgo="  → exact 5 decoded bytes
 
 **在 Pi 上，**五个工具都有各自的渲染器：命令标题、默认显示五个可视行的输出尾部（用 `app.tools.expand` 展开）、实时计时、`⟳ poll` / `» input` 标题，以及 kill/list 摘要。有进程存活时，底栏显示 `unified-exec: N sessions running`。
 
-两种宿主下，模型可见的内容和持久化的 details 相同。
+Pi 的输出契约不变；omp Brush 增加前述 artifact、图像、超时与 HostJob 元数据。宿主目前按工具名保留后台卡片：调用返回后，协议/任务进度继续更新，但扩展的原始卡片可能停留在旧输出。插件不修改该私有白名单，也不增加另一个 HUD。
 
 ## Codemode 脚本（Pi）
 
@@ -261,23 +273,23 @@ DEFAULT_MAX_LINES            = 2000
 
 ## 语义
 
-- **提前退出：**150 毫秒内结束的命令不会进入会话存储；结果带 `exit_code`，没有 `session_id`。
-- **在两次调用之间退出**的会话会留在存储里，直到下一次 `write_stdin` 或 `list_sessions` 报告它。
-- **启动失败**（shell 或 `workdir` 不存在）以 `failure_message` 报告。
-- **shell 退出与管道关闭：**会话一直运行到其输出管道关闭。继承了 stdout 的后台子进程会让管道保持打开；这类结果会带一条 `note`，说明如何把它们分离出去。
+- **真实进程提前退出：**150 毫秒内完成的命令不进入存储；Brush 在异步准备之前建立索引，原生执行/输出有独立生命周期。
+- **在两次调用之间退出：**真实进程保留到被观察；HostJob 索引跟随宿主消费/保留状态，不重复交付。
+- **启动失败：**omp cwd 错误在分配之前拒绝；真实进程 spawn 失败报告 `failure_message`。
+- **shell 退出与管道关闭：**真实进程的 stdout 被继承时，会话保持打开。Brush 随其前台原生命令结束；保留的 `&` 任务属于 shell 生命周期，不会重新打开已结束的输出归档。
 - **关闭了 stdin** 不会让宿主崩溃；写入时报告 `failure_message`。
 - **Esc** 中断当前等待，但会话继续运行。
-- **关闭**时向每个会话发送 SIGTERM，1 秒后对仍存活的发送 SIGKILL。
+- **关闭：**Brush 经取消原语终止，并 dispose 自己拥有的 shell；真实进程收到 TERM，存活者再收到 KILL。
 - **LRU 淘汰**在达到 64 个会话时进行，淘汰最旧的非保护会话，优先选已退出的；最近使用的 8 个永不淘汰。
 - **tty 观察**按会话串行执行；流式更新和 Tern HUD 读取屏幕时不消耗它。
-- **日志**放在临时目录（`/tmp` 或 `%TEMP%`），本包从不删除。请用不会执行控制序列的查看器查看原始 PTY 日志，不要用 `cat`。
+- **恢复：**真实进程日志在临时目录里，本包不删除。Brush 文本归宿主会话 artifact 生命周期所有；失败/部分捕获绝不链接为完整输出。查看原始 PTY 日志请用不执行控制序列的查看器，不要用 `cat`。
 
 ## 示例
 
 ### 开发服务器
 
 ```
-> exec_command(cmd="npm run dev", yield_time_ms=5000)
+> exec_command(cmd="npm run dev", shell="bash", yield_time_ms=5000)
 [still running]
 session_id: 1
 ---
@@ -313,7 +325,7 @@ terminal: normal screen 120x30, cursor row 3 col 5
 ### 带自动恢复的长任务（人要求时）
 
 ```
-> exec_command(cmd="npm test", yield_time_ms=1000, on_exit="wake")
+> exec_command(cmd="npm test", shell="bash", yield_time_ms=1000, on_exit="wake")
 [still running]
 session_id: 2
 completion_notification: armed
@@ -326,46 +338,22 @@ completion_notification: armed
 
 管道和 PTY 都可用；`tty: true` 通过 `Bun.Terminal`（Bun）或 node-pty（Node）使用 ConPTY。
 
-- **默认 shell：**`bash`，依次查找 `PI_UNIFIED_EXEC_BASH`、PATH 上的 `bash`（排除 System32 里的 WSL 存根）、由 `git.exe` 推导或常见安装位置下的 Git for Windows，最后退回 `powershell` 并提示一次。启动前会把 shell 名解析成绝对路径。
+- **真实进程默认 shell：**依次查找 `PI_UNIFIED_EXEC_BASH`、PATH 上的 `bash`（排除 System32 的 WSL 存根）、由 `git.exe` 推导或常见位置下的 Git for Windows，最后退回 `powershell` 并提示一次。启动前把 shell 名解析成绝对路径。
 - **没有 POSIX 信号：**每次 kill 都是结束整个进程树（`taskkill /T /F`）；被结束的进程报告 `exit_code: 1`，kill 失败会如实报告。
 - **Node PTY 预编译包**在安装时下载，不受 npm 摘要校验覆盖；Bun 内置的后端不需要这一下载。
 
 ## 目录结构
 
-```
-src/
-├── index.ts              # tool registration, event handlers, flag
-├── session.ts            # ExecSession: spawn, read, write, kill, log stream, state
-├── session-store.ts      # SessionStore + LRU eviction
-├── head-tail-buffer.ts   # port of codex's HeadTailBuffer
-├── collect.ts            # collectOutputUntilDeadline
-├── long-wait.ts          # event-driven empty-poll wait + rate-limited streaming
-├── time.ts               # durations, operator limit, strict UTC deadlines
-├── format-time.ts        # elapsed / remaining labels
-├── completion.ts         # on_exit "wake" coordination (exactly-once)
-├── notify.ts             # Notify / Gate / sleep primitives
-├── pty.ts                # Bun.Terminal + node-pty backends, pipes, Windows tree-kill
-├── shell.ts              # shell selection and argv (Windows-aware)
-├── output-safety.ts      # terminal-control stripping
-├── terminal-screen.ts    # headless terminal: observations, styled screens, query answers
-├── tool-result.ts        # bounded envelopes + model-visible text
-├── script-result.ts      # codemode outputSchema / structuredContent
-├── render.ts             # Pi renderers for all five tools
-├── codemode-render.ts    # Pi codemode preview cap
-└── unescape.ts           # C-style escape decoder for `chars`
-fork-features/
-├── omp-presentation.ts   # omp host detection, bash-renderer delegation, theme appearance
-├── omp-tools.d.ts        # types of the omp modules loaded at runtime
-├── tern-terminal-hud.ts  # counter pill, Terminals sheet, terminal page
-├── tern-plugin-install.ts# keeps the Tern plugin installed
-├── tern-plugin/          # CSS-only Tern plugin
-└── README.md             # fork customizations and requalification
-docs/
-├── IV-0001-long-wait-and-wake-control.md
-├── IV-0002-output-lifecycle-and-rendering.md
-├── DC-0001-agentic-workspace.md
-└── DEV.md                # upstream's maintainer guide
-```
+| 领域 | 文件 |
+|---|---|
+| 注册、会话与所有权 | `src/index.ts`、`session.ts`、`session-store.ts`、`completion.ts` |
+| 观察与等待 | `src/head-tail-buffer.ts`、`collect.ts`、`long-wait.ts`、`time.ts`、`notify.ts` |
+| 真实进程与终端 | `src/pty.ts`、`shell.ts`、`terminal-screen.ts`、`unescape.ts` |
+| 结果与 Pi 呈现 | `src/tool-result.ts`、`script-result.ts`、`render.ts`、`codemode-render.ts`、`output-safety.ts`、`format-time.ts` |
+| omp Brush 与原生 addon | `fork-features/brush/`、`fork-features/native/` |
+| omp 卡片与 tty HUD | `fork-features/omp-presentation.ts`、`omp-tools.d.ts`、`tern-terminal-hud.ts` |
+| Tern 安装/样式 | `fork-features/tern-plugin-install.ts`、`fork-features/tern-plugin/` |
+| 契约与维护 | `docs/IV-0001-long-wait-and-wake-control.md`、`IV-0002-output-lifecycle-and-rendering.md`、`DC-0001-agentic-workspace.md`、`DEV.md`、`fork-features/README.md` |
 
 ## 测试
 

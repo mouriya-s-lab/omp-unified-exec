@@ -86,7 +86,7 @@ sibling view, indexed by concern:
 | Default-on native codemode preview wrapper | `src/codemode-render.ts` |
 | Initiative / doctrine docs | `docs/IV-*.md`, `docs/DC-*.md` |
 | Constants mirroring codex | top of `src/index.ts` |
-| omp deadlines and delivery | `fork-features/brush/{deadline,jobs}.ts`, omp paths in `src/index.ts` |
+| omp deadlines, delivery and dynamic metadata | `fork-features/brush/{deadline,jobs,metadata}.ts`, omp paths in `src/index.ts` |
 | Brush transcript and final projection | `fork-features/brush/{output,output-host,result}.ts`; output lifecycle in `src/session.ts` |
 
 ## Dev loop
