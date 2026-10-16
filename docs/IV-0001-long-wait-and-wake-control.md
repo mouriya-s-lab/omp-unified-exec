@@ -1,6 +1,6 @@
 # IV-0001 — Long waits, execution deadlines, and completion ownership
 
-**Status:** implemented wait paths; omp deadline/HostJob acceptance is being qualified.
+**Status:** implemented; macOS compiled-omp runtime qualified, with the host/platform boundaries below.
 **Related:** [output lifecycle and rendering](IV-0002-output-lifecycle-and-rendering.md), [workspace doctrine](DC-0001-agentic-workspace.md), [Changelog](../Changelog.md).
 
 ## Intent and compatibility boundary
@@ -136,4 +136,4 @@ Pi owns cache warming. This plugin does not override cost policy, extension veto
 
 Canonical verification is `npm test`. Real runtime acceptance additionally exercises the actual registered omp tools, true PTY interaction for Esc/slash controls, actual host async-result transcripts, process-group/PID outcomes, and genuine RPC boundary responses. Typecheck, aggregate test counts, source review, and mock lifecycle tests do not replace those outcomes. Pi's actual-CLI wait fixture and TUI suite remain compatibility checks; unavailable platforms and unreached state preconditions must be stated rather than counted as passes.
 
-Active-kill qualification must exercise the real slash/kill control, the already-attached observer's new tail, native PID cleanup and suppressed follow-up together. Source review alone does not establish that result.
+Compiled omp 18.11.1 qualification on macOS arm64 exercised actual Esc, slash/proc kills, deadlines, host consumption and RPC session boundaries. The final slash cancellation returned its original waiting call's `formatter-fixed-slash-tail` exactly once, removed the session and native PID, and emitted no async result. Concurrent visible poll/kill returned the fresh marker once in the poll and zero times in the kill. A separately unobserved 400,012-byte giant line retained its terminal marker in the kill result. These are observed cursor/ownership outcomes, not conclusions from source review or aggregate test counts.

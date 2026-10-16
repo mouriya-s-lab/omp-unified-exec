@@ -3,18 +3,17 @@
 English | [简体中文](README.zh-CN.md)
 
 Long-lived shell sessions for [oh-my-pi](https://github.com/can1357/oh-my-pi)
-(omp), with a terminal HUD in Tern. Every command the
-model runs becomes a session it drives with writes and polls, instead of a
-single blocking call: dev servers, REPLs, `ssh`, `sudo`, full-screen programs
-and long jobs keep running between turns, and a human can watch and type into
-them from Tern.
+(omp), with a tty terminal HUD in Tern. Interactive programs, REPLs, `ssh`,
+`sudo` and full-screen programs use real PTY sessions that remain available
+between calls. Noninteractive commands default to an embedded Brush shell;
+omp can own their background jobs and deliver final output automatically.
 
 This is a fork of [iamwrm/pi-unified-exec](https://github.com/iamwrm/pi-unified-exec),
-a Pi port of codex's `unified_exec`. The tool surface (`exec_command`,
-`write_stdin`, `set_on_exit`, `kill_session`, `list_sessions`) and its
-semantics are upstream's; the fork adds what omp and Tern need. The full list
-of fork changes, why each exists and how to requalify them on omp/Tern
-upgrades is in [fork-features/README.md](fork-features/README.md).
+a Pi port of codex's `unified_exec`. It retains the five tools
+(`exec_command`, `write_stdin`, `set_on_exit`, `kill_session`, `list_sessions`).
+Pi keeps upstream's process semantics; omp adds Brush execution, host jobs,
+deadlines, internal URLs and output artifacts. The differences and upgrade
+checks are in [fork-features/README.md](fork-features/README.md).
 
 ## Install
 
@@ -44,10 +43,10 @@ capability.
 
 ## What it does
 
-- **Sessions, not calls.** `exec_command` starts a process and returns within
-  its yield window with output so far and a `session_id`; `write_stdin` writes
-  to it, polls it, or sends control bytes (`\x03` Ctrl-C, arrow keys) on later
-  turns. Cancelling a call never kills the process.
+- **Executions outlive attachments.** A returned `session_id` remains writable
+  through `write_stdin`. Cancelling an attachment never kills its execution.
+  Brush HostJobs deliver completion automatically; Coordinator sessions use
+  polling or an explicitly requested completion wake.
 - **PTY output is what a terminal shows.** `tty: true` sessions run through a
   headless terminal emulator, so progress bars, redraws and full-screen
   programs come back as the current screen (plus lines scrolled off since the
@@ -55,11 +54,14 @@ capability.
   the terminal queries a real terminal would (cursor position, device
   attributes, default colours), so programs that wait for them, or pick a light
   or dark palette from them, behave as in a real terminal.
-- **Bounded output, complete recovery.** Every result the model sees is
-  tail-capped at 50 KiB / 2000 lines and stripped of terminal controls; the
-  complete raw stream of every session is written to `log_path`.
-- **Opt-in completion wake.** `on_exit: "wake"` resumes the agent once when a
-  backgrounded process exits unobserved; `set_on_exit` disarms it.
+- **Bounded output with truthful recovery.** Real-process results retain their
+  50 KiB / 2000-line terminal-safe tails and complete raw logs. Brush final
+  output uses the host's bounded head/tail sink and extracted terminal images.
+  Its complete native text is stored in a real session artifact when available;
+  inline-only output explicitly says when complete recovery is unavailable.
+- **One completion owner.** omp HostJobs deliver through the actual session's
+  job manager. Coordinator sessions support opt-in `on_exit: "wake"`;
+  `set_on_exit` disarms it without killing.
 - **omp-native presentation.** `exec_command`, `write_stdin` and
   `kill_session` render through omp's own bash card (command line, output,
   exit chip, error tone), in the ANSI TUI and in Tern alike.
@@ -87,8 +89,8 @@ When omp renders natively in Tern and a tty session exists:
   Esc / Back returns to the sheet; Kill ends the session.
 
 The HUD reads the sessions in place and keeps no copy of them. It only exists
-while omp renders natively, so omp's ANSI TUI gains no row. Model-visible
-results stay plain text.
+while omp renders natively, so omp's ANSI TUI gains no row. PTY model output
+remains terminal-inert text; Brush image extraction is separate from this HUD.
 
 **The Tern plugin.** An omp extension cannot add to omp's pill line, so the
 package ships a CSS-only Tern plugin (`fork-features/tern-plugin/`). It moves
@@ -121,20 +123,54 @@ Design, decisions and Tern qualification evidence:
 
 ### `exec_command`
 
-Runs a command in a persistent session.
+On omp, omitted/empty `shell` with `tty: false` selects **Brush**. A nonempty
+`shell` selects a real **PipeProcess**; `tty: true` always selects a real
+**PtyProcess**. Git Guard, builtins, internal URL paths and native minimization
+are Brush-only. Pi keeps its existing real-process selection.
 
 | Param | Type | Default | Notes |
 |---|---|---|---|
-| `cmd` | string | — | Shell command. Required. |
-| `workdir` | string | turn cwd | Working directory. |
-| `shell` | string | `bash` | Shell binary. On Windows: `bash` if found, else `powershell`. `cmd` / `powershell` / `pwsh` get shell-appropriate flags. |
-| `tty` | boolean | `false` | Allocate a PTY. Output is then the rendered terminal screen; see [PTY sessions](#pty-sessions-tty-true). |
-| `cols` | number | `120` | PTY width (`tty: true` only). Clamped to [20, 500]. |
-| `rows` | number | `30` | PTY height (`tty: true` only). Clamped to [5, 300]. |
-| `yield_time_ms` | number | `10_000` | How long this call stays attached waiting for output (not the command's lifetime), clamped to [250, 30_000]. |
-| `on_exit` | `"none"` \| `"wake"` | `"none"` | Policy for exits nobody is observing. `"wake"`: one follow-up prompt resumes the agent — only when the human explicitly wants auto-resume. Change later with `set_on_exit`. |
+| `cmd` | string | — | Required shell command; approval evaluates the original request. Execution/results use its effective planned command. |
+| `workdir` | string | caller cwd | Relative paths resolve against the calling session. Brush also accepts supported internal URL directories; real processes reject URL workdirs. |
+| `shell` | string | omitted | On omp, omission/empty selects Brush unless `tty: true`. Nonempty selects a real process. Real processes default to bash, or PowerShell when Windows bash is unavailable. |
+| `tty` | boolean | `false` | Real PTY for interactive programs, REPLs, ssh, sudo and password prompts. Output is rendered terminal state. |
+| `cols` | number | `120` | PTY-only width, clamped to [20, 500]; ignored by Brush and pipes. |
+| `rows` | number | `30` | PTY-only height, clamped to [5, 300]; ignored by Brush and pipes. |
+| `yield_time_ms` | number | backend-dependent | Attachment wait, not a command deadline. Explicit values clamp to [250, 30000]. Real processes default to 10000 ms. Brush HostJobs use the bound auto-background threshold when enabled; otherwise omitted waits last until completion/deadline. Coordinator Brush also waits until completion/deadline. |
+| `timeout` | number | Brush: host default; process: unlimited | omp-only deadline in seconds. Brush's host default is 300, capped by `tools.maxTimeout`. Explicit positive values use host 1..3600 bounds and global cap; `0` disables the deadline. Returning a session id does not disarm it. |
+| `async` | boolean | `false` | omp-only and present in schema only when `async.enabled` is true. Immediately backgrounds Brush as a HostJob; a missing/full manager rejects without starting. Real-process variants reject async. |
+| `on_exit` | `"none"` \| `"wake"` | `"none"` | Coordinator-only opt-in wake at the human's request. HostJob `"wake"` is a typed error; `"none"` leaves host delivery unchanged. |
 
-Response body (short output, no truncation):
+Brush uses the bound session's current settings for its description and stable
+base/async schemas. Binding precedes the awaited first active-tool refresh,
+including `--keep-builtin-bash`. Numeric settings are reread on the next host
+prompt rebuild; changing a number alone does not promise an immediate rebuild.
+An unbound omp execution reports `host_binding_unavailable`, rather than using
+another session's settings. Pi's description and parameter surface stay unchanged.
+
+A HostJob backgrounds after the configured threshold, an explicit attachment
+wait, or a cancelled initiating attachment. Its `job_id` names the host's job;
+the final result arrives automatically. Do not poll for that final result.
+Without a host slot, ordinary Brush uses Coordinator delivery and can be polled.
+Use `tty: true` for interactive sessions and `timeout: 0` for indefinite
+noninteractive Brush work. The plugin has no service/ready API.
+
+Brush transcripts use `log_path: artifact://<id>` only after successful closure.
+The artifact contains exact native UTF-8 text before graphics/minimizer changes;
+the String native bridge does not preserve arbitrary invalid UTF-8 process bytes.
+Minimization replaces inline text only when that transcript was saved, with a
+`[raw output: artifact://<id>]` footer. Missing or failed capture remains bounded
+original text with an unsaved-output notice and no recovery link. Brush does not
+write temporary process logs. Terminal images accompany final foreground and
+HostJob results; polls return only new text, including terminal observations.
+
+A HostJob's foreground and background final share the smaller of the configured
+spill budget and the host's async inline boundary (currently 12000 characters,
+conservatively bounded in UTF-8 bytes). This can shorten foreground Brush output
+even with auto-background disabled; it prevents a second artifact containing only
+an already-reduced result. Coordinator Brush retains the configured inline budget.
+
+Real-process response body (short output, no truncation):
 
 ```
 [still running]                     (or [exited])
@@ -153,15 +189,15 @@ tty: false
 <captured stdout+stderr>
 ```
 
-If a chatty pipe session produces more than the 1 MiB in-memory retention
-between polls, the middle is dropped and a marker is spliced at the omission
-point (the full stream is always in `log_path`):
+If a chatty real pipe process exceeds its 1 MiB retention between polls, the
+middle is dropped and a marker is spliced at that position. Brush uses the same
+incremental retention but reports its actual artifact/inline-only recovery state:
 
 ```
 [... 3145728 bytes omitted here (output exceeded the 1048576-byte in-memory retention between polls; the full stream is in the session log file) ...]
 ```
 
-When output exceeds the caps (50 KiB / 2000 lines), a footer is appended:
+For real processes, output above 50 KiB / 2000 lines receives a footer:
 
 ```
 ...tail of output...
@@ -232,13 +268,13 @@ Drives or polls an existing session.
 4. A completion observed directly by a tool result consumes the wake; a
    deadline or cancellation leaves it armed.
 
-Both empty-poll forms use the same event-driven wait on monotonic time. Pipe
-sessions keep output in a bounded head/tail buffer, tty sessions in their
-terminal screen; the log always gets the raw stream. Streaming updates are
-output-driven (short polls at most four per second, long and absolute waits at
-most once per 30 seconds), with no heartbeat while quiet. Cache warming during
-waits is the host's business, not this package's. Raw logs are unbounded on
-disk; archive quotas are [follow-up work](docs/IV-0002-output-lifecycle-and-rendering.md#output-archive-safety).
+Both empty-poll forms use an event-driven monotonic wait. Pipe/Brush sessions
+retain bounded cursor content; tty sessions retain their rendered screen.
+Process logs receive raw bytes, while Brush uses its session artifact or explicit
+inline-only state. Streaming is output-driven, not a quiet heartbeat. Cache
+warming is the host's responsibility. Process logs and available Brush artifacts
+are unbounded on disk; archive quotas remain
+[follow-up work](docs/IV-0002-output-lifecycle-and-rendering.md#output-archive-safety).
 
 | Env var | Default | Notes |
 |---|---|---|
@@ -287,10 +323,13 @@ Status tokens: `disarmed`, `already_none`, `armed`, `already_armed`,
 `too_late`; unknown ids return `found: false`. Disarming cannot recall a
 follow-up already queued to the host.
 
+For HostJob sessions, `"none"` reports no change to automatic host delivery;
+`"wake"` returns `on_exit_requires_coordinator`.
+
 ### `on_exit: "wake"` — completion notifications
 
-> Terminal completion is delivered through a finalized tool result **or** it
-> causes one synthetic model prompt — never both.
+> Coordinator completion is delivered through a finalized tool result **or**
+> causes one synthetic model prompt, never both. HostJobs use only host delivery.
 
 - An exit that lands while a `write_stdin` is observing is returned by that
   call, and the wake is consumed when the result is finalized. A result
@@ -313,18 +352,22 @@ follow-up already queued to the host.
 | `session_id` | number | — | Required. |
 | `signal` | string | `"SIGTERM"` | Escalates to SIGKILL after 2s. `"SIGKILL"` skips the grace. On Windows any signal force-kills the process tree. |
 
-Signal names are normalized (`term`, `INT`, `sigkill`); unknown names are
-rejected. The result uses the same bounded envelope as the other tools, with
-`killed`, `escalated`, requested/actual signal and `running`. A failed kill
-stays registered and reports `running: true`. The Tern HUD's Kill uses the same
-path.
+Real-process signal names are normalized (`term`, `INT`, `sigkill`); unknown
+names are rejected. Failed kills remain registered with `running: true`.
+Brush ignores signal distinctions and uses its one termination primitive.
+Hidden slash controls preserve the observation cursor; the model-visible
+`kill_session` result returns unseen tail. Concurrent observations consume
+each tail segment only once.
+An already-settled Brush reports `already_exited`, and HostJob observation does
+not replay an already-delivered body. The tty-only HUD uses the process kill path.
 
 ### `list_sessions`
 
-Lists live sessions and reports each exited one a final time (with
-`running: false`, `exit_code`/`signal` and `log_path`) before pruning it. Each
-entry has `wake_armed`; the response carries `tool_time_utc` for computing
-`yield_until` deadlines.
+Real-process exits are reported once before pruning. Ended Brush HostJobs carry
+`delivery: pending | delivered | terminated`: pending results remain observable;
+delivered/terminated indexes are removed without taking ownership from the host.
+Each entry reports `wake_armed` and truthful `log_path`; Brush has native `pids`
+while running rather than a shell `pid`. The response includes `tool_time_utc`.
 
 ## Command and flag
 
@@ -352,7 +395,11 @@ five-visual-line output tails expanded with `app.tools.expand`, live elapsed
 counters, `⟳ poll` / `» input` banners and kill/list summaries. While a process
 is alive the footer shows `unified-exec: N sessions running`.
 
-Model-visible content and persisted details are the same on both hosts.
+Pi's output contract remains unchanged; omp Brush adds the artifact, image,
+timeout and HostJob metadata described above. The host currently name-gates
+background-card retention: protocol/job progress continues after return, but an
+extension's original card can remain frozen. The plugin does not patch that
+private allowlist or add another HUD.
 
 ## Codemode scripts (Pi)
 
@@ -390,31 +437,35 @@ DEFAULT_MAX_LINES            = 2000
 
 ## Semantics
 
-- **Early exit:** commands that finish within 150 ms never enter the session
-  store; the result has `exit_code` and no `session_id`.
-- **Exits between calls** stay in the store until the next `write_stdin` or
-  `list_sessions` reports them.
-- **Spawn failures** (missing shell or `workdir`) surface as `failure_message`.
-- **Shell exit vs pipe close:** a session runs until its output pipe closes.
-  Background children that inherited stdout keep it open; such results carry a
-  `note` on how to detach them.
+- **Real-process early exit:** commands finishing within 150 ms do not enter the
+  store. Brush is indexed before asynchronous preparation and owns a separate
+  native/output lifecycle.
+- **Exits between calls:** real processes stay until observed; HostJob indexes
+  follow host consumption/retention without duplicating delivery.
+- **Startup failures:** omp cwd errors are rejected before allocation; process
+  spawn failures report `failure_message`.
+- **Shell exit vs pipe close:** real-process sessions remain open while inherited
+  stdout is held. Brush ends with its foreground native command; retained `&`
+  jobs belong to the shell lifecycle, not a reopened output archive.
 - **Closed stdin** never crashes the host; writes report `failure_message`.
 - **Esc** breaks the current wait but leaves the session running.
-- **Shutdown** sends SIGTERM to every session and SIGKILLs survivors after 1s.
+- **Shutdown** terminates Brush through its cancellation primitive and disposes
+  its owned shells; real processes receive TERM and surviving processes KILL.
 - **LRU eviction** at 64 sessions takes the oldest non-protected one, preferring
   exited sessions; the 8 most recent are never evicted.
 - **tty observations** are serialized per session; streaming updates and the
   Tern HUD read the screen without consuming it.
-- **Logs** live in the temp directory (`/tmp` or `%TEMP%`) and are never
-  deleted by the package. Inspect raw PTY logs with a non-executing viewer, not
-  `cat`.
+- **Recovery:** real-process logs live under the temporary directory and are not
+  deleted by this package. Brush transcripts belong to the host's session
+  artifact lifecycle; failed/partial captures are never linked as complete.
+  Inspect raw PTY logs with a non-executing viewer, not `cat`.
 
 ## Worked examples
 
 ### Dev server
 
 ```
-> exec_command(cmd="npm run dev", yield_time_ms=5000)
+> exec_command(cmd="npm run dev", shell="bash", yield_time_ms=5000)
 [still running]
 session_id: 1
 ---
@@ -450,7 +501,7 @@ terminal: normal screen 120x30, cursor row 3 col 5
 ### Long job with auto-resume (human asked for it)
 
 ```
-> exec_command(cmd="npm test", yield_time_ms=1000, on_exit="wake")
+> exec_command(cmd="npm test", shell="bash", yield_time_ms=1000, on_exit="wake")
 [still running]
 session_id: 2
 completion_notification: armed
@@ -464,7 +515,7 @@ completion_notification: armed
 Pipes and PTY both work; `tty: true` uses ConPTY through `Bun.Terminal` (Bun)
 or node-pty (Node).
 
-- **Default shell:** `bash`, found via `PI_UNIFIED_EXEC_BASH`, then `bash` on
+- **Real-process default shell:** `bash`, found via `PI_UNIFIED_EXEC_BASH`, then `bash` on
   PATH (excluding System32's WSL stub), then Git for Windows derived from
   `git.exe` or well-known install roots, then `powershell` with a one-time
   warning. Shell names are resolved to absolute paths before spawning.
@@ -475,40 +526,16 @@ or node-pty (Node).
 
 ## Layout
 
-```
-src/
-├── index.ts              # tool registration, event handlers, flag
-├── session.ts            # ExecSession: spawn, read, write, kill, log stream, state
-├── session-store.ts      # SessionStore + LRU eviction
-├── head-tail-buffer.ts   # port of codex's HeadTailBuffer
-├── collect.ts            # collectOutputUntilDeadline
-├── long-wait.ts          # event-driven empty-poll wait + rate-limited streaming
-├── time.ts               # durations, operator limit, strict UTC deadlines
-├── format-time.ts        # elapsed / remaining labels
-├── completion.ts         # on_exit "wake" coordination (exactly-once)
-├── notify.ts             # Notify / Gate / sleep primitives
-├── pty.ts                # Bun.Terminal + node-pty backends, pipes, Windows tree-kill
-├── shell.ts              # shell selection and argv (Windows-aware)
-├── output-safety.ts      # terminal-control stripping
-├── terminal-screen.ts    # headless terminal: observations, styled screens, query answers
-├── tool-result.ts        # bounded envelopes + model-visible text
-├── script-result.ts      # codemode outputSchema / structuredContent
-├── render.ts             # Pi renderers for all five tools
-├── codemode-render.ts    # Pi codemode preview cap
-└── unescape.ts           # C-style escape decoder for `chars`
-fork-features/
-├── omp-presentation.ts   # omp host detection, bash-renderer delegation, theme appearance
-├── omp-tools.d.ts        # types of the omp modules loaded at runtime
-├── tern-terminal-hud.ts  # counter pill, Terminals sheet, terminal page
-├── tern-plugin-install.ts# keeps the Tern plugin installed
-├── tern-plugin/          # CSS-only Tern plugin
-└── README.md             # fork customizations and requalification
-docs/
-├── IV-0001-long-wait-and-wake-control.md
-├── IV-0002-output-lifecycle-and-rendering.md
-├── DC-0001-agentic-workspace.md
-└── DEV.md                # upstream's maintainer guide
-```
+| Area | Files |
+|---|---|
+| Registration, sessions and ownership | `src/index.ts`, `session.ts`, `session-store.ts`, `completion.ts` |
+| Observation and waits | `src/head-tail-buffer.ts`, `collect.ts`, `long-wait.ts`, `time.ts`, `notify.ts` |
+| Real process and terminal | `src/pty.ts`, `shell.ts`, `terminal-screen.ts`, `unescape.ts` |
+| Result and Pi presentation | `src/tool-result.ts`, `script-result.ts`, `render.ts`, `codemode-render.ts`, `output-safety.ts`, `format-time.ts` |
+| omp Brush and native addon | `fork-features/brush/`, `fork-features/native/` |
+| omp cards and tty HUD | `fork-features/omp-presentation.ts`, `omp-tools.d.ts`, `tern-terminal-hud.ts` |
+| Tern installation/style | `fork-features/tern-plugin-install.ts`, `fork-features/tern-plugin/` |
+| Contracts and maintenance | `docs/IV-0001-long-wait-and-wake-control.md`, `IV-0002-output-lifecycle-and-rendering.md`, `DC-0001-agentic-workspace.md`, `DEV.md`, `fork-features/README.md` |
 
 ## Tests
 
