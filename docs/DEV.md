@@ -3,6 +3,10 @@
 Onboarding guide for hacking on this extension. For end-user install
 and tool reference, see [../README.md](../README.md).
 
+The Pi install/publish recipes below describe upstream maintenance, not this
+fork's deployment. Fork installation and omp qualification use the public
+README and `fork-features/README.md`; the fork's npm workflow is disabled.
+
 ## Prerequisites
 
 - **Node ≥ 22.19** (see `package.json` `engines`; we use `AbortSignal`,
@@ -58,7 +62,7 @@ the Store stub doesn't count).
 
 ## Repo layout
 
-See [Architecture](../README.md#architecture) for the `src/` layout. A
+See [Layout](../README.md#layout) for the source layout. A
 sibling view, indexed by concern:
 
 | Concern | File(s) |
@@ -72,7 +76,7 @@ sibling view, indexed by concern:
 | `on_exit: "wake"` completion scheduling (exactly-once) | `src/completion.ts` (`setOnExit`, tombstones, flush) |
 | In-memory drain buffer (pipe sessions) | `src/head-tail-buffer.ts` |
 | Rendered tty screen: emulator, history + screen observations, snapshots | `src/terminal-screen.ts` (owned by `ExecSession`) |
-| On-disk raw log file mirroring | `src/session.ts` (`logStream`) |
+| Real-process on-disk byte logs | `src/session.ts` (`logStream`); Brush does not use this path |
 | Terminal-inert result/partial text | `src/output-safety.ts` |
 | Bounded process/kill details + LLM-visible text | `src/tool-result.ts` (`truncateTail` from Pi) |
 | C-style escape decoding for `chars` | `src/unescape.ts` |
@@ -82,6 +86,8 @@ sibling view, indexed by concern:
 | Default-on native codemode preview wrapper | `src/codemode-render.ts` |
 | Initiative / doctrine docs | `docs/IV-*.md`, `docs/DC-*.md` |
 | Constants mirroring codex | top of `src/index.ts` |
+| omp deadlines and delivery | `fork-features/brush/{deadline,jobs}.ts`, omp paths in `src/index.ts` |
+| Brush transcript and final projection | `fork-features/brush/{output,output-host,result}.ts`; output lifecycle in `src/session.ts` |
 
 ## Dev loop
 
@@ -226,9 +232,11 @@ Never put an unbounded value in `content` or details and expect
 `renderResult` to hide it: Pi falls back to raw content if a renderer throws.
 Pass child text through `sanitizeOutputText()` before model/session/TUI use;
 tty bytes go through the session's `TerminalScreen` first, and only its
-rendered text is sanitized and used. Only the on-disk log owns the exact raw
-stream. Keep renderer-side sanitization as defense for legacy results and
-fallback content.
+rendered text is sanitized and used. Real-process logs own their exact raw
+bytes. Brush's single session artifact owns pre-projection native UTF-8 text;
+its native String boundary cannot preserve arbitrary invalid UTF-8 bytes.
+Inline-only Brush capture has no complete recovery source and must not authorize
+minimizer replacement. Keep renderer sanitization for legacy/fallback results.
 
 ### Tune TUI rendering
 
@@ -250,9 +258,10 @@ the row cap; do not claim a hidden-row count after native preview truncation.
 
 ## Debugging aids
 
-- **Per-session log files** at `/tmp/pi-unified-exec-<sid>-*.log`
-  capture the complete raw byte stream the child wrote. Tail them to
-  diagnose ANSI / control-sequence issues.
+- **Real-process log files** at `/tmp/pi-unified-exec-<sid>-*.log` capture child
+  bytes; use a non-executing viewer for terminal controls. **Brush artifacts**
+  are real `artifact://` session files. A missing/failed artifact is explicitly
+  inline-only, not a reason to create a temporary fallback log.
 - **`details.output` vs `content[0].text`**: the LLM reads
   `content[0].text` (structured); the TUI renderer reads
   `details.output` (clean body). If the TUI shows a header like

@@ -39,7 +39,9 @@ import { commandDeadline } from "../fork-features/brush/deadline.ts";
 import type { CommandDeadline } from "../fork-features/brush/deadline.ts";
 import { hostJobManager, registerHostJob, terminalDelivery } from "../fork-features/brush/jobs.ts";
 import type { Delivery, TerminalDelivery } from "../fork-features/brush/jobs.ts";
-import { deadlineDetails, finalizeBrushSession, finalizeSessionResult } from "../fork-features/brush/result.ts";
+import { brushKillResultContent, brushResultContent, deadlineDetails, finalizeBrushSession, finalizeSessionResult } from "../fork-features/brush/result.ts";
+import { BrushOutput, outputArtifactOwner } from "../fork-features/brush/output.ts";
+import type { OutputServices } from "../fork-features/brush/output.ts";
 import type { EngineHost, EngineSelection, EngineVariant, HostRuntime } from "../fork-features/brush/runtime.ts";
 import { type ActivatedExtension, withHostPresentation } from "../fork-features/omp-presentation.ts";
 import { type CollectResult, NO_OUTPUT } from "./collect.ts";
@@ -345,6 +347,7 @@ function createBrushSession(
 	deadline: CommandDeadline,
 	autoBackground: boolean,
 	asyncRequested: boolean,
+	caller: unknown,
 ): ExecSession {
 	const { engine, binding } = variant;
 	const settings = binding.session.settings;
@@ -360,14 +363,17 @@ function createBrushSession(
 		displayCommand: plan.command,
 		delivery,
 		deadline,
-		finalize: finalizeBrushSession,
-		start: (onOutput) =>
+		output: (observe) => new BrushOutput(engine.services.output, settings, outputArtifactOwner(caller), observe),
+		finalize: (session, outcome, output) => finalizeBrushSession(session, outcome, output, engine.services.output),
+		start: (onOutput, output) =>
 			BrushExecution.create({
 				shells,
 				native,
 				persistent: persistentLease(delivery, autoBackground, asyncRequested),
 				prepare: async (signal) => {
 					const launch = await planBrushRun(engine.services, settings, sessionId, plan.command, plan.cwd, signal);
+					signal.throwIfAborted();
+					await output.prepare(signal);
 					signal.throwIfAborted();
 					if (ctx.shuttingDown) throw new Error("unified-exec: session is shutting down; not starting new commands.");
 					return { ...launch, cwd: plan.cwd };
@@ -406,6 +412,7 @@ async function reportHostProgress(
 async function finishHostJob(
 	session: ExecSession, delivery: Extract<Delivery, { kind: "host-job" }>,
 	onUpdate: AgentToolUpdateCallback<ProcessUpdateDetails> | undefined,
+	services: OutputServices,
 ): Promise<void> {
 	const progress = reportHostProgress(session, delivery, onUpdate);
 	void progress.catch(() => undefined);
@@ -414,7 +421,11 @@ async function finishHostJob(
 		await progress;
 		if (!final || final.kind === "terminated" || delivery.signal.aborted) throw new Error("The command was terminated.");
 		// The command remains in final details/process metadata, not a second copy in the delivered body.
-		const text = renderProcessResultText(final.details);
+		const content = await brushResultContent(final.details, services);
+		const text = content[0]?.type === "text" ? content[0].text : "";
+		if (text.length > services.asyncInlineMaxChars) {
+			throw new Error("omp-unified-exec: final result exceeds the host async inline boundary");
+		}
 		const failed = Boolean(final.details.timedOut || final.details.failure_message || final.details.exit_code !== 0);
 		const frame = { state: failed ? "failed" as const : "completed" as const, jobId: delivery.jobId, type: "bash" as const };
 		await delivery.reportProgress(text, {
@@ -422,7 +433,7 @@ async function finishHostJob(
 			...(final.details.exit_code !== undefined ? { exitCode: final.details.exit_code } : {}),
 		});
 		if (delivery.manager.getJob(delivery.jobId)?.foreground !== true) onUpdate?.({
-			content: [{ type: "text", text }],
+			content,
 			details: { ...final.details, job_id: delivery.jobId, async: frame, output: text },
 		});
 		if (failed) throw new Error(text);
@@ -483,6 +494,7 @@ async function runBrushCommand(
 	ctx: ExtensionCtx, variant: Extract<EngineVariant, { kind: "brush" }>, plan: ExecPlan,
 	args: ExecCommandArgs, signal: AbortSignal | undefined,
 	onUpdate: AgentToolUpdateCallback<ProcessUpdateDetails> | undefined, sessionId: string, deadline: CommandDeadline,
+	caller: unknown,
 ): Promise<ResponseShape> {
 	const manager = hostJobManager(variant.binding.session.asyncJobManager);
 	const services = variant.engine.services;
@@ -503,7 +515,7 @@ async function runBrushCommand(
 	}
 	const id = ctx.store.allocateId();
 	try {
-		session = createBrushSession(ctx, variant, id, plan, sessionId, delivery, deadline, autoBackground, args.async === true);
+		session = createBrushSession(ctx, variant, id, plan, sessionId, delivery, deadline, autoBackground, args.async === true, caller);
 		if (session.failureMessage) throw new Error(session.failureMessage);
 		const active = session;
 		if (delivery.kind === "host-job") {
@@ -521,7 +533,7 @@ async function runBrushCommand(
 			ctx.ui?.notify(`unified-exec: evicted session ${pruned.id} (LRU, over cap ${ctx.store.maxSessions})`, "warning");
 		}
 		if (count >= WARNING_SESSIONS) ctx.ui?.notify(`unified-exec: ${count}/${ctx.store.maxSessions} sessions open`, "warning");
-		if (delivery.kind === "host-job") void finishHostJob(active, delivery, onUpdate);
+		if (delivery.kind === "host-job") void finishHostJob(active, delivery, onUpdate, services.output);
 		active.beginBrush();
 		const startedAt = performance.now();
 		const wait: BrushWait = args.async === true ? { kind: "finite", milliseconds: 0 }
@@ -622,7 +634,7 @@ async function runExecCommand(
 	const variant = plan.variant;
 	const deadline: CommandDeadline = variant.host === "pi" ? { kind: "unlimited" }
 		: commandDeadline(variant.engine.services, variant.binding.session.settings, variant.kind === "brush", args.timeout);
-	if (variant.kind === "brush") return runBrushCommand(ctx, variant, plan, args, signal, onUpdate, sessionId(), deadline);
+	if (variant.kind === "brush") return runBrushCommand(ctx, variant, plan, args, signal, onUpdate, sessionId(), deadline, caller);
 	const tty = variant.kind === "pty-process";
 	if (tty && !isPtyAvailable()) {
 		throw new Error(
@@ -1752,7 +1764,9 @@ function activate(pi: ExtensionAPI, host: HostRuntime = { kind: "pi" }): Activat
 			);
 			updateRunningSessionsUi(ctx);
 			return {
-				content: [{ type: "text", text: renderProcessResultText(shape, ctx.engine.kind === "omp" ? shape.command : undefined) }],
+				content: ctx.engine.kind === "omp"
+					? await brushResultContent(shape, ctx.engine.services.output, shape.command)
+					: [{ type: "text", text: renderProcessResultText(shape) }],
 				details: shape,
 				...(ctx.engine.kind === "omp" && (shape.timedOut || shape.failure_message ||
 					(params.tty !== true && !params.shell && shape.exit_code !== undefined && shape.exit_code !== 0)) ? { isError: true } : {}),
@@ -1811,7 +1825,9 @@ function activate(pi: ExtensionAPI, host: HostRuntime = { kind: "pi" }): Activat
 			const shape = await runWriteStdin(ctx, params, withLifetime(ctx, signal), onUpdate, toolCallId);
 			updateRunningSessionsUi(ctx);
 			return {
-				content: [{ type: "text", text: renderProcessResultText(shape) }],
+				content: ctx.engine.kind === "omp"
+					? await brushResultContent(shape, ctx.engine.services.output)
+					: [{ type: "text", text: renderProcessResultText(shape) }],
 				details: shape,
 				...(ctx.engine.kind === "omp" && (shape.timedOut || shape.failure_message ||
 					(target?.isBrush && shape.exit_code !== undefined && shape.exit_code !== 0)) ? { isError: true } : {}),
@@ -1971,8 +1987,12 @@ function activate(pi: ExtensionAPI, host: HostRuntime = { kind: "pi" }): Activat
 				outcome: outcome.outcome,
 			});
 			Object.assign(details, deadlineDetails(session), outcome.delivery ? { delivery: outcome.delivery } : {});
+			const output = session.brushOutput;
+			const content = output && ctx.engine.kind === "omp"
+				? await brushKillResultContent(details, output, ctx.engine.services.output)
+				: [{ type: "text" as const, text: renderKillResultText(details) }];
 			return {
-				content: [{ type: "text", text: renderKillResultText(details) }],
+				content,
 				details,
 				structuredContent: killScriptResult(details),
 			};

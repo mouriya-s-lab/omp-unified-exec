@@ -15,6 +15,8 @@ import { resolveCliEntryCmd } from "./cli.ts";
 import type { FlatShellSegment } from "./worktree.ts";
 import { parseHostUrlFilesystem } from "./url-filesystem.ts";
 import type { HostApprovalTier, HostUrlContext, HostUrlFilesystem } from "./url-filesystem.ts";
+import { loadOutputServices } from "./output-host.ts";
+import type { OutputServices } from "./output.ts";
 
 /** omp's `Settings` for one session. Read only through the readers below. */
 export interface HostSettings {
@@ -88,6 +90,7 @@ export interface OmpHost {
 	readonly bashTimeoutLimits: HostTimeoutLimits;
 	readonly clampBashTimeout: (seconds: number | undefined, max: number) => number;
 	readonly autoBackgroundWaitMs: (threshold: number, timeoutMs: number | undefined) => number;
+	readonly output: OutputServices;
 }
 
 type Fn = (...args: never[]) => unknown;
@@ -330,5 +333,6 @@ export async function loadOmpHost(): Promise<OmpHost> {
 		bashTimeoutLimits,
 		clampBashTimeout: (seconds, max) => expect("clampTimeout()", clampTimeout("bash", seconds, max), number),
 		autoBackgroundWaitMs: (threshold, timeoutMs) => expect("resolveAutoBackgroundWaitMs()", autoWait(threshold, timeoutMs), number),
+		output: await loadOutputServices(root),
 	};
 }

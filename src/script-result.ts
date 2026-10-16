@@ -48,9 +48,9 @@ const deliverySchema = Type.Union([Type.Literal("pending"), Type.Literal("delive
 const outputFields = {
 	output: Type.String({
 		description:
-			"Bounded, terminal-safe tail of the child output with real newlines (tty sessions: the rendered screen). Print it with text(r.output) rather than printing the whole result object.",
+			"Bounded terminal-safe text with real newlines: process/poll tails, Brush final head/tail, or a rendered tty screen. Print it with text(r.output).",
 	}),
-	truncated: Type.Boolean({ description: "True when earlier output was (or may have been) dropped; the full stream is in log_path." }),
+	truncated: Type.Boolean({ description: "True when output was (or may have been) omitted; log_path names complete recovery only when available." }),
 	omitted_bytes: Type.Optional(Type.Number({ description: "Middle bytes dropped by the in-memory retention cap." })),
 	exit_code: Type.Optional(Type.Number({ description: "Exit code once the process has exited." })),
 	signal: Type.Optional(Type.String({ description: "Signal that terminated the process, if any." })),
@@ -60,13 +60,14 @@ const outputFields = {
 	timeoutSeconds: Type.Optional(Type.Number()),
 	timeoutNotice: Type.Optional(Type.String()),
 	delivery: Type.Optional(deliverySchema),
-	log_path: Type.Optional(Type.String({ description: "File containing the complete output stream." })),
+	log_path: Type.Optional(Type.String({ description: "Complete output recovery: process log file or successful Brush artifact:// URL. Absent for inline-only capture." })),
 	wall_time_seconds: Type.Number(),
 	terminal: Type.Optional(terminalSchema),
 };
 
 function wasTruncated(shape: ProcessResultDetails | KillResultDetails): boolean {
-	return shape.truncation?.truncated === true || shape.terminal?.history_may_be_truncated === true;
+	return shape.truncation?.truncated === true || shape.terminal?.history_may_be_truncated === true ||
+		shape.brush_output?.truncated === true;
 }
 
 export const processScriptResultSchema = Type.Object({

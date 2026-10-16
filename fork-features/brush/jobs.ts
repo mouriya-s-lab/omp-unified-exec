@@ -12,6 +12,7 @@ export interface HostJobFrame {
 }
 
 export interface HostJobProgress extends Partial<ProcessResultDetails> {
+	/** Host job snapshots use camelCase; model/session results retain exit_code. */
 	readonly exitCode?: number;
 }
 export interface HostJobRunContext {

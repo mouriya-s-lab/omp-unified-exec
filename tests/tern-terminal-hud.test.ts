@@ -101,7 +101,8 @@ function recentOutputText(node: HudNode): string {
 	return text;
 }
 
-function assertLogRow(node: HudNode, logPath: string): void {
+function assertLogRow(node: HudNode, logPath: string | undefined): void {
+	assert.ok(logPath, "tty sessions retain their complete process log");
 	const log = node.c?.find((child) => child.key === "log");
 	assert.deepEqual(log, {
 		k: "row",
