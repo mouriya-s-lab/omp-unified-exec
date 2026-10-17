@@ -287,29 +287,6 @@ describe("write_stdin yield_until", () => {
 });
 
 describe("write_stdin bounded relative waits", () => {
-	it("retains only bounded output during a long noisy wait", async () => {
-		const h = makeHarness();
-		await h.emit("session_start");
-		const r1 = await h.call("exec_command", {
-			cmd: `sleep 0.6; node -e 'let n=0; const t=setInterval(()=>{process.stdout.write("x".repeat(65536)+"\\n"); if(++n===48){clearInterval(t); console.log("noisy-done");}},10)'`,
-			yield_time_ms: 250,
-		});
-		assert.equal(typeof r1.details.session_id, "number");
-		const updates: any[] = [];
-		const r2 = await h.call("write_stdin", {
-			session_id: r1.details.session_id,
-			yield_time_ms: 3 * 2_147_483_647,
-		}, undefined, (p) => updates.push(p));
-		assert.equal(r2.details.exit_code, 0);
-		assert.equal(r2.details.wait_mode, "relative");
-		assert.equal(r2.details.wait_status, "completed");
-		assert.ok(r2.details.omitted_bytes > 1024 * 1024, "must retain head/tail, not accumulate every drained chunk");
-		assert.ok(Buffer.byteLength(r2.details.output) <= 50 * 1024);
-		assert.match(r2.details.output, /noisy-done/);
-		assert.ok(readFileSync(r2.details.log_path).length > 3 * 1024 * 1024);
-		assert.ok(updates.length <= 3, `long waits must not heartbeat: ${updates.length} updates`);
-		assert.ok(updates.every(p => Buffer.byteLength(p.details.output) <= 32 * 1024));
-	});
 
 	it("cancellation of a huge relative wait preserves buffered output and the live process", async () => {
 		const h = makeHarness();

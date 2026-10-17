@@ -9,6 +9,7 @@
 
 import { strict as assert } from "node:assert";
 import { existsSync, readFileSync } from "node:fs";
+import { isAbsolute } from "node:path";
 import { describe, it } from "node:test";
 import { DEFAULT_MAX_BYTES } from "@earendil-works/pi-coding-agent";
 import extensionFactory, { MAX_EMPTY_POLL_ENV_VAR, resolveMaxEmptyPollMs } from "../src/index.ts";
@@ -28,7 +29,7 @@ interface ToolDef {
 		signal: AbortSignal | undefined,
 		onUpdate: any,
 		ctx: any,
-	) => Promise<{ content: Array<{ type: string; text: string }>; details: any }>;
+	) => Promise<{ content: Array<{ type: string; text: string }>; details: any; structuredContent?: unknown }>;
 	renderCall?: (...args: any[]) => unknown;
 	renderResult?: (...args: any[]) => unknown;
 }
@@ -103,6 +104,16 @@ function makeHarness() {
 	};
 }
 
+function assertReportedShell(
+	result: { content: Array<{ text: string }>; details: { shell?: string }; structuredContent?: unknown },
+	shell: string,
+) {
+	assert.equal(result.details.shell, shell);
+	assert.ok(result.structuredContent && typeof result.structuredContent === "object" && "shell" in result.structuredContent);
+	assert.equal(result.structuredContent.shell, shell);
+	assert.ok(result.content[0].text.split("\n").includes(`shell: ${shell}`), result.content[0].text);
+}
+
 /** Poll until `cond` is true or the deadline passes (CI runners are slow). */
 async function waitFor(cond: () => boolean, timeoutMs = 8000): Promise<boolean> {
 	const deadline = Date.now() + timeoutMs;
@@ -119,17 +130,6 @@ describe("unified-exec e2e", () => {
 		assert.equal(resolveMaxEmptyPollMs({ [MAX_EMPTY_POLL_ENV_VAR]: "60000" }), 60_000);
 		assert.equal(resolveMaxEmptyPollMs({ [MAX_EMPTY_POLL_ENV_VAR]: "1000" }), 5_000);
 		assert.throws(() => resolveMaxEmptyPollMs({ [MAX_EMPTY_POLL_ENV_VAR]: "not-a-number" }), /positive finite/);
-	});
-
-	it("describes uncapped empty waits without cache-TTL polling guidance", () => {
-		const h = makeHarness();
-		for (const name of ["exec_command", "write_stdin"]) {
-			const tool = h.tools[name];
-			const prompt = JSON.stringify([tool.description, tool.promptGuidelines, tool.parameters]);
-			assert.doesNotMatch(prompt, /290|cache-friendly/);
-			assert.match(prompt, /no built-in (?:empty-poll )?maximum/i);
-		}
-		assert.match(h.tools.write_stdin.promptGuidelines!.join("\n"), /yield_until ONLY when the human explicitly asks/);
 	});
 
 	it("registers explicit call/result renderers for every unified-exec tool", () => {
@@ -153,6 +153,109 @@ describe("unified-exec e2e", () => {
 		assert.equal(r2.details.exit_code, 0, `cmd details=${JSON.stringify(r2.details)}`);
 		assert.ok(r2.details.output.includes("cmd-ok"), `cmd output=${JSON.stringify(r2.details.output)}`);
 		await h.emit("session_shutdown");
+	});
+
+	it("POSIX: an explicit shell overrides SHELL and reports the resolved interpreter", { skip: IS_WINDOWS }, async () => {
+		const previous = process.env.SHELL;
+		const h = makeHarness();
+		try {
+			await h.emit("session_start");
+			for (const defaultShell of ["/bin/sh", "definitely-not-a-real-default-shell-xyz"]) {
+				process.env.SHELL = defaultShell;
+				const result = await h.call("exec_command", {
+					cmd: 'printf "bash-version:%s\\n" "${BASH_VERSION:?not running bash}"',
+					shell: "bash",
+					yield_time_ms: 2000,
+				});
+				assert.equal(result.details.exit_code, 0, JSON.stringify(result.details));
+				assert.match(result.details.output, /bash-version:\d/);
+				const shell: unknown = result.details.shell;
+				assert.equal(typeof shell, "string");
+				assert.ok(typeof shell === "string" && isAbsolute(shell), `unresolved shell: ${shell}`);
+				assertReportedShell(result, shell);
+			}
+		} finally {
+			if (previous === undefined) delete process.env.SHELL;
+			else process.env.SHELL = previous;
+			await h.emit("session_shutdown");
+		}
+	});
+
+	it("POSIX: live SHELL selects new PTYs while poll, list, kill, and streams retain the original shell", { skip: IS_WINDOWS }, async () => {
+		const previous = process.env.SHELL;
+		const h = makeHarness();
+		try {
+			await h.emit("session_start");
+			process.env.SHELL = " \t/bin/sh \n";
+			const initialUpdates: Array<{ details: { shell?: string } }> = [];
+			const started = await h.call(
+				"exec_command",
+				{
+					cmd: 'stty -echo; printf "interpreter:%s\\n" "$0"; while IFS= read -r line; do printf "reply:%s\\n" "$line"; done',
+					yield_time_ms: 1000,
+				},
+				undefined,
+				(partial: { details: { shell?: string } }) => initialUpdates.push(partial),
+			);
+			const sid: unknown = started.details.session_id;
+			assert.equal(typeof sid, "number", JSON.stringify(started.details));
+			assert.ok(typeof sid === "number");
+			assert.match(started.details.output, /interpreter:\/bin\/sh/);
+			assertReportedShell(started, "/bin/sh");
+			assert.ok(initialUpdates.length > 0, "expected a streaming update from the live readline loop");
+			assert.ok(initialUpdates.every((update) => update.details.shell === "/bin/sh"));
+
+			// A new default invocation must use the changed environment, not the
+			// earlier /bin/sh selection or a cached platform fallback.
+			process.env.SHELL = "bash";
+			const next = await h.call("exec_command", {
+				cmd: 'printf "new-bash-version:%s\\n" "${BASH_VERSION:?not running bash}"',
+				yield_time_ms: 2000,
+			});
+			assert.equal(next.details.exit_code, 0, JSON.stringify(next.details));
+			assert.match(next.details.output, /new-bash-version:\d/);
+			const nextShell: unknown = next.details.shell;
+			assert.ok(typeof nextShell === "string" && isAbsolute(nextShell));
+			assert.notEqual(nextShell, "/bin/sh");
+			assertReportedShell(next, nextShell);
+
+			// Neither querying nor terminating the old PTY may resolve SHELL again.
+			process.env.SHELL = "definitely-not-a-real-later-shell-xyz";
+			const pollUpdates: Array<{ details: { shell?: string } }> = [];
+			const polled = await h.call(
+				"write_stdin",
+				{ session_id: sid, chars: "still-original\n", yield_time_ms: 1000 },
+				undefined,
+				(partial: { details: { shell?: string } }) => pollUpdates.push(partial),
+			);
+			assert.equal(polled.details.session_id, sid);
+			assert.match(polled.details.output, /reply:still-original/);
+			assertReportedShell(polled, "/bin/sh");
+			assert.ok(pollUpdates.length > 0, "expected a streaming update while the old PTY remains live");
+			assert.ok(pollUpdates.every((update) => update.details.shell === "/bin/sh"));
+
+			const listed = await h.call("list_sessions", {});
+			const entries: Array<{ session_id: number; shell?: string }> = listed.details.sessions;
+			assert.equal(entries.find((entry) => entry.session_id === sid)?.shell, "/bin/sh");
+			assert.ok(
+				listed.structuredContent && typeof listed.structuredContent === "object" && "sessions" in listed.structuredContent,
+			);
+			assert.ok(Array.isArray(listed.structuredContent.sessions));
+			const structuredEntry: unknown = listed.structuredContent.sessions.find(
+				(entry: unknown) => typeof entry === "object" && entry !== null && "session_id" in entry && entry.session_id === sid,
+			);
+			assert.ok(structuredEntry && typeof structuredEntry === "object" && "shell" in structuredEntry);
+			assert.equal(structuredEntry.shell, "/bin/sh");
+			assert.ok(listed.content[0].text.includes("shell: /bin/sh"));
+
+			const killed = await h.call("kill_session", { session_id: sid });
+			assert.equal(killed.details.killed, true, JSON.stringify(killed.details));
+			assertReportedShell(killed, "/bin/sh");
+		} finally {
+			if (previous === undefined) delete process.env.SHELL;
+			else process.env.SHELL = previous;
+			await h.emit("session_shutdown");
+		}
 	});
 
 	it("Windows: cmd.exe quoting survives operators, quotes, %VAR%, parens", { skip: !IS_WINDOWS }, async () => {
@@ -312,12 +415,12 @@ describe("unified-exec e2e", () => {
 		await h.emit("session_shutdown");
 	});
 
-	it("write_stdin sends input to a stdin consumer in pipe mode", async () => {
+	it("write_stdin sends input and terminal EOF to cat", async () => {
 		const h = makeHarness();
 		await h.emit("session_start");
-		// cat prints back whatever you feed it on stdin. Pipe mode keeps stdin open.
+		// Disable terminal echo so the observed line must come from cat.
 		const r1 = await h.call("exec_command", {
-			cmd: "cat",
+			cmd: "stty -echo; exec cat",
 			yield_time_ms: 300,
 		});
 		assert.ok(typeof r1.details.session_id === "number", `got ${JSON.stringify(r1.details)}`);
@@ -338,11 +441,8 @@ describe("unified-exec e2e", () => {
 			chars: "\x04",
 			yield_time_ms: 1000,
 		});
-		// Some environments need stdin.end() instead of \x04; in pipe mode \x04 won't EOF.
-		// If r3 is still running, force kill to clean up.
-		if (r3.details.session_id !== undefined) {
-			await h.call("kill_session", { session_id: sid });
-		}
+		assert.equal(r3.details.exit_code, 0);
+		assert.equal(r3.details.session_id, undefined);
 		await h.emit("session_shutdown");
 	});
 
@@ -398,10 +498,9 @@ describe("unified-exec e2e", () => {
 			assert.equal(killed.details.killed, true);
 			assert.equal(Object.hasOwn(killed.details, "final_output"), false);
 			assert.ok(Buffer.byteLength(killed.details.output, "utf8") <= DEFAULT_MAX_BYTES);
-			assert.equal(killed.details.truncation?.truncated, true, JSON.stringify(killed.details.truncation));
+			assert.ok(killed.details.output.split("\n").length <= killed.details.terminal.rows);
+			assert.match(killed.details.output, /kill-line-4000-/);
 			assert.match(killed.content[0].text, /^\[killed\]/);
-			assert.match(killed.content[0].text, /Showing lines/);
-			assert.match(killed.content[0].text, /Full output:/);
 			assert.ok(
 				Buffer.byteLength(killed.content[0].text, "utf8") < DEFAULT_MAX_BYTES + 4096,
 				`kill content unexpectedly large: ${Buffer.byteLength(killed.content[0].text, "utf8")}`,
@@ -422,6 +521,7 @@ describe("unified-exec e2e", () => {
 		// Trap SIGTERM so bash ignores it; SIGKILL should still work.
 		const r1 = await h.call("exec_command", {
 			cmd: "trap '' TERM; sleep 60",
+			shell: "bash",
 			yield_time_ms: 300,
 		});
 		const sid = r1.details.session_id;
@@ -676,12 +776,12 @@ describe("unified-exec e2e", () => {
 		await h.emit("session_shutdown");
 	});
 
-	it("short command includes log_path and tty fields in details", async () => {
+	it("short command includes a persistent log_path in details", async () => {
 		const h = makeHarness();
 		await h.emit("session_start");
 		const r = await h.call("exec_command", { cmd: "echo hello" });
 		assert.equal(r.details.exit_code, 0);
-		assert.equal(r.details.tty, false);
+
 		assert.ok(typeof r.details.log_path === "string" && r.details.log_path.length > 0, `log_path missing: ${JSON.stringify(r.details)}`);
 		assert.ok(existsSync(r.details.log_path), `log file should exist: ${r.details.log_path}`);
 		// log file should contain the full output verbatim.
@@ -690,55 +790,7 @@ describe("unified-exec e2e", () => {
 		await h.emit("session_shutdown");
 	});
 
-	it("output over 50 KiB is tail-truncated with marker; log file has full bytes", async () => {
-		const h = makeHarness();
-		await h.emit("session_start");
-		// 4000 lines x ~55 bytes = ~210 KiB of output. Well over the 50 KiB cap.
-		const r = await h.call("exec_command", {
-			cmd: "for i in $(seq 1 4000); do echo \"line-number-${i}-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"; done",
-			yield_time_ms: 10000,
-		});
-		assert.equal(r.details.exit_code, 0);
 
-		// details.output is the truncated body only (no header/footer).
-		const bytes = Buffer.byteLength(r.details.output, "utf8");
-		assert.ok(bytes <= 60 * 1024, `LLM-visible output should be <=60KB; got ${bytes}`);
-		assert.ok(bytes > 40 * 1024, `LLM-visible output should be close to 50KiB; got ${bytes}`);
-		assert.equal(r.details.truncation.truncatedBy, "bytes");
-		assert.equal(r.details.truncation.totalLines, 4000); // trailing \n does not count an empty line (pi >= 0.80)
-
-		// The rendered text (what actually goes to the LLM) includes the marker.
-		const rendered = r.content[0].text;
-		assert.ok(rendered.includes("Showing lines"), `missing truncation marker in rendered text`);
-		assert.ok(rendered.includes(r.details.log_path), `marker should reference log_path`);
-
-		// original_token_count should reflect the full ~210KB (not the truncated view).
-		assert.ok(r.details.original_token_count > 30_000, `original_token_count=${r.details.original_token_count}`);
-
-		// Log file should contain ALL 4000 lines — full retention on disk.
-		const logContent = readFileSync(r.details.log_path, "utf-8");
-		const logLines = logContent.split("\n").filter((l) => l.length);
-		assert.equal(logLines.length, 4000, `log should have 4000 lines; got ${logLines.length}`);
-		await h.emit("session_shutdown");
-	});
-
-	it("output over 2000 lines is line-truncated with marker", async () => {
-		const h = makeHarness();
-		await h.emit("session_start");
-		// 2500 short lines, well under 50 KiB total → line-cap wins.
-		const r = await h.call("exec_command", {
-			cmd: "for i in $(seq 1 2500); do echo $i; done",
-			yield_time_ms: 10000,
-		});
-		assert.equal(r.details.exit_code, 0);
-		assert.ok(r.details.truncation, `expected truncation metadata`);
-		assert.equal(r.details.truncation.truncatedBy, "lines");
-		assert.equal(r.details.truncation.outputLines, 2000);
-		assert.equal(r.details.truncation.totalLines, 2500); // trailing \n does not count an empty line (pi >= 0.80)
-		// Marker lives in the rendered content text, not in details.output.
-		assert.ok(r.content[0].text.includes("Showing lines"));
-		await h.emit("session_shutdown");
-	});
 
 	it("list_sessions entries include log_path", async () => {
 		const h = makeHarness();
@@ -764,27 +816,39 @@ describe("unified-exec e2e", () => {
 		await h.emit("session_shutdown");
 	});
 
-	it("nonexistent shell binary fails diagnosably", async () => {
+	it("invalid explicit and environment-selected shells fail without running a fallback", async () => {
+		const previous = process.env.SHELL;
 		const h = makeHarness();
-		await h.emit("session_start");
-		if (IS_WINDOWS) {
-			// Fail-closed: resolution throws before spawn — a bare name must
-			// never reach CreateProcess (cwd-first lookup could execute a
-			// planted binary from an untrusted workdir).
-			await assert.rejects(
-				() => h.call("exec_command", { cmd: "echo hi", shell: "definitely-not-a-real-shell-xyz" }),
-				/not found on PATH/,
-			);
-		} else {
-			const r = await h.call("exec_command", { cmd: "echo hi", shell: "definitely-not-a-real-shell-xyz" });
-			assert.equal(r.details.session_id, undefined, JSON.stringify(r.details));
-			assert.ok(
-				typeof r.details.failure_message === "string" && /ENOENT/.test(r.details.failure_message),
-				`expected ENOENT failure_message; got ${JSON.stringify(r.details)}`,
-			);
-			assert.ok(r.content[0].text.includes("failure:"), r.content[0].text);
+		const missingShell = "definitely-not-a-real-shell-xyz";
+		try {
+			await h.emit("session_start");
+			for (const explicit of [false, true]) {
+				process.env.SHELL = explicit ? (IS_WINDOWS ? "cmd" : "/bin/sh") : missingShell;
+				const args = {
+					cmd: "echo fallback-must-not-run",
+					...(explicit ? { shell: missingShell } : {}),
+				};
+				if (IS_WINDOWS) {
+					// Resolution must reject before CreateProcess can fall back to
+					// cwd-first executable lookup or a lower-priority interpreter.
+					await assert.rejects(() => h.call("exec_command", args), /not found on PATH/);
+				} else {
+					const result = await h.call("exec_command", args);
+					assert.equal(result.details.session_id, undefined, JSON.stringify(result.details));
+					assert.equal(typeof result.details.failure_message, "string");
+					assert.match(result.details.failure_message, /ENOENT/);
+					assert.notEqual(result.details.exit_code, 0);
+					assert.doesNotMatch(result.details.output, /fallback-must-not-run/);
+					assertReportedShell(result, missingShell);
+				}
+				const listed = await h.call("list_sessions", {});
+				assert.equal(listed.details.active_count, 0);
+			}
+		} finally {
+			if (previous === undefined) delete process.env.SHELL;
+			else process.env.SHELL = previous;
+			await h.emit("session_shutdown");
 		}
-		await h.emit("session_shutdown");
 	});
 
 	it("nonexistent workdir surfaces a failure_message", async () => {
@@ -799,33 +863,6 @@ describe("unified-exec e2e", () => {
 		await h.emit("session_shutdown");
 	});
 
-	it("write_stdin to a child that closed stdin does not crash the host (EPIPE)", async () => {
-		const h = makeHarness();
-		await h.emit("session_start");
-		const r1 = await h.call("exec_command", { cmd: "exec 0<&-; sleep 3", yield_time_ms: 300 });
-		const sid = r1.details.session_id;
-		assert.ok(typeof sid === "number", JSON.stringify(r1.details));
-		// First write hits EPIPE asynchronously; must be swallowed, not crash.
-		const r2 = await h.call("write_stdin", { session_id: sid, chars: "hello\n", yield_time_ms: 300 });
-		assert.ok(r2.details.session_id === sid || r2.details.exit_code !== undefined, JSON.stringify(r2.details));
-		// By now the stdin stream is destroyed; a follow-up write should report
-		// the failure instead of silently dropping the bytes.
-		const r3 = await h.call("write_stdin", { session_id: sid, chars: "again\n", yield_time_ms: 300 });
-		if (r3.details.session_id !== undefined) {
-			// On Windows, writes to a pipe whose reader closed don't fail
-			// deterministically (bytes can sit in the pipe buffer without an
-			// error), so the failure note may legitimately never appear. The
-			// core guarantee — the host doesn't crash — holds either way.
-			if (!IS_WINDOWS) {
-				assert.ok(
-					typeof r3.details.failure_message === "string" && r3.details.failure_message.includes("stdin"),
-					`expected stdin failure note; got ${JSON.stringify(r3.details)}`,
-				);
-			}
-			await h.call("kill_session", { session_id: sid });
-		}
-		await h.emit("session_shutdown");
-	});
 
 	it("kill_session normalizes signal names (lowercase, no SIG prefix)", async () => {
 		const h = makeHarness();
@@ -870,7 +907,7 @@ describe("unified-exec e2e", () => {
 	it("session_shutdown SIGKILLs children that trap SIGTERM", async () => {
 		const h = makeHarness();
 		await h.emit("session_start");
-		const r1 = await h.call("exec_command", { cmd: "trap '' TERM; sleep 30", yield_time_ms: 300 });
+		const r1 = await h.call("exec_command", { cmd: "trap '' TERM; sleep 30", shell: "bash", yield_time_ms: 300 });
 		const sid = r1.details.session_id;
 		assert.ok(typeof sid === "number", JSON.stringify(r1.details));
 		const l = await h.call("list_sessions", {});

@@ -44,24 +44,24 @@ const terminalSchema = Type.Union([
 			Type.Number({ description: "Leading output lines that scrolled off above the screen since the last call." }),
 		),
 		history_may_be_truncated: Type.Optional(Type.Literal(true)),
-	}, { description: "Running tty observation: unseen history followed by the current screen." }),
+	}, { description: "Running observation: unseen history followed by the current screen." }),
 	Type.Object({
 		...terminalGeometryFields,
 		retained_rows: Type.Number({ description: "Normal-screen physical rows retained at freeze, not total output rows." }),
 		history_may_be_truncated: Type.Boolean(),
-	}, { description: "Completed tty result: only the final active screen; recover retained history through terminal_url." }),
+	}, { description: "Completed result: only the final active screen; recover retained history through terminal_url." }),
 ]);
 
 const outputFields = {
 	output: Type.String({
 		description:
-			"Bounded, terminal-safe tail of the child output with real newlines (tty sessions: the rendered screen). Print it with text(r.output) rather than printing the whole result object.",
+			"Bounded, terminal-safe text of the session's rendered screen with real newlines. Print it with text(r.output) rather than printing the whole result object.",
 	}),
 	truncated: Type.Boolean({ description: "True when earlier output was (or may have been) dropped; the full stream is in log_path." }),
-	omitted_bytes: Type.Optional(Type.Number({ description: "Middle bytes dropped by the in-memory retention cap." })),
 	exit_code: Type.Optional(Type.Number({ description: "Exit code once the process has exited." })),
 	signal: Type.Optional(Type.String({ description: "Signal that terminated the process, if any." })),
 	failure_message: Type.Optional(Type.String()),
+	shell: Type.Optional(Type.String({ description: "Actual shell executable selected at process initialization." })),
 	log_path: Type.Optional(Type.String({ description: "File containing the complete output stream." })),
 	terminal_url: Type.Optional(Type.String({ description: "Non-consuming term:// terminal projection; readable after exit." })),
 	wall_time_seconds: Type.Number(),
@@ -93,10 +93,10 @@ export function processScriptResult(shape: ProcessResultDetails): ProcessScriptR
 		session_id: shape.session_id,
 		output: shape.output,
 		truncated: wasTruncated(shape),
-		omitted_bytes: shape.omitted_bytes || undefined,
 		exit_code: shape.exit_code,
 		signal: optionalMeta(shape.signal),
 		failure_message: optionalMeta(shape.failure_message),
+		shell: optionalMeta(shape.shell),
 		log_path: optionalMeta(shape.log_path),
 		terminal_url: shape.terminal_url,
 		wall_time_seconds: shape.wall_time_seconds,
@@ -129,10 +129,10 @@ export function killScriptResult(shape: KillResultDetails): KillScriptResult {
 		session_id: shape.session_id,
 		output: shape.output,
 		truncated: wasTruncated(shape),
-		omitted_bytes: shape.omitted_bytes || undefined,
 		exit_code: shape.exit_code,
 		signal: optionalMeta(shape.signal),
 		failure_message: optionalMeta(shape.failure_message),
+		shell: optionalMeta(shape.shell),
 		log_path: optionalMeta(shape.log_path),
 		terminal_url: shape.terminal_url,
 		wall_time_seconds: shape.wall_time_seconds,
@@ -194,7 +194,7 @@ export const listSessionsScriptResultSchema = Type.Object({
 			session_id: Type.Number(),
 			command: Type.String(),
 			cwd: Type.Optional(Type.String()),
-			tty: Type.Boolean(),
+			shell: Type.Optional(Type.String()),
 			pid: Type.Optional(Type.Number()),
 			elapsed_ms: Type.Number(),
 			running: Type.Boolean({ description: "False for sessions that just exited; they are removed after this listing." }),
@@ -217,7 +217,7 @@ export function listSessionsScriptResult(value: {
 		session_id: number;
 		command: string;
 		cwd?: string;
-		tty: boolean;
+		shell?: string;
 		pid?: number;
 		elapsed_ms: number;
 		running: boolean;
@@ -238,7 +238,7 @@ export function listSessionsScriptResult(value: {
 				session_id: s.session_id,
 				command: safeMeta(s.command),
 				cwd: optionalMeta(s.cwd),
-				tty: s.tty,
+				shell: optionalMeta(s.shell),
 				pid: s.pid,
 				elapsed_ms: s.elapsed_ms,
 				running: s.running,
