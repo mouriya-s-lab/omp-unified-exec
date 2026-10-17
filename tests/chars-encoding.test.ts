@@ -83,7 +83,7 @@ async function spawnCapture() {
 	const h = makeHarness();
 	await h.emit("session_start");
 	const r1 = await h.call("exec_command", {
-		cmd: `cat > '${out}'`,
+		cmd: `stty raw -echo; exec cat > '${out}'`,
 		yield_time_ms: 300,
 	});
 	assert.ok(typeof r1.details.session_id === "number", `expected session_id; got ${JSON.stringify(r1.details)}`);
@@ -187,7 +187,7 @@ describe("write_stdin chars encoding", () => {
 		const out = join(dir, "stdin.bin");
 		const h = makeHarness();
 		await h.emit("session_start");
-		const r1 = await h.call("exec_command", { cmd: `cat > '${out}'`, yield_time_ms: 300 });
+		const r1 = await h.call("exec_command", { cmd: `stty raw -echo; exec cat > '${out}'`, yield_time_ms: 300 });
 		const sid = r1.details.session_id as number;
 		const b64 = Buffer.from([0x1b, 0x03, 0x41, 0x0a, 0xc3, 0xa9]).toString("base64");
 		await h.call("write_stdin", { session_id: sid, chars_b64: b64, yield_time_ms: 250 });

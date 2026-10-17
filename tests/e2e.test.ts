@@ -312,12 +312,12 @@ describe("unified-exec e2e", () => {
 		await h.emit("session_shutdown");
 	});
 
-	it("write_stdin sends input to a stdin consumer in pipe mode", async () => {
+	it("write_stdin sends input and terminal EOF to cat", async () => {
 		const h = makeHarness();
 		await h.emit("session_start");
-		// cat prints back whatever you feed it on stdin. Pipe mode keeps stdin open.
+		// Disable terminal echo so the observed line must come from cat.
 		const r1 = await h.call("exec_command", {
-			cmd: "cat",
+			cmd: "stty -echo; exec cat",
 			yield_time_ms: 300,
 		});
 		assert.ok(typeof r1.details.session_id === "number", `got ${JSON.stringify(r1.details)}`);
@@ -338,11 +338,8 @@ describe("unified-exec e2e", () => {
 			chars: "\x04",
 			yield_time_ms: 1000,
 		});
-		// Some environments need stdin.end() instead of \x04; in pipe mode \x04 won't EOF.
-		// If r3 is still running, force kill to clean up.
-		if (r3.details.session_id !== undefined) {
-			await h.call("kill_session", { session_id: sid });
-		}
+		assert.equal(r3.details.exit_code, 0);
+		assert.equal(r3.details.session_id, undefined);
 		await h.emit("session_shutdown");
 	});
 
@@ -398,10 +395,9 @@ describe("unified-exec e2e", () => {
 			assert.equal(killed.details.killed, true);
 			assert.equal(Object.hasOwn(killed.details, "final_output"), false);
 			assert.ok(Buffer.byteLength(killed.details.output, "utf8") <= DEFAULT_MAX_BYTES);
-			assert.equal(killed.details.truncation?.truncated, true, JSON.stringify(killed.details.truncation));
+			assert.ok(killed.details.output.split("\n").length <= killed.details.terminal.rows);
+			assert.match(killed.details.output, /kill-line-4000-/);
 			assert.match(killed.content[0].text, /^\[killed\]/);
-			assert.match(killed.content[0].text, /Showing lines/);
-			assert.match(killed.content[0].text, /Full output:/);
 			assert.ok(
 				Buffer.byteLength(killed.content[0].text, "utf8") < DEFAULT_MAX_BYTES + 4096,
 				`kill content unexpectedly large: ${Buffer.byteLength(killed.content[0].text, "utf8")}`,
@@ -676,12 +672,12 @@ describe("unified-exec e2e", () => {
 		await h.emit("session_shutdown");
 	});
 
-	it("short command includes log_path and tty fields in details", async () => {
+	it("short command includes a persistent log_path in details", async () => {
 		const h = makeHarness();
 		await h.emit("session_start");
 		const r = await h.call("exec_command", { cmd: "echo hello" });
 		assert.equal(r.details.exit_code, 0);
-		assert.equal(r.details.tty, false);
+
 		assert.ok(typeof r.details.log_path === "string" && r.details.log_path.length > 0, `log_path missing: ${JSON.stringify(r.details)}`);
 		assert.ok(existsSync(r.details.log_path), `log file should exist: ${r.details.log_path}`);
 		// log file should contain the full output verbatim.
@@ -690,55 +686,7 @@ describe("unified-exec e2e", () => {
 		await h.emit("session_shutdown");
 	});
 
-	it("output over 50 KiB is tail-truncated with marker; log file has full bytes", async () => {
-		const h = makeHarness();
-		await h.emit("session_start");
-		// 4000 lines x ~55 bytes = ~210 KiB of output. Well over the 50 KiB cap.
-		const r = await h.call("exec_command", {
-			cmd: "for i in $(seq 1 4000); do echo \"line-number-${i}-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"; done",
-			yield_time_ms: 10000,
-		});
-		assert.equal(r.details.exit_code, 0);
 
-		// details.output is the truncated body only (no header/footer).
-		const bytes = Buffer.byteLength(r.details.output, "utf8");
-		assert.ok(bytes <= 60 * 1024, `LLM-visible output should be <=60KB; got ${bytes}`);
-		assert.ok(bytes > 40 * 1024, `LLM-visible output should be close to 50KiB; got ${bytes}`);
-		assert.equal(r.details.truncation.truncatedBy, "bytes");
-		assert.equal(r.details.truncation.totalLines, 4000); // trailing \n does not count an empty line (pi >= 0.80)
-
-		// The rendered text (what actually goes to the LLM) includes the marker.
-		const rendered = r.content[0].text;
-		assert.ok(rendered.includes("Showing lines"), `missing truncation marker in rendered text`);
-		assert.ok(rendered.includes(r.details.log_path), `marker should reference log_path`);
-
-		// original_token_count should reflect the full ~210KB (not the truncated view).
-		assert.ok(r.details.original_token_count > 30_000, `original_token_count=${r.details.original_token_count}`);
-
-		// Log file should contain ALL 4000 lines — full retention on disk.
-		const logContent = readFileSync(r.details.log_path, "utf-8");
-		const logLines = logContent.split("\n").filter((l) => l.length);
-		assert.equal(logLines.length, 4000, `log should have 4000 lines; got ${logLines.length}`);
-		await h.emit("session_shutdown");
-	});
-
-	it("output over 2000 lines is line-truncated with marker", async () => {
-		const h = makeHarness();
-		await h.emit("session_start");
-		// 2500 short lines, well under 50 KiB total → line-cap wins.
-		const r = await h.call("exec_command", {
-			cmd: "for i in $(seq 1 2500); do echo $i; done",
-			yield_time_ms: 10000,
-		});
-		assert.equal(r.details.exit_code, 0);
-		assert.ok(r.details.truncation, `expected truncation metadata`);
-		assert.equal(r.details.truncation.truncatedBy, "lines");
-		assert.equal(r.details.truncation.outputLines, 2000);
-		assert.equal(r.details.truncation.totalLines, 2500); // trailing \n does not count an empty line (pi >= 0.80)
-		// Marker lives in the rendered content text, not in details.output.
-		assert.ok(r.content[0].text.includes("Showing lines"));
-		await h.emit("session_shutdown");
-	});
 
 	it("list_sessions entries include log_path", async () => {
 		const h = makeHarness();
@@ -799,33 +747,6 @@ describe("unified-exec e2e", () => {
 		await h.emit("session_shutdown");
 	});
 
-	it("write_stdin to a child that closed stdin does not crash the host (EPIPE)", async () => {
-		const h = makeHarness();
-		await h.emit("session_start");
-		const r1 = await h.call("exec_command", { cmd: "exec 0<&-; sleep 3", yield_time_ms: 300 });
-		const sid = r1.details.session_id;
-		assert.ok(typeof sid === "number", JSON.stringify(r1.details));
-		// First write hits EPIPE asynchronously; must be swallowed, not crash.
-		const r2 = await h.call("write_stdin", { session_id: sid, chars: "hello\n", yield_time_ms: 300 });
-		assert.ok(r2.details.session_id === sid || r2.details.exit_code !== undefined, JSON.stringify(r2.details));
-		// By now the stdin stream is destroyed; a follow-up write should report
-		// the failure instead of silently dropping the bytes.
-		const r3 = await h.call("write_stdin", { session_id: sid, chars: "again\n", yield_time_ms: 300 });
-		if (r3.details.session_id !== undefined) {
-			// On Windows, writes to a pipe whose reader closed don't fail
-			// deterministically (bytes can sit in the pipe buffer without an
-			// error), so the failure note may legitimately never appear. The
-			// core guarantee — the host doesn't crash — holds either way.
-			if (!IS_WINDOWS) {
-				assert.ok(
-					typeof r3.details.failure_message === "string" && r3.details.failure_message.includes("stdin"),
-					`expected stdin failure note; got ${JSON.stringify(r3.details)}`,
-				);
-			}
-			await h.call("kill_session", { session_id: sid });
-		}
-		await h.emit("session_shutdown");
-	});
 
 	it("kill_session normalizes signal names (lowercase, no SIG prefix)", async () => {
 		const h = makeHarness();
