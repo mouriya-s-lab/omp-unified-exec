@@ -9,8 +9,9 @@ and tool reference, see [../README.md](../README.md).
   `fetch`, native ESM with `.ts` imports via
   [tsx](https://github.com/privatenumber/tsx)).
 - **Linux, macOS, or Windows.** On Windows, Git Bash is strongly
-  recommended (it's the default shell when on PATH; otherwise commands
-  fall back to `powershell`). Node PTY tests use the optional
+  recommended: with no `shell` argument, omp `shellPath` or `SHELL`, it is
+  the platform default when found, otherwise commands run in `powershell`
+  (see [Shell selection](../README.md#shell-selection)). Node PTY tests use the optional
   `@homebridge/node-pty-prebuilt-multiarch` ConPTY backend; Bun 1.4+ uses
   its native `Bun.Terminal` backend.
 - **pi** installed and runnable (`pi --version`). End users install with

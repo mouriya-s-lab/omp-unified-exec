@@ -61,6 +61,7 @@ const outputFields = {
 	exit_code: Type.Optional(Type.Number({ description: "Exit code once the process has exited." })),
 	signal: Type.Optional(Type.String({ description: "Signal that terminated the process, if any." })),
 	failure_message: Type.Optional(Type.String()),
+	shell: Type.Optional(Type.String({ description: "Actual shell executable selected at process initialization." })),
 	log_path: Type.Optional(Type.String({ description: "File containing the complete output stream." })),
 	terminal_url: Type.Optional(Type.String({ description: "Non-consuming term:// terminal projection; readable after exit." })),
 	wall_time_seconds: Type.Number(),
@@ -95,6 +96,7 @@ export function processScriptResult(shape: ProcessResultDetails): ProcessScriptR
 		exit_code: shape.exit_code,
 		signal: optionalMeta(shape.signal),
 		failure_message: optionalMeta(shape.failure_message),
+		shell: optionalMeta(shape.shell),
 		log_path: optionalMeta(shape.log_path),
 		terminal_url: shape.terminal_url,
 		wall_time_seconds: shape.wall_time_seconds,
@@ -130,6 +132,7 @@ export function killScriptResult(shape: KillResultDetails): KillScriptResult {
 		exit_code: shape.exit_code,
 		signal: optionalMeta(shape.signal),
 		failure_message: optionalMeta(shape.failure_message),
+		shell: optionalMeta(shape.shell),
 		log_path: optionalMeta(shape.log_path),
 		terminal_url: shape.terminal_url,
 		wall_time_seconds: shape.wall_time_seconds,
@@ -191,6 +194,7 @@ export const listSessionsScriptResultSchema = Type.Object({
 			session_id: Type.Number(),
 			command: Type.String(),
 			cwd: Type.Optional(Type.String()),
+			shell: Type.Optional(Type.String()),
 			pid: Type.Optional(Type.Number()),
 			elapsed_ms: Type.Number(),
 			running: Type.Boolean({ description: "False for sessions that just exited; they are removed after this listing." }),
@@ -213,6 +217,7 @@ export function listSessionsScriptResult(value: {
 		session_id: number;
 		command: string;
 		cwd?: string;
+		shell?: string;
 		pid?: number;
 		elapsed_ms: number;
 		running: boolean;
@@ -233,6 +238,7 @@ export function listSessionsScriptResult(value: {
 				session_id: s.session_id,
 				command: safeMeta(s.command),
 				cwd: optionalMeta(s.cwd),
+				shell: optionalMeta(s.shell),
 				pid: s.pid,
 				elapsed_ms: s.elapsed_ms,
 				running: s.running,
